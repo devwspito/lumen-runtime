@@ -19,7 +19,6 @@ podman build -f ops/container/Containerfile -t "${IMAGE}" .
 
 echo ""
 echo "==> Done: ${IMAGE}"
-echo "    Run: podman run -d --name lumen --systemd=always \\"
-echo "           --cap-drop ALL --cap-add NET_ADMIN --cap-add SYS_ADMIN --cap-add AUDIT_READ \\"
-echo "           --security-opt no-new-privileges --shm-size=1g -p 17517:7517 ${IMAGE}"
+echo "    Run: NAME=lumen HOST_PORT=17517 IMAGE=${IMAGE} ./ops/container/run-lumen.sh"
+echo "    (do NOT --cap-drop ALL / no container-wide no-new-privileges — breaks systemd PID1)"
 echo "    UI:  http://localhost:17517"

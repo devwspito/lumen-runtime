@@ -13,11 +13,16 @@
 python3 -m pip wheel . --no-deps -w dist/
 # the container
 podman build -f ops/container/Containerfile -t lumen-runtime:clean .
-# run it
-podman run -d --name lumen --systemd=always \
-  --cap-drop ALL --cap-add NET_ADMIN --cap-add SYS_ADMIN --cap-add AUDIT_READ \
-  --security-opt no-new-privileges --shm-size=1g -p 17517:7517 lumen-runtime:clean
+# run it (canonical launcher — correct caps + seccomp + securityfs)
+NAME=lumen HOST_PORT=17517 ./ops/container/run-lumen.sh
 ```
+
+**Run flags — critical:** do NOT `--cap-drop ALL` and do NOT use container-wide
+`--security-opt no-new-privileges`. systemd PID1 needs SETUID/SETGID to start the
+per-unit services (else every service dies with exit 216/GROUP); the hardened units
+set NoNewPrivileges PER-UNIT. Use `ops/container/run-lumen.sh` (or replicate its flags:
+`--cap-add NET_ADMIN,SYS_ADMIN,AUDIT_READ` + `seccomp=ops/container/seccomp/lumen.json`
++ `unmask=/sys/kernel/security` + `-v /sys/kernel/security:ro` + `--shm-size=1g`).
 
 ## What's where
 

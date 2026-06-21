@@ -173,6 +173,23 @@ RUN mkdir -p /var/lib/hermes/workspace /var/lib/hermes/browser-sessions && \
     chgrp hermes-work /var/lib/hermes/workspace /var/lib/hermes/browser-sessions && \
     chmod 2770 /var/lib/hermes/workspace /var/lib/hermes/browser-sessions
 
+# ── Pre-warm the curated MCP cache (sellable clean image: "download → works") ──
+# The MCP runtime spawns OFFLINE (launcher injects npx --prefer-offline) from
+# /var/lib/hermes/npm-cache (hermes-mcp-launcher.service Environment). A FRESH install
+# has an empty cache, so the SEEDED npx MCPs (ruflo, replicate) fail at boot with
+# "Connection closed" (the cage denies npm at runtime — C1 PASS-3). Warm the cache at
+# BUILD with the EXACT specs the seed runs (ops/.../seed/mcp-servers.json) so the full
+# dep tree is cached. /var/lib/hermes is volume-copied-up into the customer's fresh
+# volume on first boot → the seeded MCPs connect OFFLINE, out of the box, no grant.
+ENV npm_config_cache=/var/lib/hermes/npm-cache
+RUN mkdir -p /var/lib/hermes/npm-cache /var/lib/hermes/mcp-home /tmp/mcpwarm && \
+    cd /tmp/mcpwarm && npm init -y >/dev/null 2>&1 && \
+    HOME=/var/lib/hermes/mcp-home npm install --no-save --no-audit --no-fund \
+      ruflo@latest replicate-mcp 2>&1 | tail -2 ; \
+    cd / && rm -rf /tmp/mcpwarm && \
+    chown -R hermes:hermes-work /var/lib/hermes/npm-cache /var/lib/hermes/mcp-home && \
+    chmod -R g+rwX /var/lib/hermes/npm-cache /var/lib/hermes/mcp-home
+
 # ── enable the same service set the terminal variant runs ────────────────────
 # The individual enables populate hermes-workspace.target.wants/ (each service's
 # [Install] is WantedBy=hermes-workspace.target). Enabling the TARGET itself

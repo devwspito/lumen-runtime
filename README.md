@@ -28,16 +28,32 @@ podman build -f ops/container/Containerfile -t lumen-runtime:clean .
 
 ## Run
 
+Use the canonical launcher (correct caps + seccomp + securityfs):
+
 ```sh
-podman run -d --name lumen --systemd=always \
-  --cap-drop ALL --cap-add NET_ADMIN --cap-add SYS_ADMIN --cap-add AUDIT_READ \
-  --security-opt no-new-privileges --shm-size=1g -p 17517:7517 \
-  lumen-runtime:clean
+NAME=lumen HOST_PORT=17517 ./ops/container/run-lumen.sh
 # UI: http://localhost:17517
 ```
 
-`--systemd=always` is **required**: the daemon fail-closes via `_assert_confinement_active()`
-(it checks the netns/egress units are active). A plain entrypoint = silent loss of the cage.
+Or the equivalent raw command:
+
+```sh
+podman run -d --name lumen --systemd=always \
+  -p 127.0.0.1:17517:7517 \
+  --cap-add NET_ADMIN --cap-add SYS_ADMIN --cap-add AUDIT_READ \
+  --security-opt seccomp=ops/container/seccomp/lumen.json \
+  --security-opt unmask=/sys/kernel/security \
+  -v /sys/kernel/security:/sys/kernel/security:ro \
+  -v lumen-data:/var/lib/hermes \
+  --shm-size=1g \
+  lumen-runtime:clean
+```
+
+> ⚠️ Do **NOT** use `--cap-drop ALL` or container-wide `--security-opt no-new-privileges`:
+> systemd (PID1) needs SETUID/SETGID to start the per-unit services, and the hardened
+> units set `NoNewPrivileges` **per-unit** — a container-wide one breaks dbus/login setuid
+> and the boot fails (exit 216/GROUP). `--systemd=always` is required (the daemon
+> fail-closes via `_assert_confinement_active()` checking the netns/egress units).
 
 ## Layout
 
