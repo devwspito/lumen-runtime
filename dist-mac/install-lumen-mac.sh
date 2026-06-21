@@ -41,8 +41,16 @@ if ! command -v podman >/dev/null 2>&1; then
 fi
 
 if ! podman machine inspect lumen-machine >/dev/null 2>&1; then
-  say "Creating podman machine (4 CPU / 8GB / 30GB) — Lumen needs room for the daemon + chromium + MCP…"
-  podman machine init lumen-machine --cpus 4 --memory 8192 --disk-size 30
+  say "Creating podman machine (4 CPU / 8GB / 30GB, ROOTFUL — the cage needs root in the VM)…"
+  podman machine init lumen-machine --rootful --cpus 4 --memory 8192 --disk-size 30
+fi
+# The cage (cgroup memory.pressure mount, netns, nftables, securityfs) needs ROOT in the
+# VM. A rootless machine fails hermes-runtime.service with 226/NAMESPACE ("Permission
+# denied" mounting cgroup memory.pressure). Force rootful.
+if ! podman machine inspect lumen-machine --format '{{.Rootful}}' 2>/dev/null | grep -qi true; then
+  say "Switching the podman machine to ROOTFUL (required by the cage)…"
+  podman machine stop lumen-machine 2>/dev/null || true
+  podman machine set --rootful lumen-machine
 fi
 if ! podman machine inspect lumen-machine --format '{{.State}}' 2>/dev/null | grep -qi running; then
   say "Starting podman machine…"
@@ -56,6 +64,8 @@ if [ -n "${LUMEN_IMAGE:-}" ]; then
   echo "   (auth: podman login ghcr.io -u <your-github-user>  then re-run)"
   podman pull "$LUMEN_IMAGE"
   podman tag "$LUMEN_IMAGE" "$LOCAL_TAG"
+elif podman image exists "$LOCAL_TAG"; then
+  say "Image $LOCAL_TAG already present — skipping build."
 else
   # The wheel is built INSIDE the container (Containerfile), so no host python is needed —
   # this avoids the old macOS system python (3.9) mis-building the wheel as UNKNOWN-0.0.0.
