@@ -6,7 +6,8 @@
 # systemd + caps + seccomp the cage needs (Docker Desktop's systemd story is fiddly).
 #
 #   1) Installs podman (via Homebrew) if missing + starts a podman machine.
-#   2) Pulls the Lumen image from the private registry (you must `podman login` first).
+#   2) BUILDS the Lumen image from this repo (self-contained; no registry/login).
+#      Override with LUMEN_IMAGE=<ref> to pull a prebuilt image instead.
 #   3) Runs it with the correct flags (NO --cap-drop ALL — that breaks systemd PID1).
 #   4) Prints the ready-to-open URL WITH the bootstrap token (?k=...).
 #
@@ -49,11 +50,21 @@ if ! podman machine inspect lumen-machine --format '{{.State}}' 2>/dev/null | gr
 fi
 podman system connection default lumen-machine 2>/dev/null || true
 
-# ── 2. image ─────────────────────────────────────────────────────────────────
-say "Pulling Lumen image: $IMAGE_REF"
-echo "   (if this fails with auth: run  podman login ghcr.io -u <your-github-user>  then re-run)"
-podman pull "$IMAGE_REF"
-podman tag "$IMAGE_REF" "$LOCAL_TAG"
+# ── 2. image: BUILD from source (default, self-contained) OR pull (if LUMEN_IMAGE) ─
+if [ -n "${LUMEN_IMAGE:-}" ]; then
+  say "Pulling prebuilt image: $LUMEN_IMAGE"
+  echo "   (auth: podman login ghcr.io -u <your-github-user>  then re-run)"
+  podman pull "$LUMEN_IMAGE"
+  podman tag "$LUMEN_IMAGE" "$LOCAL_TAG"
+else
+  command -v python3 >/dev/null 2>&1 || die "python3 needed to build the wheel — 'brew install python' then re-run."
+  say "Building Lumen from source (one-time, ~15-20 min — pulls the Playwright base + npm + pip)…"
+  ( cd "$HERE" \
+      && rm -rf build dist src/*.egg-info \
+      && python3 -m pip wheel . --no-deps -w dist/ \
+      && podman build -f ops/container/Containerfile -t "$LOCAL_TAG" . ) \
+    || die "build failed — see the output above."
+fi
 
 # ── 3. run (canonical flags) ─────────────────────────────────────────────────
 say "Starting Lumen…"

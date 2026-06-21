@@ -5,12 +5,9 @@ runs inside a **podman machine** (a tiny Linux VM) — podman supports the syste
 capabilities + seccomp the cage needs.
 
 ## Prerequisites
-- macOS on **Apple Silicon** (arm64). The published image is arm64.
+- macOS on **Apple Silicon** (arm64).
 - **Homebrew** (https://brew.sh). The installer installs podman via brew if missing.
-- Access to the private image. Log in once:
-  ```sh
-  podman login ghcr.io -u <your-github-user>      # paste a GitHub token with read:packages
-  ```
+- **python3** (`brew install python`) — used to build the wheel.
 
 ## Install + run (one command)
 ```sh
@@ -18,8 +15,10 @@ git clone https://github.com/devwspito/lumen-runtime.git
 cd lumen-runtime
 ./dist-mac/install-lumen-mac.sh
 ```
-It will: install/start a podman machine (4 CPU / 8 GB), pull the image, run Lumen with
-the correct flags, wait for boot, and print a ready-to-open URL **with the auth token**:
+It will: install/start a podman machine (4 CPU / 8 GB), **build the Lumen image from this
+repo** (one-time, ~15-20 min — pulls the public Playwright base + npm + pip; nothing
+private leaves your machine), run Lumen with the correct flags, wait for boot, and print
+a ready-to-open URL **with the auth token**:
 ```
 http://localhost:17517/?k=<bootstrap-token>
 ```
