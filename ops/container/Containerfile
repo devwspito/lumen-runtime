@@ -158,9 +158,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends socat \
 # arm64 DGX and amd64. Pinned for reproducible bakes; -b /usr/bin is the path
 # trivy_available() probes (trivy_cve_scanner.py:22 _TRIVY_BIN="/usr/bin/trivy").
 ARG TRIVY_VERSION=v0.58.1
-RUN curl -LsSf https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-      | sh -s -- -b /usr/bin "${TRIVY_VERSION}" \
-    && /usr/bin/trivy --version
+# Best-effort: if the install fails (network/checksum/extract), the build STILL
+# succeeds and trivy_available()→False → the Security Center uses its heuristic CVE
+# fallback (graceful, identical to before). Never let trivy break the image bake.
+RUN ( curl -LsSf https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+        | sh -s -- -b /usr/bin "${TRIVY_VERSION}" \
+      && /usr/bin/trivy --version ) \
+    || echo "WARN: trivy install failed — Security Center falls back to heuristic CVE scan"
 # Pre-warm the trivy vuln DB so `trivy fs` works OFFLINE under the cage (runtime
 # egress is denied). Without a baked DB trivy would fetch at scan time, fail, and
 # degrade to []  — swapping one no-op for another. TRIVY_CACHE_DIR is the cache the
