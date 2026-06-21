@@ -4996,12 +4996,48 @@ async def _mcp_connect(
         Transport,
         TrustLevel,
     )
+    # Auto-wire the owner's ACTIVE LLM provider into MCPs that declare OpenAI-compatible
+    # BYOK keys but leave them empty (e.g. ruflo's swarm: env has OPENAI_BASE_URL="" /
+    # OPENAI_API_KEY=""). The MCP child is spawned by the launcher and does NOT inherit
+    # the daemon's env, so resolve the active provider here and fill the empties → the
+    # MCP swarm uses the SAME LLM the owner configured for Lumen. "Download → it works".
+    # Only FILLS declared-but-empty keys (never adds new ones → no env injection surface).
+    resolved_env = dict(env or {})
+    if ("OPENAI_BASE_URL" in resolved_env or "OPENAI_API_KEY" in resolved_env) and (
+        not resolved_env.get("OPENAI_BASE_URL") or not resolved_env.get("OPENAI_API_KEY")
+    ):
+        try:
+            import os as _os_pv  # noqa: PLC0415
+            from pathlib import Path as _Path_pv  # noqa: PLC0415
+
+            from hermes.runtime.active_provider import (  # noqa: PLC0415
+                ActiveProviderService,
+            )
+
+            _db = _Path_pv(
+                _os_pv.environ.get("HERMES_SHELL_DB", "/var/lib/hermes/shell-state.db")
+            )
+            _mc = ActiveProviderService(db_path=_db).resolve()
+            if _mc is not None:
+                if not resolved_env.get("OPENAI_BASE_URL") and getattr(_mc, "base_url", None):
+                    resolved_env["OPENAI_BASE_URL"] = str(_mc.base_url)
+                if not resolved_env.get("OPENAI_API_KEY") and getattr(_mc, "api_key", None):
+                    resolved_env["OPENAI_API_KEY"] = str(_mc.api_key)
+                logger.info(
+                    "hermes.dbus.mcp_provider_autowired server=%s filled=%s",
+                    server_id,
+                    [k for k in ("OPENAI_BASE_URL", "OPENAI_API_KEY") if resolved_env.get(k)],
+                )
+        except Exception as _e_pv:  # noqa: BLE001
+            logger.warning(
+                "hermes.dbus.mcp_provider_autowire_failed server=%s: %s", server_id, _e_pv
+            )
     # USER_ADDED = la postura más restrictiva (DEFAULT_DENY + HITL en cada
     # tool-call): el broker ESCALA al operador, no recorta (regla de oro).
     return await manager.connect(
         server_id=McpServerId(server_id),
         slug=ServerSlug(server_id),
-        transport=Transport.stdio(argv, env=env or {}),
+        transport=Transport.stdio(argv, env=resolved_env),
         trust_level=TrustLevel.USER_ADDED,
     )
 
