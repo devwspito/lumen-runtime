@@ -56,7 +56,10 @@ if ! podman machine inspect lumen-machine --format '{{.State}}' 2>/dev/null | gr
   say "Starting podman machine…"
   podman machine start lumen-machine
 fi
-podman system connection default lumen-machine 2>/dev/null || true
+# Make the ROOTFUL connection the default (set --rootful already does this; be explicit
+# so we never run the container rootless → 226/NAMESPACE).
+podman system connection default lumen-machine-root 2>/dev/null \
+  || podman system connection default lumen-machine 2>/dev/null || true
 
 # ── 2. image: BUILD from source (default, self-contained) OR pull (if LUMEN_IMAGE) ─
 if [ -n "${LUMEN_IMAGE:-}" ]; then
