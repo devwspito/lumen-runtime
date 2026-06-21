@@ -233,6 +233,14 @@ RUN systemctl enable \
       hermes-audit-tail.service \
       hermes-workspace.target 2>&1 | tail -3 || true
 
+# podman-machine (macOS) compat: systemd's per-unit MemoryPressureWatch tries to bind the
+# unit's cgroup memory.pressure into its namespace; in the Mac podman VM's cgroup view this
+# fails "Permission denied" → 226/NAMESPACE → every hardened unit (hermes-runtime, the
+# netns, …) crash-loops, even rootful. It is a minor memory-pressure NOTIFICATION feature,
+# NOT part of the cage (netns/nftables/Landlock/seccomp/uid-split are independent). Disable
+# it globally so the units' mount-namespace setup succeeds. Linux deploys are unaffected.
+COPY ops/container/system.conf.d/10-no-mempressure.conf /etc/systemd/system.conf.d/
+
 EXPOSE 7517
 STOPSIGNAL SIGRTMIN+3
 HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \

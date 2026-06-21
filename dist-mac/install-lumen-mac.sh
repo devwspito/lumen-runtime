@@ -86,6 +86,7 @@ podman run -d --name "$NAME" --systemd=always \
   --security-opt "seccomp=${SECCOMP}" \
   --security-opt unmask=/sys/kernel/security \
   -v /sys/kernel/security:/sys/kernel/security:ro \
+  -v "${HERE}/ops/container/system.conf.d/10-no-mempressure.conf":/etc/systemd/system.conf.d/10-no-mempressure.conf:ro \
   -v lumen-data:/var/lib/hermes \
   --shm-size=1g \
   "$LOCAL_TAG"
