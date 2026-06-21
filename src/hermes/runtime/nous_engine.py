@@ -436,6 +436,7 @@ def _build_tool_call_emitter(
     chunk_sink: Any,
     task_id: "UUID",
     loop: "asyncio.AbstractEventLoop",
+    accumulator: "list[dict[str, Any]] | None" = None,
 ) -> "Callable[[str, dict[str, Any]], None]":
     """Return a sync callable that emits a tool_call StreamFrame from the executor thread.
 
@@ -445,11 +446,18 @@ def _build_tool_call_emitter(
 
     Bridge pattern is identical to _build_stream_callback: run_coroutine_threadsafe
     bridges from the executor thread to the asyncio event loop.
+
+    If `accumulator` is given, each descriptor is appended to it (in execution
+    order) so the engine can persist the tool steps on CycleOutput.tool_steps —
+    enabling a conversation reload to reconstruct the tool-step cards (the live
+    frames alone are not persisted).
     """
     from hermes.tasks.control_plane.domain.ports import StreamChunkKind, TaskStreamChunk  # noqa: PLC0415
 
     def _emitter(function_name: str, function_args: dict[str, Any]) -> None:
         descriptor = _describe_tool_call(function_name, function_args)
+        if accumulator is not None:
+            accumulator.append(descriptor)
         chunk = TaskStreamChunk(kind=StreamChunkKind.TOOL_CALL, tool_call=descriptor)
         try:
             fut = asyncio.run_coroutine_threadsafe(
@@ -1804,6 +1812,10 @@ class NousReasoningEngine:
         _task_id_for_stream = _meta.get("task_id_for_stream")
         _conv_id_for_dbus: str = (_meta.get("conversation_id") or "").strip()
         _emit_counter: list[int] = [0]  # local counter — harmless, unused by orchestrator
+        # Per-cycle accumulator of tool-call descriptors (same shape as the live
+        # TOOL_CALL frame), filled by the emitter and surfaced on CycleOutput.tool_steps
+        # so the orchestrator can persist them for conversation reloads.
+        _tool_steps_acc: list[dict[str, Any]] = []
         _stream_cb = None
         if _chunk_sink is not None and _task_id_for_stream is not None:
             _stream_cb = _build_stream_callback(
@@ -1813,7 +1825,9 @@ class NousReasoningEngine:
             )
             # Build the tool_call frame emitter from the same chunk_sink/task_id/loop.
             self._chunk_sink_emitter: "Callable[[str, dict[str, Any]], None] | None" = (
-                _build_tool_call_emitter(_chunk_sink, _task_id_for_stream, loop)
+                _build_tool_call_emitter(
+                    _chunk_sink, _task_id_for_stream, loop, accumulator=_tool_steps_acc
+                )
             )
         else:
             self._chunk_sink_emitter = None
@@ -1877,7 +1891,10 @@ class NousReasoningEngine:
                 except Exception:  # noqa: BLE001
                     logger.debug("hermes.nous_engine.dbus_stream_end_failed conv=%s", _conv_id_for_dbus)
 
-        output = self._map_result_to_output(result, mapping, model_config.model, agent)
+        output = self._map_result_to_output(
+            result, mapping, model_config.model, agent,
+            tool_steps=tuple(_tool_steps_acc),
+        )
 
         # Post-run: compute delta and deterministically attach MEDIA tokens for any
         # files the agent created/modified that the LLM didn't mention in its reply.
@@ -2291,6 +2308,22 @@ class NousReasoningEngine:
             os.environ["HERMES_API_TIMEOUT"] = str(model_config.timeout_seconds)
         if model_config.max_iterations != 8:
             _extra_knobs["max_iterations"] = model_config.max_iterations
+        # Reasoning models served WITHOUT a vLLM reasoning parser (Qwen3.x,
+        # DeepSeek-R1, GLM Thinking on a plain OpenAI-compat endpoint) emit CoT
+        # as BARE prose in message.content with no <think> tags, which neither
+        # Nous strip_think_blocks nor StreamingThinkScrubber can catch. Tell the
+        # chat template not to think. chat_template_kwargs only shapes the
+        # rendered prompt; the OpenAI tools/tool_calls schema is untouched, so
+        # tool-calling is unaffected. Mirrors skill_synthesis.py.
+        _extra_body: dict[str, Any] = {}
+        _op_extra = model_config.extra.get("extra_body") if model_config.extra else None
+        if isinstance(_op_extra, dict):
+            _extra_body.update(_op_extra)
+        _ctk = _extra_body.setdefault("chat_template_kwargs", {})
+        if isinstance(_ctk, dict) and "enable_thinking" not in _ctk:
+            _ctk["enable_thinking"] = False
+        if _extra_body:
+            _extra_knobs["request_overrides"] = {"extra_body": _extra_body}
         agent = GovernedAIAgent(
             model=bare_model,
             api_key=rt.get("api_key"),
@@ -2320,12 +2353,16 @@ class NousReasoningEngine:
         mapping: dict[str, str],
         model: str,
         agent: GovernedAIAgent,
+        tool_steps: "tuple[dict[str, Any], ...] | None" = None,
     ) -> CycleOutput:
         """Mapea el dict de run_conversation → CycleOutput.
 
         F2: extrae proposals PENDING_APPROVAL desde agent._pending_proposals.
         Solo PENDING entran en tool_call_proposals — EXECUTED/REJECTED ya
         fueron resueltos in-loop y no se re-surfacean.
+
+        tool_steps: descriptores de las tool-calls emitidas en el ciclo (orden de
+        ejecución), para persistirlos y reconstruir las tarjetas al recargar.
         """
         raw_narrative = result.get("final_response") or ""
         narrative_safe = str(raw_narrative).strip()
@@ -2358,6 +2395,7 @@ class NousReasoningEngine:
             rejected_by_policy=(),
             usage=TokenUsage(model=model),
             read_external_content=agent._read_external_content,
+            tool_steps=tuple(tool_steps or ()),
         )
 
 

@@ -1140,12 +1140,25 @@ class DbusRuntimeServiceWiring:
                 SQLitePolicyRepo,
                 SQLiteScanRepo,
             )
+            from hermes.security_center.infrastructure.trivy_cve_scanner import (  # noqa: PLC0415
+                TriviaCveScanner,
+                trivy_available,
+            )
         except ImportError:
             logger.warning(
                 "hermes.dbus.security_center_unavailable — scan es no-op "
                 "(instalar hermes.security_center para habilitar)"
             )
             return None
+        # Slot CVE: usa Trivy real cuando el binario está horneado (/usr/bin/trivy),
+        # si no, el fallback heurístico (que solo deja la nota "trivy ausente").
+        # Ambos comparten name="cve": NUNCA meter los dos en la lista (doble conteo)
+        # — se elige exactamente uno aquí. Esta composición SÍ tolera Trivy (120 s):
+        # _run_scan_sync la corre en un HILO con loop propio cuando el loop del
+        # daemon gira, y TriviaCveScanner autoaplica su propio wait_for(120 s)
+        # devolviendo [] al expirar. (El gate síncrono inline de composition.py NO
+        # debe llevar Trivy: ahí se await-ea en el loop del daemon.)
+        cve_scanner = TriviaCveScanner() if trivy_available() else HeuristicFallbackScanner()
         self._scan_service = ScanService(
             # INVARIANTE (load-bearing): _run_scan_sync corre el scan en un HILO
             # aparte con su PROPIO loop cuando el loop del daemon ya gira (ver
@@ -1153,12 +1166,11 @@ class DbusRuntimeServiceWiring:
             # ACOTADA (fetch + análisis estático del artefacto publicado; HTTP
             # timeout 20 s, descarga topada). Es el scanner que cierra el agujero
             # C2 (el scan dejaba pasar 'npx -y evil-data-stealer-mcp' con score
-            # casi-PASS porque nadie miraba el contenido). Los otros cuatro siguen
-            # siendo puros/CPU-local. NO añadir aquí Trivy (120 s) sin moverlo al
-            # camino async — su timeout es demasiado largo para el hilo del gate.
+            # casi-PASS porque nadie miraba el contenido). Los otros siguen siendo
+            # puros/CPU-local.
             scanners=[
                 PackageContentScanner(),
-                HeuristicFallbackScanner(),
+                cve_scanner,
                 ProvenanceScanner(),
                 McpToolLinter(),
                 SkillSignatureCheck(),
@@ -5254,6 +5266,47 @@ async def reconnect_persisted_mcp_servers(manager) -> None:
             logger.warning(
                 "hermes.dbus.mcp_reconnect_failed server=%s: %s", sid, exc
             )
+
+
+async def reconnect_byok_empty_openai_mcp_servers(manager) -> None:
+    """Re-wire MCP servers that declare OpenAI-compatible BYOK keys but stored them
+    EMPTY (e.g. ruflo: OPENAI_BASE_URL=""/OPENAI_API_KEY="").
+
+    Called after the owner adds/activates an LLM provider. Such servers connected
+    at BOOT before any provider existed, so _mcp_connect's auto-wire left the keys
+    empty. We force a reconnect (disconnect, then _mcp_connect) ONLY for these
+    entries so the auto-wire now fills them from the active provider. We do NOT
+    reconnect every server, and we never persist the filled keys back to config
+    (they stay empty in mcp-servers.json; only the live process gets them).
+    """
+    if manager is None:
+        return
+    entries = _load_mcp_config()
+    if not entries:
+        return
+    for entry in entries:
+        stored_env: dict[str, str] = entry.get("env") or {}
+        declares_openai = ("OPENAI_BASE_URL" in stored_env or "OPENAI_API_KEY" in stored_env)
+        is_empty = (not stored_env.get("OPENAI_BASE_URL") or not stored_env.get("OPENAI_API_KEY"))
+        if not (declares_openai and is_empty):
+            continue  # only the BYOK-empty OpenAI-compat servers
+        sid = entry["server_id"]
+        argv = [str(a) for a in (entry.get("argv") or [])]
+        runner = argv[0].rsplit("/", 1)[-1] if argv else ""
+        # Same C2 gate as boot reconnect: never re-spawn an argv the scanner can't analyze.
+        if not argv or runner not in _MCP_ALLOWED_RUNNERS or not _scanner_can_analyze_argv(argv):
+            logger.warning(
+                "hermes.dbus.mcp_byok_rewire_skipped server=%s runner=%s (gate C2)", sid, runner,
+            )
+            continue
+        try:
+            await manager.disconnect(_mcp_id(sid))  # idempotent; defeats connect() idempotency
+            server = await _mcp_connect(manager, sid, argv, env=stored_env)
+            logger.info(
+                "hermes.dbus.mcp_byok_rewired server=%s tools=%d", sid, len(server.tools),
+            )
+        except Exception as exc:  # noqa: BLE001 — fail-soft per server
+            logger.warning("hermes.dbus.mcp_byok_rewire_failed server=%s: %s", sid, exc)
 
 
 # ---------------------------------------------------------------------------

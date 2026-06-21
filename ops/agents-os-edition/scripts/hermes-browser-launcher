@@ -487,17 +487,34 @@ def _ensure_session_dir(rw_path: str) -> None:
     # The parent (browser-sessions) is setgid 2770 hermes:hermes-work, so the new
     # dir inherits group hermes-work; chmod 2770 then grants the jailed browser
     # (User=hermes-sandbox ∈ hermes-work) group read+write on its own profile.
-    # chown to hermes is BEST-EFFORT: this root service drops CAP_CHOWN (least
-    # privilege), so the dir stays root:hermes-work when CAP_CHOWN is absent — the
-    # group write bit still lets the browser write. Never fail a launch over the
-    # cosmetic owner. root created the dir, so chmod always succeeds.
+    # BOTH chown AND chmod are BEST-EFFORT: this root service drops CAP_CHOWN AND
+    # CAP_FOWNER (least privilege — CapabilityBoundingSet=CAP_NET_ADMIN
+    # CAP_SYS_ADMIN CAP_SYS_RESOURCE only). The `exec-browse` dir is PRE-CREATED by
+    # tmpfiles (hermes.conf: `d /var/lib/hermes/browser-sessions/exec-browse 2770
+    # hermes hermes-work`) OWNED BY uid hermes(880), NOT root — so a root process
+    # WITHOUT CAP_FOWNER cannot chmod it (chmod requires owner-match OR CAP_FOWNER)
+    # and chown fails the same way without CAP_CHOWN. The dir already has the
+    # correct 2770 hermes:hermes-work from tmpfiles, so both calls are redundant
+    # there; an UNGUARDED chmod raised EPERM, killed the forked child before
+    # execvpe(systemd-run), so Chromium NEVER launched, CDP 9333 never bound, and
+    # the daemon timed out after 25s ("headless fallback blocked by seatbelt").
+    # For a FRESH teaching-* dir the root creator OWNS it → the chmod succeeds and
+    # grants the missing group-write bit (setgid parent gives gid hermes-work +
+    # the setgid bit, but umask strips group-write from the base 0755). Never fail
+    # a launch over a cosmetic owner/mode the kernel won't let this service set.
     try:
         uid = pwd.getpwnam("hermes").pw_uid
         gid = grp.getgrnam("hermes-work").gr_gid
         os.chown(rw_path, uid, gid)
     except (KeyError, PermissionError):
         logger.warning("launcher.session_dir_chown_skipped path=%s", rw_path)
-    os.chmod(rw_path, 0o2770)
+    try:
+        os.chmod(rw_path, 0o2770)
+    except PermissionError:
+        # Pre-existing dir we don't own + no CAP_FOWNER: it is already 2770
+        # hermes:hermes-work from tmpfiles, so the group-write the browser needs is
+        # present. Tolerate — do NOT crash the launch (the bug that blocked browse).
+        logger.warning("launcher.session_dir_chmod_skipped path=%s", rw_path)
 
 
 def _launch(session_name: str, domains_whitelist: list[str]) -> None:

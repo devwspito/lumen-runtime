@@ -262,15 +262,49 @@ export async function loadConversation(convId) {
   if (messages.length === 0) {
     showWelcome(bodyEl);
   } else {
+    // Accumulate consecutive role='tool' rows into a single collapsible
+    // tool-summary-group rendered just before the assistant bubble that
+    // follows — matching the live attachLiveStream layout.
+    let pendingToolGroup = null;
+    let pendingToolCount = 0;
+    const flushToolGroup = () => {
+      if (pendingToolGroup && pendingToolCount > 0) {
+        pendingToolGroup.labelSpan.innerHTML =
+          `<span class="tool-summary-group__emoji" aria-hidden="true">${Icon.check}</span>` +
+          `<span class="tool-summary-group__action">${escapeText(t('chat.toolsUsed', { n: pendingToolCount, plural: pendingToolCount > 1 ? 's' : '' }))}</span>`;
+        bodyEl.appendChild(pendingToolGroup.el);
+      }
+      pendingToolGroup = null;
+      pendingToolCount = 0;
+    };
     messages.forEach(msg => {
       if (msg.role === 'user') {
+        flushToolGroup();
         bodyEl.appendChild(createUserBubble(msg.content));
+      } else if (msg.role === 'tool') {
+        let descriptor;
+        try {
+          descriptor = typeof msg.content === 'string' ? JSON.parse(msg.content) : (msg.tool_call ?? msg.content);
+        } catch {
+          descriptor = { tool: 'herramienta', label: String(msg.content ?? ''), target: '' };
+        }
+        const { icon, human, target } = toolLabel(descriptor);
+        if (!pendingToolGroup) pendingToolGroup = createToolSummaryGroup();
+        pendingToolCount += 1;
+        const stepEl = document.createElement('div');
+        stepEl.className = 'tool-step-item';
+        stepEl.innerHTML = `<span class="tool-step-item__emoji" aria-hidden="true">${icon}</span>
+      <span class="tool-step-item__label">${escapeText(human)}</span>
+      ${target ? `<span class="tool-step-item__target">${escapeText(target)}</span>` : ''}`;
+        pendingToolGroup.body.appendChild(stepEl);
       } else if (msg.role === 'assistant') {
+        flushToolGroup();
         const { el, content } = createAgentMessage();
         content.innerHTML = renderMarkdown(msg.content);
         bodyEl.appendChild(el);
       }
     });
+    flushToolGroup();
   }
 
   setupScrollPin(bodyEl);

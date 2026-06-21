@@ -307,6 +307,10 @@ class AgentLoopOrchestrator:
 
         if not output.tool_call_proposals:
             if is_chat and output.narrative.strip():
+                # Persiste los pasos de tool (auto-EXECUTED in-loop) ANTES de la
+                # fila del asistente, para reconstruir las tarjetas al recargar.
+                if is_chat:
+                    self._persist_tool_steps(item, output.tool_steps)
                 # FIX B.2 — use counting_sink.delta_count (set by the engine's
                 # stream_callback via the counting wrapper) to detect streaming.
                 _prior_emit_count = counting_sink.delta_count if counting_sink is not None else 0
@@ -337,6 +341,19 @@ class AgentLoopOrchestrator:
         #   (b) el motor leyó contenido externo no confiable (web/Composio/fichero).
         # Esto cierra el vector del loop AUTÓNOMO: scheduler+Composio READ → taint.
         consent = _taint_consent_if_external(pre_cycle_consent, output.read_external_content)
+
+        # Persiste, ANTES del dispatch, los pasos de tool y la respuesta del
+        # asistente en la ruta de tools/HITL. Sin esto, un reload de una
+        # conversación que propuso/usó tools muestra solo el mensaje del usuario
+        # (la rama narrativa de arriba es la única que persistía). Persistir antes
+        # del dispatch garantiza la fila pase lo que pase con la propuesta
+        # (PENDING_APPROVAL / REJECTED / FAILED / success). Mutuamente excluyente
+        # con la rama narrativa (branch on `if not tool_call_proposals`) → sin
+        # doble escritura.
+        if is_chat:
+            self._persist_tool_steps(item, output.tool_steps)
+            if output.narrative.strip():
+                self._persist_assistant_turn(item, output.narrative)
 
         dispatch_result = await self._dispatch_proposals(
             item, output.tool_call_proposals, consent=consent
@@ -483,25 +500,67 @@ class AgentLoopOrchestrator:
 
         # GATE 0 / M2 — persiste la respuesta del asistente en el store de
         # conversaciones para que GetConversation la devuelva a la UI.
-        # conversation_id viene del payload del item (mismo valor que el cliente
-        # pasó al Enqueue). Best-effort: fallo de escritura no rompe el ciclo.
-        if self._conversation_repo is not None:
-            conv_id_str = item.payload.get("conversation_id") or ""
-            if conv_id_str:
-                try:
-                    from uuid import UUID as _UUID  # noqa: PLC0415
-                    self._conversation_repo.append_message(
-                        conversation_id=_UUID(conv_id_str),
-                        role="assistant",
-                        content=narrative,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "hermes.tasks.loop.chat.persist_assistant_failed: %s", exc
-                    )
+        # Best-effort: fallo de escritura no rompe el ciclo.
+        self._persist_assistant_turn(item, narrative)
 
         audit_entry_id, head_hash = await self._emit_chat_replied(item, narrative)
         await self._do_mark_completed(item, audit_entry_id, head_hash)
+
+    def _persist_assistant_turn(self, item: WorkItem, narrative: str) -> None:
+        """Persiste la respuesta del asistente en el store de conversaciones para
+        que GetConversation la devuelva y la UI la muestre tras un reload.
+
+        conversation_id viene del payload del item (mismo valor que el cliente
+        pasó al Enqueue). Best-effort: un fallo de persistencia NO rompe el ciclo.
+        Se llama EXACTAMENTE una vez por outcome (la rama narrativa y la rama de
+        tools son mutuamente excluyentes — branch on `if not tool_call_proposals`).
+        """
+        if self._conversation_repo is None:
+            return
+        conv_id_str = item.payload.get("conversation_id") or ""
+        if not conv_id_str:
+            return
+        try:
+            from uuid import UUID as _UUID  # noqa: PLC0415
+            self._conversation_repo.append_message(
+                conversation_id=_UUID(conv_id_str),
+                role="assistant",
+                content=narrative,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "hermes.tasks.loop.chat.persist_assistant_failed: %s", exc
+            )
+
+    def _persist_tool_steps(
+        self, item: WorkItem, tool_steps: "tuple[dict, ...]"
+    ) -> None:
+        """Persiste cada paso de tool (role='tool', content = JSON del descriptor
+        {tool,label,target}) en orden de ejecución, ANTES de la fila del asistente,
+        para que un reload reconstruya las tarjetas de pasos. Best-effort.
+
+        SECURITY: el descriptor viene de nous_engine._describe_tool_call, que YA
+        trunca a 200 chars y NO almacena credenciales/PII — esta es la única fuente.
+        """
+        if self._conversation_repo is None or not tool_steps:
+            return
+        conv_id_str = item.payload.get("conversation_id") or ""
+        if not conv_id_str:
+            return
+        try:
+            import json as _json  # noqa: PLC0415
+            from uuid import UUID as _UUID  # noqa: PLC0415
+            conv_id = _UUID(conv_id_str)
+            for step in tool_steps:
+                self._conversation_repo.append_message(
+                    conversation_id=conv_id,
+                    role="tool",
+                    content=_json.dumps(step, ensure_ascii=False),
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "hermes.tasks.loop.chat.persist_tool_steps_failed: %s", exc
+            )
 
     # ------------------------------------------------------------------
     # Private: state transitions with observability

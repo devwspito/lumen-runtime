@@ -374,3 +374,101 @@ class TestReconnectPassesEnv:
 
         serena_call = next(c for c in captured_calls if c["server_id"] == "serena")
         assert serena_call["env"] == {}  # no env stored, empty dict forwarded
+
+
+# ---------------------------------------------------------------------------
+# (q) reconnect_byok_empty_openai_mcp_servers re-wires only BYOK-empty servers
+# ---------------------------------------------------------------------------
+
+
+class TestReconnectByokEmptyOpenAi:
+    def test_rewires_only_empty_byok_disconnect_before_connect(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Only OpenAI-compat servers with EMPTY keys are reconnected; non-BYOK
+        servers are untouched; disconnect is awaited before connect."""
+        from hermes.agents_os.infrastructure import dbus_runtime_service as svc_mod
+
+        config = [
+            {
+                "server_id": "ruflo",
+                "label": "Ruflo",
+                "argv": ["npx", "-y", "ruflo@latest", "mcp", "start"],
+                "env": {"OPENAI_BASE_URL": "", "OPENAI_API_KEY": ""},
+            },
+            {
+                "server_id": "serena",
+                "label": "Serena",
+                "argv": ["uvx", "--from", "git+...", "serena", "start-mcp-server"],
+                # non-BYOK: no OpenAI keys
+            },
+        ]
+        config_file = tmp_path / "mcp-servers.json"
+        config_file.write_text(json.dumps(config))
+        monkeypatch.setenv("HERMES_MCP_CONFIG", str(config_file))
+
+        events: list[str] = []
+        connect_calls: list[str] = []
+
+        class _FakeManager:
+            async def disconnect(self, server_id) -> None:
+                events.append(f"disconnect:{server_id}")
+
+        async def _fake_mcp_connect(manager, server_id, argv, *, env=None):
+            events.append(f"connect:{server_id}")
+            connect_calls.append(server_id)
+
+            class _FakeServer:
+                tools: list = []
+            return _FakeServer()
+
+        with patch.object(svc_mod, "_mcp_connect", side_effect=_fake_mcp_connect):
+            asyncio.run(
+                svc_mod.reconnect_byok_empty_openai_mcp_servers(_FakeManager())
+            )
+
+        # Only ruflo reconnected; serena left alone.
+        assert connect_calls == ["ruflo"]
+        # disconnect happened before connect for ruflo.
+        assert events.index("disconnect:ruflo") < events.index("connect:ruflo")
+        # serena never touched.
+        assert not any("serena" in e for e in events)
+
+    def test_already_filled_keys_not_rewired(self, tmp_path, monkeypatch) -> None:
+        """When the OpenAI keys are already non-empty, nothing is reconnected."""
+        from hermes.agents_os.infrastructure import dbus_runtime_service as svc_mod
+
+        config = [
+            {
+                "server_id": "ruflo",
+                "label": "Ruflo",
+                "argv": ["npx", "-y", "ruflo@latest", "mcp", "start"],
+                "env": {
+                    "OPENAI_BASE_URL": "http://localhost:8888/v1",
+                    "OPENAI_API_KEY": "sk-already-set",
+                },
+            },
+        ]
+        config_file = tmp_path / "mcp-servers.json"
+        config_file.write_text(json.dumps(config))
+        monkeypatch.setenv("HERMES_MCP_CONFIG", str(config_file))
+
+        connect_calls: list[str] = []
+
+        class _FakeManager:
+            async def disconnect(self, server_id) -> None:
+                connect_calls.append(f"disconnect:{server_id}")
+
+        async def _fake_mcp_connect(manager, server_id, argv, *, env=None):
+            connect_calls.append(server_id)
+
+            class _FakeServer:
+                tools: list = []
+            return _FakeServer()
+
+        with patch.object(svc_mod, "_mcp_connect", side_effect=_fake_mcp_connect):
+            asyncio.run(
+                svc_mod.reconnect_byok_empty_openai_mcp_servers(_FakeManager())
+            )
+
+        assert connect_calls == []  # nothing to re-wire

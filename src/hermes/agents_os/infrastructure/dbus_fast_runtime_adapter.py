@@ -474,13 +474,32 @@ class Runtime1ServiceInterface(ServiceInterface):
         """Provider activo, o {} (read-only)."""
         return json.dumps(self._wiring.get_active_provider())
 
+    def _schedule_byok_mcp_rewire(self) -> None:
+        """Fire-and-forget: after a provider is added/activated, re-wire MCP
+        servers with empty OpenAI-compat BYOK keys (e.g. ruflo) so the daemon's
+        auto-wire fills them from the now-active provider — no restart needed."""
+        manager = getattr(self._wiring, "_mcp_manager", None)
+        if manager is None:
+            return
+        import asyncio as _asyncio  # noqa: PLC0415
+
+        from hermes.agents_os.infrastructure.dbus_runtime_service import (  # noqa: PLC0415
+            reconnect_byok_empty_openai_mcp_servers,
+        )
+
+        _asyncio.create_task(
+            reconnect_byok_empty_openai_mcp_servers(manager),
+            name="mcp-byok-rewire",
+        )
+
     @method()
     async def AddProvider(self, draft_json: "s") -> "s":  # noqa: N802,F821,UP037
         """Crea provider. draft: {kind, alias, default_model, base_url, api_key, set_active}."""
         sender_uid = await self._resolve_current_sender_uid()
-        return json.dumps(
-            self._wiring.add_provider(draft_json=draft_json, sender_uid=sender_uid)
-        )
+        result = self._wiring.add_provider(draft_json=draft_json, sender_uid=sender_uid)
+        if json.loads(draft_json or "{}").get("set_active"):
+            self._schedule_byok_mcp_rewire()
+        return json.dumps(result)
 
     @method()
     async def UpdateProvider(self, provider_id: "s", draft_json: "s") -> "s":  # noqa: N802,F821,UP037
@@ -502,11 +521,11 @@ class Runtime1ServiceInterface(ServiceInterface):
     @method()
     async def SetActiveProvider(self, provider_id: "s") -> "s":  # noqa: N802,F821,UP037
         sender_uid = await self._resolve_current_sender_uid()
-        return json.dumps(
-            self._wiring.set_active_provider(
-                provider_id=provider_id, sender_uid=sender_uid
-            )
+        result = self._wiring.set_active_provider(
+            provider_id=provider_id, sender_uid=sender_uid
         )
+        self._schedule_byok_mcp_rewire()
+        return json.dumps(result)
 
     @method()
     async def TestProvider(self, provider_id: "s") -> "s":  # noqa: N802,F821,UP037
@@ -597,6 +616,8 @@ class Runtime1ServiceInterface(ServiceInterface):
                 sender_uid=sender_uid,
             ),
         )
+        if isinstance(result, dict) and result.get("ok"):
+            self._schedule_byok_mcp_rewire()
         return json.dumps(result)
 
     @method()

@@ -46,3 +46,8 @@ class CycleOutput:
     # de confianza). El orchestrator lo transfiere a ConsentContext para que el
     # broker fuerce HITL sobre TODAS las proposals del ciclo.
     read_external_content: bool = False
+    # Descriptores de las tool-calls emitidas durante el ciclo (mismo shape que el
+    # frame TOOL_CALL en vivo: {tool,label,target}), en orden de ejecución. El
+    # orchestrator los persiste como filas role='tool' para que un reload de la
+    # conversación reconstruya las tarjetas de pasos (no solo durante streaming).
+    tool_steps: tuple[dict[str, Any], ...] = ()
