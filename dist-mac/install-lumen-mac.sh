@@ -57,12 +57,10 @@ if [ -n "${LUMEN_IMAGE:-}" ]; then
   podman pull "$LUMEN_IMAGE"
   podman tag "$LUMEN_IMAGE" "$LOCAL_TAG"
 else
-  command -v python3 >/dev/null 2>&1 || die "python3 needed to build the wheel — 'brew install python' then re-run."
+  # The wheel is built INSIDE the container (Containerfile), so no host python is needed —
+  # this avoids the old macOS system python (3.9) mis-building the wheel as UNKNOWN-0.0.0.
   say "Building Lumen from source (one-time, ~15-20 min — pulls the Playwright base + npm + pip)…"
-  ( cd "$HERE" \
-      && rm -rf build dist src/*.egg-info \
-      && python3 -m pip wheel . --no-deps -w dist/ \
-      && podman build -f ops/container/Containerfile -t "$LOCAL_TAG" . ) \
+  ( cd "$HERE" && podman build -f ops/container/Containerfile -t "$LOCAL_TAG" . ) \
     || die "build failed — see the output above."
 fi
 

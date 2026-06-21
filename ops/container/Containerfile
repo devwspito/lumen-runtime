@@ -45,10 +45,14 @@ ARG HERMES_AGENT_COMMIT=475ecea3d75784d2c1d98279d63ae4e5fba5d497
 RUN python3 -m pip install --no-cache-dir \
       "https://github.com/NousResearch/hermes-agent/archive/${HERMES_AGENT_COMMIT}.tar.gz"
 
-# The wheel (--no-deps) + ALL its real deps listed EXPLICITLY (core + the
-# browser/shell/tui/mcp extras we use). No extras-syntax, one package per need.
-COPY dist/hermes_runtime-0.4.0-py3-none-any.whl /tmp/
-RUN python3 -m pip install --no-cache-dir --no-deps /tmp/hermes_runtime-0.4.0-py3-none-any.whl \
+# Build the hermes-runtime wheel INSIDE the container (python 3.12), so the build is
+# SELF-CONTAINED — the host's python is never used (an old macOS system python 3.9/pip
+# can't mis-name it as UNKNOWN-0.0.0). Then install --no-deps + ALL real deps EXPLICITLY
+# (core + the browser/shell/tui/mcp extras). No extras-syntax, one package per need.
+COPY pyproject.toml README.md /tmp/whlbuild/
+COPY src /tmp/whlbuild/src
+RUN cd /tmp/whlbuild && python3 -m pip wheel . --no-deps -w /tmp/whl \
+    && python3 -m pip install --no-cache-dir --no-deps /tmp/whl/hermes_runtime-*.whl \
     && python3 -m pip install --no-cache-dir \
       aiohttp composio==0.13.1 dbus-fast rfc3161ng structlog tenacity \
       cryptography playwright pytesseract selectolax \
@@ -56,7 +60,7 @@ RUN python3 -m pip install --no-cache-dir --no-deps /tmp/hermes_runtime-0.4.0-py
       rich textual \
     # pydantic LAST word (determinism; matches the OS build's pin order)
     && python3 -m pip install --no-cache-dir 'pydantic==2.10.6' 'pydantic-core==2.27.2' \
-    && rm -f /tmp/hermes_runtime-0.4.0-py3-none-any.whl
+    && rm -rf /tmp/whlbuild /tmp/whl
 
 # Browser automation = the npm stack (agent-browser + @playwright/mcp), EXACTLY as
 # the OS image runs it. The wheel's python playwright-extra/stagehand-py are not on
