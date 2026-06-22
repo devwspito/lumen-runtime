@@ -771,6 +771,16 @@ def create_app() -> FastAPI:
                 )
         return await call_next(request)
 
+    @app.post("/api/v1/session/refresh")
+    async def _refresh_session() -> dict:  # noqa: ANN202
+        # Reached only with a VALID (unexpired) Bearer — the mutating-method
+        # middleware above already gated it. Mint a FRESH rotating session token so
+        # an active tab renews before the TTL without re-running the ?k= handshake
+        # (and without exposing the bootstrap secret to the page). The token still
+        # expires; this only keeps a LIVE session alive — a token that stops being
+        # refreshed (e.g. scraped then abandoned) still dies within the TTL.
+        return {"token": app.state.mint_session_token()}
+
     repo = SQLiteProviderRepository(db_path=_DB_PATH, vault=vault)
     _seed_providers_if_empty(repo)
     from hermes.shell_server.chat.conversation_repo import (

@@ -1,4 +1,4 @@
-import { token } from '../lib/token'
+import { token, refreshToken } from '../lib/token'
 import type {
   Agent,
   ActiveAgentResponse,
@@ -57,7 +57,7 @@ interface RequestOptions extends RequestInit {
   timeoutMs?: number
 }
 
-async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+async function request<T>(path: string, options: RequestOptions = {}, _retried = false): Promise<T> {
   const { timeoutMs = DEFAULT_TIMEOUT_MS, headers: extraHeaders, ...rest } = options
 
   const headers: Record<string, string> = {
@@ -89,6 +89,14 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     throw new ApiError(`Error de red: ${e.message}`, 0, null)
   }
   clearTimeout(timer)
+
+  // Session token rotated/expired mid-use → renew once and retry, so the user
+  // never hits a dead 401 while the tab is active.
+  if (res.status === 401 && !_retried && token() && path !== '/session/refresh') {
+    if (await refreshToken()) {
+      return request<T>(path, options, true)
+    }
+  }
 
   if (!res.ok) {
     let body: unknown = null
