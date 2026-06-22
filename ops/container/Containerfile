@@ -62,6 +62,21 @@ RUN cd /tmp/whlbuild && python3 -m pip wheel . --no-deps -w /tmp/whl \
     && python3 -m pip install --no-cache-dir 'pydantic==2.10.6' 'pydantic-core==2.27.2' \
     && rm -rf /tmp/whlbuild /tmp/whl
 
+# ── React SPA (frontend/) — build INSIDE the container ──────────────────────
+# Layer-cache strategy (mirrors the Python wheel-build pattern above):
+#   1. Copy only package manifests → npm ci (heavy layer, rarely invalidated).
+#   2. Copy the rest of frontend/ → vite build (fast layer, invalidated on src changes).
+# Output is placed at /opt/lumen-webapp — the path shell-server reads via the
+# LUMEN_REACT_DIST env default (src/hermes/shell_server/main.py: _react_dist).
+COPY frontend/package.json frontend/package-lock.json /tmp/frontbuild/
+RUN cd /tmp/frontbuild && npm ci --ignore-scripts
+
+COPY frontend/ /tmp/frontbuild/
+RUN cd /tmp/frontbuild && npm run build \
+    && mkdir -p /opt/lumen-webapp \
+    && cp -r dist/. /opt/lumen-webapp/ \
+    && rm -rf /tmp/frontbuild
+
 # Browser automation = the npm stack (agent-browser + @playwright/mcp), EXACTLY as
 # the OS image runs it. The wheel's python playwright-extra/stagehand-py are not on
 # PyPI — the real browser path is node (node 20 ships in the Playwright base). Point

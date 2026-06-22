@@ -1,0 +1,376 @@
+/* Sereno design tokens — sourced from webui/style.css.
+   Only the subset used by the React shell; the canonical source stays vanilla. */
+
+:root {
+  --accent:        #0A84FF;
+  --accent-hover:  #3399FF;
+  --focus-ring:    #3399FF;
+
+  --ok:     #34D399;
+  --warn:   #F5B945;
+  --danger: #FF453A;
+
+  --ink:  #F4F4F6;
+  --ink2: #C8C8D0;
+  --ink3: #9A9AA2;
+  --ink4: #6A6A72;
+
+  --bg0:      #0B0B0D;
+  --surface:  #141416;
+  --surface2: #1B1B1E;
+  --card:     #212125;
+  --card2:    #2A2A2E;
+
+  --line:  #2A2A2E;
+  --line2: #333338;
+
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 16px;
+
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+
+  --font-ui: 'Inter', 'SF Pro Text', ui-sans-serif, system-ui, -apple-system,
+    BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+
+  --text-title:    22px;
+  --text-subtitle: 17px;
+  --text-lead:     16px;
+  --text-body:     14px;
+  --text-label:    13px;
+  --text-caption:  12px;
+
+  --sidebar-width: 220px;
+}
+
+[data-theme='light'] {
+  --ink:  #1C1C1E;
+  --ink2: #3A3A3E;
+  --ink3: #6A6A72;
+  --ink4: #9A9AA2;
+
+  --bg0:      #F5F5F7;
+  --surface:  #FFFFFF;
+  --surface2: #F8F8FA;
+  --card:     #FFFFFF;
+  --card2:    #F0F0F2;
+
+  --line:  #E3E3E6;
+  --line2: #D0D0D4;
+}
+
+/* ── Reset & base ─────────────────────────────────────────────────────────── */
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body, #root {
+  height: 100%;
+  background: var(--bg0);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: var(--text-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+button {
+  cursor: pointer;
+  font-family: inherit;
+}
+
+/* ── Screen-reader only utility ──────────────────────────────────────────── */
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ── App shell ───────────────────────────────────────────────────────────── */
+
+.app-shell {
+  display: flex;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* ── Sidebar ─────────────────────────────────────────────────────────────── */
+
+.sidebar {
+  width: var(--sidebar-width);
+  flex-shrink: 0;
+  background: var(--surface);
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.sidebar-wordmark {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-5) var(--sp-4);
+  border-bottom: 1px solid var(--line);
+}
+
+.sidebar-mark {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--r-sm);
+  background: var(--accent);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 15px;
+  flex-shrink: 0;
+}
+
+.sidebar-name {
+  font-size: var(--text-subtitle);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.sidebar-nav {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--sp-3) var(--sp-2);
+}
+
+.sidebar-nav ul {
+  list-style: none;
+}
+
+.sidebar-nav li + li {
+  margin-top: var(--sp-1);
+}
+
+.nav-link {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-sm);
+  color: var(--ink3);
+  font-size: var(--text-body);
+  font-weight: 500;
+  text-decoration: none;
+  transition: background 120ms ease, color 120ms ease;
+  border: none;
+  background: none;
+  width: 100%;
+  text-align: left;
+}
+
+.nav-link:hover {
+  background: var(--surface2);
+  color: var(--ink);
+}
+
+.nav-link.active {
+  background: var(--card2);
+  color: var(--ink);
+}
+
+.nav-link:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.nav-icon {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
+.nav-link.active .nav-icon {
+  opacity: 1;
+}
+
+/* ── Main content ────────────────────────────────────────────────────────── */
+
+.main-content {
+  flex: 1;
+  overflow-y: auto;
+  background: var(--bg0);
+}
+
+/* ── View header ─────────────────────────────────────────────────────────── */
+
+.view-header {
+  padding: var(--sp-8) var(--sp-8) var(--sp-5);
+  border-bottom: 1px solid var(--line);
+}
+
+.view-title {
+  font-size: var(--text-title);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.view-subtitle {
+  margin-top: var(--sp-1);
+  font-size: var(--text-label);
+  color: var(--ink3);
+}
+
+/* ── View body ───────────────────────────────────────────────────────────── */
+
+.view-body {
+  padding: var(--sp-6) var(--sp-8);
+}
+
+/* ── Agent cards ─────────────────────────────────────────────────────────── */
+
+.agent-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--sp-4);
+}
+
+.agent-card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: var(--sp-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  transition: border-color 150ms ease;
+}
+
+.agent-card:hover {
+  border-color: var(--line2);
+}
+
+.agent-card-header {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+}
+
+.agent-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--r-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 18px;
+  color: #fff;
+  flex-shrink: 0;
+}
+
+.agent-meta {
+  flex: 1;
+  min-width: 0;
+}
+
+.agent-name {
+  font-size: var(--text-lead);
+  font-weight: 600;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agent-role {
+  font-size: var(--text-label);
+  color: var(--ink3);
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.badge {
+  font-size: var(--text-caption);
+  font-weight: 600;
+  padding: 2px var(--sp-2);
+  border-radius: 100px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.agent-mission {
+  font-size: var(--text-label);
+  color: var(--ink2);
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* ── States ──────────────────────────────────────────────────────────────── */
+
+.state-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-8);
+  min-height: 200px;
+  text-align: center;
+  gap: var(--sp-3);
+}
+
+.state-label {
+  font-size: var(--text-body);
+  color: var(--ink3);
+}
+
+.state-error {
+  color: var(--danger);
+  font-size: var(--text-body);
+}
+
+/* ── Coming soon placeholder ─────────────────────────────────────────────── */
+
+.coming-soon {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: var(--sp-3);
+  color: var(--ink3);
+}
+
+.coming-soon-title {
+  font-size: var(--text-subtitle);
+  font-weight: 600;
+  color: var(--ink2);
+}
+
+.coming-soon-caption {
+  font-size: var(--text-label);
+}
