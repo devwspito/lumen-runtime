@@ -31,6 +31,38 @@ export interface CreateAgentPayload {
   name: string
   role?: string
   primary_mission?: string
+  department?: string
+}
+
+// ── Roster ────────────────────────────────────────────────────────────────────
+
+export interface RosterAgent {
+  id: string
+  name: string
+  description: string
+  source: 'ruflo' | 'custom'
+  department: string
+  is_default: boolean
+  color: string | null
+}
+
+export interface RosterDepartment {
+  id: string
+  name: string
+  kind: 'cerebro' | 'factory' | 'custom'
+  agents: RosterAgent[]
+}
+
+export interface AgentRoster {
+  departments: RosterDepartment[]
+}
+
+// ── Workspace files ───────────────────────────────────────────────────────────
+
+export interface WorkspaceFile {
+  name: string
+  path: string
+  size: number
 }
 
 // ── Chat ──────────────────────────────────────────────────────────────────────

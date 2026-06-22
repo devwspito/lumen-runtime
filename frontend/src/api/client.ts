@@ -31,6 +31,8 @@ import type {
   MfaStatus,
   PoliciesResponse,
   InstallDecisionPayload,
+  AgentRoster,
+  WorkspaceFile,
 } from './types'
 
 // Mirrors the timeout strategy in vanilla api.js: snappy GETs fail fast;
@@ -129,6 +131,55 @@ export function getActiveAgent(): Promise<ActiveAgentResponse> {
 
 export function createAgent(payload: CreateAgentPayload): Promise<Agent> {
   return request<Agent>('/agents', { method: 'POST', body: JSON.stringify(payload) })
+}
+
+export function getAgentRoster(): Promise<AgentRoster> {
+  return request<AgentRoster>('/agents/roster').catch(
+    () => ({ departments: [] }),
+  )
+}
+
+/**
+ * Upload a file to the workspace. Uses fetch directly (not `request`) because
+ * `request` forces Content-Type: application/json; multipart boundary must be
+ * set by the browser automatically when we pass a FormData body.
+ */
+export async function uploadWorkspaceFile(file: File): Promise<WorkspaceFile> {
+  const tok = token()
+  const body = new FormData()
+  body.append('file', file)
+
+  const headers: Record<string, string> = {}
+  if (tok) headers['Authorization'] = `Bearer ${tok}`
+
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), 60_000)
+
+  let res: Response
+  try {
+    res = await fetch('/api/v1/workspace/files', {
+      method: 'POST',
+      headers,
+      body,
+      signal: ctrl.signal,
+    })
+  } catch (err) {
+    clearTimeout(timer)
+    const e = err as Error
+    if (e.name === 'AbortError') throw new ApiError('La subida tardó demasiado.', 0, null)
+    throw new ApiError(`Error de red: ${e.message}`, 0, null)
+  }
+  clearTimeout(timer)
+
+  if (!res.ok) {
+    let body2: unknown = null
+    try { body2 = await res.json() } catch { /* non-JSON */ }
+    const b = body2 as Record<string, unknown> | null
+    const message = b?.detail as string ?? `HTTP ${res.status}`
+    throw new ApiError(message, res.status, body2)
+  }
+
+  return res.json() as Promise<WorkspaceFile>
 }
 
 // ── Providers ─────────────────────────────────────────────────────────────────

@@ -58,6 +58,8 @@ class AgentDraft(BaseModel):
     golden_rules: list[str] = Field(default_factory=list)
     autonomy_level: str = Field(default="balanced")
     is_default: bool = False
+    # Optional department slug; null → rendered in "mis-agentes" bucket.
+    department: str | None = Field(default=None, max_length=64)
 
 
 class BindCapabilityRequest(BaseModel):
@@ -110,6 +112,7 @@ def create_agents_router() -> APIRouter:
     _DRAFT_KEYS = {
         "name", "role", "register", "primary_mission", "instructions",
         "color", "language", "golden_rules", "forbidden_phrases", "autonomy_level",
+        "department",
     }
 
     def _clean_draft(body: AgentDraft) -> dict:

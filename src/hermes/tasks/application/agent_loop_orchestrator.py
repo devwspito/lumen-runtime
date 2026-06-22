@@ -224,6 +224,13 @@ class AgentLoopOrchestrator:
                 conversation_id=_conv_id_for_inject,
             )
             await chunk_sink.emit_status(task_id=item.id, status="in_progress")
+            # Wire the chat task into live_activity so the Office floor animates
+            # the agent character while the response is in-flight — even during
+            # pure narrative replies that invoke no tool calls. The entry is
+            # cleared by worker_pool._worker_loop's finally block
+            # (live_activity.clear(item.id)) on task completion or failure.
+            _chat_agent_id = _resolve_chat_agent_id(self._agent_registry)
+            _record_chat_activity(str(item.id), _chat_agent_id)
 
         # spec 014 inc. 3 (CTRL-13 fix): propaga el operator_id verificado del
         # operador que encoló la tarea (enqueued_by, resuelto server-side desde
@@ -959,6 +966,30 @@ def _taint_consent_if_external(
         operator_id=base.operator_id,
         derived_from_untrusted_content=True,
     )
+
+
+def _resolve_chat_agent_id(agent_registry: "Any") -> str:
+    """Return the active agent id for live_activity tagging during a chat task.
+
+    Reads agent_registry.active_agent_id() (fail-safe: returns "default" if
+    the registry is absent or raises). Called once per chat task at in_progress
+    time — before run_cycle — so the floor animates immediately.
+    """
+    if agent_registry is None:
+        return "default"
+    try:
+        return str(agent_registry.active_agent_id())
+    except Exception:  # noqa: BLE001
+        return "default"
+
+
+def _record_chat_activity(task_id: str, agent_id: str) -> None:
+    """Register a synthetic chat-responding entry in live_activity. Fail-soft."""
+    try:
+        from hermes.runtime import live_activity  # noqa: PLC0415
+        live_activity.record(task_id, agent_id, "chat_responding")
+    except Exception:  # noqa: BLE001 — never interrupt the chat path
+        pass
 
 
 class _CountingChunkSink:

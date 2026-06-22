@@ -8,6 +8,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { sileo } from 'sileo'
 import {
   listPendingApprovals,
   resolveApproval,
@@ -34,49 +35,14 @@ import type {
   AuditHead,
 } from '../api/types'
 
-// ── Toast ─────────────────────────────────────────────────────────────────────
-
-interface Toast {
-  id: number
-  message: string
-  kind: 'ok' | 'error' | 'info'
-}
-
-function useToasts() {
-  const [toasts, setToasts] = useState<Toast[]>([])
-  const nextId = useRef(0)
-
-  const push = useCallback((message: string, kind: Toast['kind'] = 'info') => {
-    const id = ++nextId.current
-    setToasts(prev => [...prev, { id, message, kind }])
-    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4000)
-  }, [])
-
-  return { toasts, push }
-}
-
-function ToastList({ toasts }: { toasts: Toast[] }) {
-  if (toasts.length === 0) return null
-  return (
-    <div className="cv-toast-list" aria-live="polite" aria-label="Notificaciones">
-      {toasts.map(t => (
-        <div key={t.id} className={`cv-toast cv-toast--${t.kind}`} role="status">
-          {t.message}
-        </div>
-      ))}
-    </div>
-  )
-}
-
 // ── Approval cards ────────────────────────────────────────────────────────────
 
 interface ApprovalCardProps {
   approval: PendingApproval
   onResolved(): void
-  onToast(msg: string, kind: Toast['kind']): void
 }
 
-function ApprovalCard({ approval, onResolved, onToast }: ApprovalCardProps) {
+function ApprovalCard({ approval, onResolved }: ApprovalCardProps) {
   const [showMfa, setShowMfa] = useState(false)
   const [totp, setTotp] = useState('')
   const [riddle, setRiddle] = useState('')
@@ -94,10 +60,10 @@ function ApprovalCard({ approval, onResolved, onToast }: ApprovalCardProps) {
     setBusy(true)
     try {
       await resolveApproval(approval.proposal_id, 'deny')
-      onToast('Denegado', 'ok')
+      sileo.success({ title: 'Denegado' })
       onResolved()
     } catch (err) {
-      onToast(`No se pudo denegar: ${err instanceof Error ? err.message : err}`, 'error')
+      sileo.error({ title: `No se pudo denegar: ${err instanceof Error ? err.message : err}` })
     } finally {
       setBusy(false)
     }
@@ -118,12 +84,12 @@ function ApprovalCard({ approval, onResolved, onToast }: ApprovalCardProps) {
         riddle_answer: riddle.trim() || null,
         humanity: humanity ? 'confirmado' : null,
       })
-      onToast('Aprobado', 'ok')
+      sileo.success({ title: 'Aprobado' })
       onResolved()
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       setMfaError(msg)
-      onToast(`No se pudo aprobar: ${msg}`, 'error')
+      sileo.error({ title: `No se pudo aprobar: ${msg}` })
     } finally {
       setBusy(false)
     }
@@ -236,11 +202,7 @@ function ApprovalCard({ approval, onResolved, onToast }: ApprovalCardProps) {
 
 const POLL_INTERVAL_MS = 3000
 
-interface ApprovalsSectionProps {
-  onToast(msg: string, kind: Toast['kind']): void
-}
-
-function ApprovalsSection({ onToast }: ApprovalsSectionProps) {
+function ApprovalsSection() {
   const [approvals, setApprovals] = useState<PendingApproval[]>([])
   const [loading, setLoading] = useState(true)
 
@@ -270,7 +232,6 @@ function ApprovalsSection({ onToast }: ApprovalsSectionProps) {
               key={a.proposal_id}
               approval={a}
               onResolved={load}
-              onToast={onToast}
             />
           ))}
         </div>
@@ -287,11 +248,7 @@ const PRESETS: Array<[string, string, string]> = [
   ['bloqueado', 'Bloqueado', 'Todo desactivado (máximo bloqueo)'],
 ]
 
-interface GovernanceSectionProps {
-  onToast(msg: string, kind: Toast['kind']): void
-}
-
-function GovernanceSection({ onToast }: GovernanceSectionProps) {
+function GovernanceSection() {
   const [mfa, setMfa] = useState<MfaStatus | null>(null)
   const [pol, setPol] = useState<PoliciesResponse | null>(null)
   const [loading, setLoading] = useState(true)
@@ -315,44 +272,44 @@ function GovernanceSection({ onToast }: GovernanceSectionProps) {
     try {
       const r = await mfaEnroll(null)
       setMfaUri(r.otpauth_uri ?? '')
-      onToast('MFA activado — escanea el código', 'ok')
+      sileo.success({ title: 'MFA activado — escanea el código' })
       await load()
     } catch (err) {
-      onToast(`No se pudo activar MFA: ${err instanceof Error ? err.message : err}`, 'error')
+      sileo.error({ title: `No se pudo activar MFA: ${err instanceof Error ? err.message : err}` })
     }
   }
 
   async function handleRiddleSave() {
     if (!riddleQ.trim() || !riddleA.trim() || !riddleTotp.trim()) {
-      onToast('Rellena pregunta, respuesta y código MFA', 'error')
+      sileo.error({ title: 'Rellena pregunta, respuesta y código MFA' })
       return
     }
     try {
       await mfaSetRiddle(riddleTotp, riddleQ, riddleA)
-      onToast('Acertijo guardado', 'ok')
+      sileo.success({ title: 'Acertijo guardado' })
       setRiddleQ(''); setRiddleA(''); setRiddleTotp('')
     } catch (err) {
-      onToast(`No se pudo guardar: ${err instanceof Error ? err.message : err}`, 'error')
+      sileo.error({ title: `No se pudo guardar: ${err instanceof Error ? err.message : err}` })
     }
   }
 
   async function handlePreset(preset: string) {
     try {
       await setPolicyPreset(preset, polTotp, polRiddle || null)
-      onToast(`Preset «${preset}» aplicado`, 'ok')
+      sileo.success({ title: `Preset «${preset}» aplicado` })
       await load()
     } catch (err) {
-      onToast(`No se pudo aplicar: ${err instanceof Error ? err.message : err}`, 'error')
+      sileo.error({ title: `No se pudo aplicar: ${err instanceof Error ? err.message : err}` })
     }
   }
 
   async function handleToolToggle(tool: string, enabled: boolean) {
     try {
       await setPolicyTool(tool, enabled, polTotp, polRiddle || null)
-      onToast(`${tool}: ${enabled ? 'activado' : 'desactivado'}`, 'ok')
+      sileo.success({ title: `${tool}: ${enabled ? 'activado' : 'desactivado'}` })
       setPol(prev => prev ? { ...prev, tools: { ...prev.tools, [tool]: enabled } } : prev)
     } catch (err) {
-      onToast(`No se pudo cambiar: ${err instanceof Error ? err.message : err}`, 'error')
+      sileo.error({ title: `No se pudo cambiar: ${err instanceof Error ? err.message : err}` })
       // revert optimistic update
       setPol(prev => prev ? { ...prev, tools: { ...prev.tools, [tool]: !enabled } } : prev)
     }
@@ -367,10 +324,10 @@ function GovernanceSection({ onToast }: GovernanceSectionProps) {
     }
     try {
       await setMfaOnDangers(checked, polTotp, polRiddle || null)
-      onToast(checked ? 'MFA en peligrosos: ACTIVO' : 'MFA en peligrosos: desactivado', 'ok')
+      sileo.success({ title: checked ? 'MFA en peligrosos: ACTIVO' : 'MFA en peligrosos: desactivado' })
       setPol(prev => prev ? { ...prev, mfa_on_dangers: checked } : prev)
     } catch (err) {
-      onToast(`No se pudo cambiar: ${err instanceof Error ? err.message : err}`, 'error')
+      sileo.error({ title: `No se pudo cambiar: ${err instanceof Error ? err.message : err}` })
     }
   }
 
@@ -529,11 +486,7 @@ function GovernanceSection({ onToast }: GovernanceSectionProps) {
 
 // ── Egress section ────────────────────────────────────────────────────────────
 
-interface EgressSectionProps {
-  onToast(msg: string, kind: Toast['kind']): void
-}
-
-function EgressSection({ onToast }: EgressSectionProps) {
+function EgressSection() {
   const [domains, setDomains] = useState<string[]>([])
   const [loading, setLoading] = useState(true)
   const [input, setInput] = useState('')
@@ -571,7 +524,7 @@ function EgressSection({ onToast }: EgressSectionProps) {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       setStatus({ msg: `No se pudo revocar: ${msg}`, kind: 'error' })
-      onToast(msg, 'error')
+      sileo.error({ title: msg })
     }
   }
 
@@ -664,10 +617,9 @@ function SeverityBadge({ severity }: { severity: string }) {
 
 interface ScanRowProps {
   scan: SecurityScan
-  onToast(msg: string, kind: Toast['kind']): void
 }
 
-function ScanRow({ scan, onToast }: ScanRowProps) {
+function ScanRow({ scan }: ScanRowProps) {
   const [showAllow, setShowAllow] = useState(false)
   const [totp, setTotp] = useState('')
   const [riddle, setRiddle] = useState('')
@@ -699,11 +651,11 @@ function ScanRow({ scan, onToast }: ScanRowProps) {
         totp: totp.trim(),
         riddle_answer: riddle.trim() || null,
       })
-      onToast('Instalación permitida (decisión soberana, auditada). Reinténtala.', 'ok')
+      sileo.success({ title: 'Instalación permitida (decisión soberana, auditada). Reinténtala.' })
       setAllowed(true)
       setShowAllow(false)
     } catch (err) {
-      onToast(`No se pudo permitir: ${err instanceof Error ? err.message : err}`, 'error')
+      sileo.error({ title: `No se pudo permitir: ${err instanceof Error ? err.message : err}` })
     } finally {
       setBusy(false)
     }
@@ -768,11 +720,7 @@ function ScanRow({ scan, onToast }: ScanRowProps) {
 
 // ── Security center section ───────────────────────────────────────────────────
 
-interface SecurityCenterSectionProps {
-  onToast(msg: string, kind: Toast['kind']): void
-}
-
-function SecurityCenterSection({ onToast }: SecurityCenterSectionProps) {
+function SecurityCenterSection() {
   const [scans, setScans] = useState<SecurityScan[] | null>(null)
   const [auditHead, setAuditHead] = useState<AuditHead | null | undefined>(undefined)
   const [policy, setPolicy] = useState<unknown>(undefined)
@@ -821,7 +769,7 @@ function SecurityCenterSection({ onToast }: SecurityCenterSectionProps) {
         ) : (
           <div className="cv-list">
             {scans.map((s, i) => (
-              <ScanRow key={s.scan_id ?? s.id ?? i} scan={s} onToast={onToast} />
+              <ScanRow key={s.scan_id ?? s.id ?? i} scan={s} />
             ))}
           </div>
         )}
@@ -846,12 +794,8 @@ function SecurityCenterSection({ onToast }: SecurityCenterSectionProps) {
 // ── SeguridadView ─────────────────────────────────────────────────────────────
 
 export default function SeguridadView() {
-  const { toasts, push: pushToast } = useToasts()
-
   return (
     <div className="cv-view-body">
-      <ToastList toasts={toasts} />
-
       <div className="view-header" style={{ padding: 0, border: 'none' }}>
         <h1 className="view-title">Seguridad y gobernanza</h1>
         <p className="view-subtitle">
@@ -859,10 +803,10 @@ export default function SeguridadView() {
         </p>
       </div>
 
-      <ApprovalsSection onToast={pushToast} />
-      <GovernanceSection onToast={pushToast} />
-      <EgressSection onToast={pushToast} />
-      <SecurityCenterSection onToast={pushToast} />
+      <ApprovalsSection />
+      <GovernanceSection />
+      <EgressSection />
+      <SecurityCenterSection />
     </div>
   )
 }

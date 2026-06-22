@@ -1,8 +1,9 @@
 import { lazy, Suspense, useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
-import { listAgents, getRuntimeStatus, listMcpServers, createAgent } from '../api/client'
-import type { Agent, RuntimeStatus, CreateAgentPayload } from '../api/types'
+import { getAgentRoster, getRuntimeStatus, listMcpServers, createAgent } from '../api/client'
+import type { AgentRoster, RosterAgent, RosterDepartment, RuntimeStatus, CreateAgentPayload } from '../api/types'
+import type { LumenAgent, LumenRuntimeStatus } from './office-live/engine/office-state'
 
 // ── Lazy-load the canvas so the rAF loop only starts when En-vivo is shown ──
 
@@ -10,24 +11,42 @@ const OfficeCanvas = lazy(() =>
   import('./office-live/OfficeCanvas').then((m) => ({ default: m.OfficeCanvas }))
 )
 
-// ── View-level state ─────────────────────────────────────────────────────────
+// ── Map roster → engine types ─────────────────────────────────────────────────
+
+/**
+ * Converts a RosterAgent into the LumenAgent shape expected by the office engine.
+ * The engine only needs id/name/role/primary_mission/color/is_default/autonomy_level.
+ */
+function rosterAgentToLumenAgent(a: RosterAgent): LumenAgent {
+  return {
+    id: a.id,
+    name: a.name,
+    role: a.description,
+    primary_mission: a.description,
+    color: a.color ?? '#0A84FF',
+    is_default: a.is_default,
+    autonomy_level: 'balanced',
+  }
+}
+
+// ── View-level state ──────────────────────────────────────────────────────────
 
 type Tab = 'tarjetas' | 'live'
 
 type DataState =
   | { status: 'loading' }
   | { status: 'error'; message: string }
-  | { status: 'ready'; agents: Agent[]; runtimeStatus: RuntimeStatus; hasRuflo: boolean }
+  | { status: 'ready'; roster: AgentRoster; runtimeStatus: RuntimeStatus; hasRuflo: boolean }
 
 type DataAction =
-  | { type: 'LOADED'; agents: Agent[]; runtimeStatus: RuntimeStatus; hasRuflo: boolean }
+  | { type: 'LOADED'; roster: AgentRoster; runtimeStatus: RuntimeStatus; hasRuflo: boolean }
   | { type: 'FAILED'; message: string }
   | { type: 'STATUS_UPDATE'; runtimeStatus: RuntimeStatus }
 
 function dataReducer(state: DataState, action: DataAction): DataState {
   switch (action.type) {
     case 'LOADED':
-      return { status: 'ready', agents: action.agents, runtimeStatus: action.runtimeStatus, hasRuflo: action.hasRuflo }
+      return { status: 'ready', roster: action.roster, runtimeStatus: action.runtimeStatus, hasRuflo: action.hasRuflo }
     case 'FAILED':
       return { status: 'error', message: action.message }
     case 'STATUS_UPDATE':
@@ -36,24 +55,121 @@ function dataReducer(state: DataState, action: DataAction): DataState {
   }
 }
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function allAgents(roster: AgentRoster): RosterAgent[] {
+  return roster.departments.flatMap((d) => d.agents)
+}
+
+function activeAgentIds(runtimeStatus: RuntimeStatus): Set<string> {
+  const ids = new Set<string>()
+  if (runtimeStatus.active_agent_id) ids.add(runtimeStatus.active_agent_id)
+  for (const a of runtimeStatus.activity ?? []) ids.add(a.agent_id)
+  return ids
+}
+
+// ── Department selector (used by create/edit modal) ───────────────────────────
+
+interface DeptSelectorProps {
+  departments: RosterDepartment[]
+  value: string
+  onChange: (v: string) => void
+  id: string
+}
+
+function DeptSelector({ departments, value, onChange, id }: DeptSelectorProps) {
+  const [showCustom, setShowCustom] = useState(false)
+  const [customVal, setCustomVal] = useState('')
+  const customRef = useRef<HTMLInputElement>(null)
+
+  const existingNames = departments.map((d) => d.name)
+
+  function handleSelectChange(e: React.ChangeEvent<HTMLSelectElement>) {
+    const v = e.target.value
+    if (v === '__new__') {
+      setShowCustom(true)
+      setTimeout(() => customRef.current?.focus(), 0)
+    } else {
+      setShowCustom(false)
+      onChange(v)
+    }
+  }
+
+  function handleCustomChange(e: React.ChangeEvent<HTMLInputElement>) {
+    setCustomVal(e.target.value)
+    onChange(e.target.value)
+  }
+
+  // If the current value isn't in the list, show the custom input
+  const isCustom = value !== '' && !existingNames.includes(value)
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--sp-1)' }}>
+      {!showCustom && !isCustom ? (
+        <select
+          id={id}
+          className="office-field-input"
+          value={value}
+          onChange={handleSelectChange}
+        >
+          <option value="">Sin departamento</option>
+          {existingNames.map((name) => (
+            <option key={name} value={name}>{name}</option>
+          ))}
+          <option value="__new__">Nuevo departamento…</option>
+        </select>
+      ) : (
+        <div style={{ display: 'flex', gap: 'var(--sp-2)' }}>
+          <input
+            ref={customRef}
+            id={id}
+            type="text"
+            className="office-field-input"
+            value={isCustom ? value : customVal}
+            onChange={handleCustomChange}
+            placeholder="Nombre del nuevo departamento"
+            maxLength={60}
+            style={{ flex: 1 }}
+          />
+          <button
+            type="button"
+            className="office-btn office-btn--ghost"
+            style={{ height: 36, padding: '0 var(--sp-3)', fontSize: 'var(--text-label)' }}
+            onClick={() => {
+              setShowCustom(false)
+              setCustomVal('')
+              onChange('')
+            }}
+          >
+            ✕
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── CreateAgentModal ──────────────────────────────────────────────────────────
 
 interface CreateAgentModalProps {
+  departments: RosterDepartment[]
+  prefill?: { name: string; description: string; department: string }
   onClose: () => void
-  onCreated: (agent: Agent) => void
+  onCreated: (agent: RosterAgent) => void
 }
 
-function CreateAgentModal({ onClose, onCreated }: CreateAgentModalProps) {
-  const [name, setName] = useState('')
-  const [role, setRole] = useState('')
-  const [mission, setMission] = useState('')
+function CreateAgentModal({ departments, prefill, onClose, onCreated }: CreateAgentModalProps) {
+  const [name, setName] = useState(prefill?.name ?? '')
+  const [description, setDescription] = useState(prefill?.description ?? '')
+  const [department, setDepartment] = useState(prefill?.department ?? '')
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const nameId = 'create-agent-name'
-  const roleId = 'create-agent-role'
-  const missionId = 'create-agent-mission'
+  const descId = 'create-agent-desc'
+  const deptId = 'create-agent-dept'
   const errorId = 'create-agent-error'
   const firstInputRef = useRef<HTMLInputElement>(null)
+  const isClone = prefill !== undefined
 
   useEffect(() => {
     firstInputRef.current?.focus()
@@ -70,11 +186,21 @@ function CreateAgentModal({ onClose, onCreated }: CreateAgentModalProps) {
     try {
       const payload: CreateAgentPayload = {
         name: name.trim(),
-        role: role.trim() || undefined,
-        primary_mission: mission.trim() || undefined,
+        primary_mission: description.trim() || undefined,
+        department: department.trim() || undefined,
       }
       const created = await createAgent(payload)
-      onCreated(created)
+      // Map the Agent response to a RosterAgent for immediate UI update
+      const rosterAgent: RosterAgent = {
+        id: created.id,
+        name: created.name,
+        description: created.primary_mission ?? '',
+        source: 'custom',
+        department: department.trim() || '',
+        is_default: created.is_default,
+        color: created.color ?? null,
+      }
+      onCreated(rosterAgent)
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Error al crear el agente.')
     } finally {
@@ -92,7 +218,9 @@ function CreateAgentModal({ onClose, onCreated }: CreateAgentModalProps) {
     >
       <div className="office-modal">
         <div className="office-modal-header">
-          <h2 id="create-agent-title" className="office-modal-title">Nuevo agente</h2>
+          <h2 id="create-agent-title" className="office-modal-title">
+            {isClone ? 'Clonar agente' : 'Nuevo agente'}
+          </h2>
           <button
             type="button"
             className="office-modal-close"
@@ -104,6 +232,12 @@ function CreateAgentModal({ onClose, onCreated }: CreateAgentModalProps) {
         </div>
 
         <form onSubmit={handleSubmit} noValidate className="office-modal-form">
+          {isClone && (
+            <p style={{ fontSize: 'var(--text-label)', color: 'var(--ink3)', marginTop: '-var(--sp-2)' }}>
+              Copia personalizable de un agente Ruflo. Puedes modificarla libremente.
+            </p>
+          )}
+
           <div className="office-field">
             <label htmlFor={nameId} className="office-field-label">Nombre *</label>
             <input
@@ -122,28 +256,25 @@ function CreateAgentModal({ onClose, onCreated }: CreateAgentModalProps) {
           </div>
 
           <div className="office-field">
-            <label htmlFor={roleId} className="office-field-label">Rol</label>
-            <input
-              id={roleId}
-              type="text"
-              value={role}
-              onChange={(e) => setRole(e.target.value)}
-              className="office-field-input"
-              maxLength={80}
-              placeholder="Ej: Especialista en soporte"
-            />
-          </div>
-
-          <div className="office-field">
-            <label htmlFor={missionId} className="office-field-label">Misión</label>
+            <label htmlFor={descId} className="office-field-label">Descripción</label>
             <textarea
-              id={missionId}
-              value={mission}
-              onChange={(e) => setMission(e.target.value)}
+              id={descId}
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
               className="office-field-input office-field-textarea"
               maxLength={500}
               rows={3}
               placeholder="Describe la tarea principal del agente…"
+            />
+          </div>
+
+          <div className="office-field">
+            <label htmlFor={deptId} className="office-field-label">Departamento</label>
+            <DeptSelector
+              id={deptId}
+              departments={departments}
+              value={department}
+              onChange={setDepartment}
             />
           </div>
 
@@ -168,7 +299,9 @@ function CreateAgentModal({ onClose, onCreated }: CreateAgentModalProps) {
               disabled={pending}
               aria-busy={pending}
             >
-              {pending ? 'Creando…' : 'Crear agente'}
+              {pending
+                ? (isClone ? 'Clonando…' : 'Creando…')
+                : (isClone ? 'Crear copia' : 'Crear agente')}
             </button>
           </div>
         </form>
@@ -180,14 +313,16 @@ function CreateAgentModal({ onClose, onCreated }: CreateAgentModalProps) {
 // ── AgentDrawer ───────────────────────────────────────────────────────────────
 
 interface AgentDrawerProps {
-  agent: Agent
+  agent: RosterAgent
   isWorking: boolean
   onClose: () => void
+  onClone: (agent: RosterAgent) => void
 }
 
-function AgentDrawer({ agent, isWorking, onClose }: AgentDrawerProps) {
+function AgentDrawer({ agent, isWorking, onClose, onClone }: AgentDrawerProps) {
   const navigate = useNavigate()
   const initials = agent.name.charAt(0).toUpperCase()
+  const isFactory = agent.source === 'ruflo'
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
@@ -205,21 +340,38 @@ function AgentDrawer({ agent, isWorking, onClose }: AgentDrawerProps) {
     >
       <div className="office-drawer">
         <div className="office-drawer-header">
-          <div className="agent-avatar" style={{ background: agent.color }} aria-hidden="true">
+          <div
+            className="agent-avatar"
+            style={{ background: agent.color ?? 'var(--accent)' }}
+            aria-hidden="true"
+          >
             {initials}
           </div>
           <div style={{ flex: 1, minWidth: 0 }}>
             <h2 id="agent-drawer-title" className="office-drawer-title">{agent.name}</h2>
-            {agent.role && <p className="agent-role" style={{ margin: 0 }}>{agent.role}</p>}
+            {agent.department && (
+              <p className="agent-role" style={{ margin: 0 }}>{agent.department}</p>
+            )}
           </div>
           {agent.is_default && <span className="badge">Cerebro</span>}
+          {isFactory && (
+            <span
+              className="badge"
+              style={{
+                background: 'color-mix(in srgb, var(--ok) 15%, transparent)',
+                color: 'var(--ok)',
+              }}
+            >
+              Ruflo
+            </span>
+          )}
           <button type="button" className="office-modal-close" onClick={onClose} aria-label="Cerrar">✕</button>
         </div>
 
         <div className="office-drawer-body">
-          {agent.primary_mission && (
+          {agent.description && (
             <p className="agent-mission" style={{ marginBottom: 'var(--sp-5)' }}>
-              {agent.primary_mission}
+              {agent.description}
             </p>
           )}
 
@@ -242,20 +394,33 @@ function AgentDrawer({ agent, isWorking, onClose }: AgentDrawerProps) {
             >
               Chatear
             </button>
-            <button
-              type="button"
-              className="office-btn office-btn--ghost"
-              onClick={() => { navigate('/programadas'); onClose() }}
-            >
-              Tarea
-            </button>
-            <button
-              type="button"
-              className="office-btn office-btn--ghost"
-              onClick={() => { navigate('/agentes'); onClose() }}
-            >
-              Gestionar
-            </button>
+
+            {isFactory ? (
+              <button
+                type="button"
+                className="office-btn office-btn--ghost"
+                onClick={() => { onClone(agent); onClose() }}
+              >
+                Clonar y personalizar
+              </button>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  className="office-btn office-btn--ghost"
+                  onClick={() => { navigate('/programadas'); onClose() }}
+                >
+                  Tarea
+                </button>
+                <button
+                  type="button"
+                  className="office-btn office-btn--ghost"
+                  onClick={() => { navigate('/agentes'); onClose() }}
+                >
+                  Gestionar
+                </button>
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -266,13 +431,14 @@ function AgentDrawer({ agent, isWorking, onClose }: AgentDrawerProps) {
 // ── AgentCard (Tarjetas view) ─────────────────────────────────────────────────
 
 interface AgentCardProps {
-  agent: Agent
+  agent: RosterAgent
   isWorking: boolean
   onClick: () => void
 }
 
 function AgentCard({ agent, isWorking, onClick }: AgentCardProps) {
   const initials = agent.name.charAt(0).toUpperCase()
+  const isFactory = agent.source === 'ruflo'
 
   return (
     <article
@@ -285,15 +451,31 @@ function AgentCard({ agent, isWorking, onClick }: AgentCardProps) {
       style={{ cursor: 'pointer' }}
     >
       <div className="agent-card-header">
-        <div className="agent-avatar" style={{ background: agent.color }} aria-hidden="true">
+        <div
+          className="agent-avatar"
+          style={{ background: agent.color ?? 'var(--accent)' }}
+          aria-hidden="true"
+        >
           {initials}
         </div>
         <div className="agent-meta">
           <p className="agent-name">{agent.name}</p>
-          {agent.role && <p className="agent-role">{agent.role}</p>}
+          {agent.department && <p className="agent-role">{agent.department}</p>}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--sp-2)', flexShrink: 0 }}>
           {agent.is_default && <span className="badge">Cerebro</span>}
+          {isFactory && (
+            <span
+              className="badge"
+              style={{
+                background: 'color-mix(in srgb, var(--ok) 15%, transparent)',
+                color: 'var(--ok)',
+                fontSize: 'var(--text-micro)',
+              }}
+            >
+              Ruflo
+            </span>
+          )}
           <span
             className="office-status-dot"
             style={{ background: isWorking ? 'var(--warn)' : 'var(--ok)' }}
@@ -302,101 +484,190 @@ function AgentCard({ agent, isWorking, onClick }: AgentCardProps) {
           />
         </div>
       </div>
-      {agent.primary_mission && <p className="agent-mission">{agent.primary_mission}</p>}
+      {agent.description && <p className="agent-mission">{agent.description}</p>}
     </article>
+  )
+}
+
+// ── DepartmentSection ─────────────────────────────────────────────────────────
+
+interface DepartmentSectionProps {
+  dept: RosterDepartment
+  activeIds: Set<string>
+  onAgentClick: (agent: RosterAgent) => void
+  onCreateClick: () => void
+  sectionIndex: number
+}
+
+function DepartmentSection({ dept, activeIds, onAgentClick, onCreateClick, sectionIndex }: DepartmentSectionProps) {
+  const headingId = `section-dept-${dept.id}`
+  const isCustomDept = dept.kind === 'custom'
+
+  const descriptionByKind: Record<string, string> = {
+    cerebro: 'Orquestador principal — coordina todos los agentes.',
+    factory: 'Agentes especializados del swarm Ruflo — solo lectura.',
+    custom: '',
+  }
+
+  return (
+    <section aria-labelledby={headingId} className="office-section">
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 'var(--sp-3)' }}>
+        <h2 id={headingId} className="office-section-title">{dept.name}</h2>
+        {dept.kind === 'factory' && (
+          <span style={{ fontSize: 'var(--text-caption)', color: 'var(--ink4)' }}>Ruflo</span>
+        )}
+      </div>
+      {descriptionByKind[dept.kind] && (
+        <p className="office-section-desc">{descriptionByKind[dept.kind]}</p>
+      )}
+
+      <ul className="agent-grid" role="list">
+        {dept.agents.map((a) => (
+          <li key={a.id}>
+            <AgentCard
+              agent={a}
+              isWorking={activeIds.has(a.id)}
+              onClick={() => onAgentClick(a)}
+            />
+          </li>
+        ))}
+        {/* Only show the create card in the first custom department section, or
+            as the last item when there are no custom sections yet */}
+        {isCustomDept && sectionIndex === 0 && (
+          <li>
+            <button
+              type="button"
+              className="agent-card office-create-card"
+              onClick={onCreateClick}
+              aria-label="Crear nuevo agente"
+            >
+              <span className="office-create-icon" aria-hidden="true">+</span>
+              <span className="office-create-label">Crear agente</span>
+            </button>
+          </li>
+        )}
+      </ul>
+    </section>
   )
 }
 
 // ── TarjetasView ──────────────────────────────────────────────────────────────
 
 interface TarjetasViewProps {
-  agents: Agent[]
+  roster: AgentRoster
   runtimeStatus: RuntimeStatus
   hasRuflo: boolean
-  onAgentsChange: (agents: Agent[]) => void
+  onRosterChange: (roster: AgentRoster) => void
 }
 
-function TarjetasView({ agents, runtimeStatus, hasRuflo, onAgentsChange }: TarjetasViewProps) {
+interface ClonePrefill {
+  name: string
+  description: string
+  department: string
+}
+
+function TarjetasView({ roster, runtimeStatus, hasRuflo, onRosterChange }: TarjetasViewProps) {
   const [showCreateModal, setShowCreateModal] = useState(false)
-  const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null)
+  const [clonePrefill, setClonePrefill] = useState<ClonePrefill | undefined>(undefined)
+  const [selectedAgent, setSelectedAgent] = useState<RosterAgent | null>(null)
 
-  const activeIds = new Set<string>()
-  if (runtimeStatus.active_agent_id) activeIds.add(runtimeStatus.active_agent_id)
-  for (const a of runtimeStatus.activity ?? []) activeIds.add(a.agent_id)
+  const activeIds = activeAgentIds(runtimeStatus)
 
-  const cerebro = agents.filter((a) => a.is_default)
-  const misAgentes = agents.filter((a) => !a.is_default)
+  const cerebroDepts = roster.departments.filter((d) => d.kind === 'cerebro')
+  const factoryDepts = roster.departments.filter((d) => d.kind === 'factory')
+  const customDepts = roster.departments.filter((d) => d.kind === 'custom')
+  const hasCustomDepts = customDepts.length > 0
 
-  const handleAgentCreated = (created: Agent) => {
-    onAgentsChange([...agents, created])
+  function handleAgentCreated(agent: RosterAgent) {
+    // Insert the new custom agent into the appropriate department or create one
+    const targetDeptName = agent.department || 'Mis agentes'
+    const existing = roster.departments.find(
+      (d) => d.kind === 'custom' && d.name === targetDeptName,
+    )
+    if (existing) {
+      const updatedDepts = roster.departments.map((d) =>
+        d.id === existing.id ? { ...d, agents: [...d.agents, agent] } : d,
+      )
+      onRosterChange({ departments: updatedDepts })
+    } else {
+      const newDept: RosterDepartment = {
+        id: `custom-${targetDeptName.toLowerCase().replace(/\s+/g, '-')}`,
+        name: targetDeptName,
+        kind: 'custom',
+        agents: [agent],
+      }
+      onRosterChange({ departments: [...roster.departments, newDept] })
+    }
     setShowCreateModal(false)
+    setClonePrefill(undefined)
+  }
+
+  function handleCloneRequest(agent: RosterAgent) {
+    setClonePrefill({
+      name: `${agent.name} (copia)`,
+      description: agent.description,
+      department: 'Mis agentes',
+    })
+    setShowCreateModal(true)
   }
 
   return (
     <>
       <div className="office-tarjetas">
-        {/* ── Cerebro ── */}
-        {cerebro.length > 0 && (
-          <section aria-labelledby="section-cerebro" className="office-section">
-            <h2 id="section-cerebro" className="office-section-title">Cerebro</h2>
-            <p className="office-section-desc">Orquestador principal — coordina todos los agentes.</p>
-            <ul className="agent-grid" role="list">
-              {cerebro.map((a) => (
-                <li key={a.id}>
-                  <AgentCard
-                    agent={a}
-                    isWorking={activeIds.has(a.id)}
-                    onClick={() => setSelectedAgent(a)}
-                  />
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
+        {/* ── Cerebro departments ── */}
+        {cerebroDepts.map((dept) => (
+          <DepartmentSection
+            key={dept.id}
+            dept={dept}
+            activeIds={activeIds}
+            onAgentClick={setSelectedAgent}
+            onCreateClick={() => setShowCreateModal(true)}
+            sectionIndex={0}
+          />
+        ))}
 
-        {/* ── Mis agentes ── */}
-        <section aria-labelledby="section-agentes" className="office-section">
-          <h2 id="section-agentes" className="office-section-title">Mis agentes</h2>
-          {misAgentes.length === 0 ? (
-            <p className="state-label" style={{ padding: 0 }}>No tienes agentes adicionales.</p>
-          ) : (
-            <ul className="agent-grid" role="list">
-              {misAgentes.map((a) => (
-                <li key={a.id}>
-                  <AgentCard
-                    agent={a}
-                    isWorking={activeIds.has(a.id)}
-                    onClick={() => setSelectedAgent(a)}
-                  />
-                </li>
-              ))}
-              <li>
-                <button
-                  type="button"
-                  className="agent-card office-create-card"
-                  onClick={() => setShowCreateModal(true)}
-                  aria-label="Crear nuevo agente"
-                >
-                  <span className="office-create-icon" aria-hidden="true">+</span>
-                  <span className="office-create-label">Crear agente</span>
-                </button>
-              </li>
-            </ul>
-          )}
-          {misAgentes.length === 0 && (
+        {/* ── Custom (user) departments ── */}
+        {customDepts.map((dept, i) => (
+          <DepartmentSection
+            key={dept.id}
+            dept={dept}
+            activeIds={activeIds}
+            onAgentClick={setSelectedAgent}
+            onCreateClick={() => setShowCreateModal(true)}
+            sectionIndex={i}
+          />
+        ))}
+
+        {/* ── Empty-state for custom agents when no custom departments exist ── */}
+        {!hasCustomDepts && (
+          <section aria-labelledby="section-mis-agentes" className="office-section">
+            <h2 id="section-mis-agentes" className="office-section-title">Mis agentes</h2>
+            <p className="state-label" style={{ padding: 0 }}>No tienes agentes personalizados aún.</p>
             <button
               type="button"
               className="office-btn office-btn--ghost"
-              style={{ marginTop: 'var(--sp-4)' }}
+              style={{ marginTop: 'var(--sp-4)', alignSelf: 'flex-start' }}
               onClick={() => setShowCreateModal(true)}
             >
               + Crear agente
             </button>
-          )}
-        </section>
+          </section>
+        )}
 
-        {/* ── Swarm ruflo ── */}
-        {hasRuflo && (
+        {/* ── Factory (Ruflo) departments ── */}
+        {factoryDepts.map((dept) => (
+          <DepartmentSection
+            key={dept.id}
+            dept={dept}
+            activeIds={activeIds}
+            onAgentClick={setSelectedAgent}
+            onCreateClick={() => setShowCreateModal(true)}
+            sectionIndex={0}
+          />
+        ))}
+
+        {/* ── Ruflo swarm indicator (when detected via MCP but roster doesn't show it) ── */}
+        {hasRuflo && factoryDepts.length === 0 && (
           <section aria-labelledby="section-ruflo" className="office-section">
             <h2 id="section-ruflo" className="office-section-title">Swarm Ruflo</h2>
             <p className="office-section-desc">
@@ -412,11 +683,27 @@ function TarjetasView({ agents, runtimeStatus, hasRuflo, onAgentsChange }: Tarje
             </p>
           </section>
         )}
+
+        {/* ── Powered by Ruflo ── */}
+        <p style={{
+          fontSize: 'var(--text-micro)',
+          color: 'var(--ink4)',
+          textAlign: 'center',
+          paddingTop: 'var(--sp-4)',
+          paddingBottom: 'var(--sp-2)',
+        }}>
+          Powered by Ruflo
+        </p>
       </div>
 
       {showCreateModal && (
         <CreateAgentModal
-          onClose={() => setShowCreateModal(false)}
+          departments={roster.departments}
+          prefill={clonePrefill}
+          onClose={() => {
+            setShowCreateModal(false)
+            setClonePrefill(undefined)
+          }}
           onCreated={handleAgentCreated}
         />
       )}
@@ -426,6 +713,10 @@ function TarjetasView({ agents, runtimeStatus, hasRuflo, onAgentsChange }: Tarje
           agent={selectedAgent}
           isWorking={activeIds.has(selectedAgent.id)}
           onClose={() => setSelectedAgent(null)}
+          onClone={(agent) => {
+            setSelectedAgent(null)
+            handleCloneRequest(agent)
+          }}
         />
       )}
     </>
@@ -446,14 +737,14 @@ export default function OfficeView() {
 
     async function load() {
       try {
-        const [agents, runtimeStatus, mcpServers] = await Promise.all([
-          listAgents(),
+        const [roster, runtimeStatus, mcpServers] = await Promise.all([
+          getAgentRoster(),
           getRuntimeStatus(),
           listMcpServers(),
         ])
         if (!cancelled) {
           const hasRuflo = mcpServers.some((s) => s.slug === 'ruflo')
-          dispatch({ type: 'LOADED', agents, runtimeStatus, hasRuflo })
+          dispatch({ type: 'LOADED', roster, runtimeStatus, hasRuflo })
         }
       } catch (err: unknown) {
         if (!cancelled) {
@@ -482,9 +773,17 @@ export default function OfficeView() {
   }, [])
 
   const handleAgentClick = useCallback((agentId: string, _agentName: string) => {
-    // Navigate to chat scoped to this agent when clicked in the live view
     navigate(`/chat?agent_id=${encodeURIComponent(agentId)}`)
   }, [navigate])
+
+  // Convert roster agents to the engine's LumenAgent shape for the canvas
+  const engineAgents: LumenAgent[] = state.status === 'ready'
+    ? allAgents(state.roster).map(rosterAgentToLumenAgent)
+    : []
+
+  const engineRuntimeStatus: LumenRuntimeStatus = state.status === 'ready'
+    ? state.runtimeStatus
+    : { state: 'idle', active_task_count: 0 }
 
   return (
     <div className="office-view">
@@ -535,11 +834,16 @@ export default function OfficeView() {
           <>
             {tab === 'tarjetas' && (
               <TarjetasView
-                agents={state.agents}
+                roster={state.roster}
                 runtimeStatus={state.runtimeStatus}
                 hasRuflo={state.hasRuflo}
-                onAgentsChange={(agents) =>
-                  dispatch({ type: 'LOADED', agents, runtimeStatus: state.runtimeStatus, hasRuflo: state.hasRuflo })
+                onRosterChange={(roster) =>
+                  dispatch({
+                    type: 'LOADED',
+                    roster,
+                    runtimeStatus: state.runtimeStatus,
+                    hasRuflo: state.hasRuflo,
+                  })
                 }
               />
             )}
@@ -552,8 +856,8 @@ export default function OfficeView() {
                   </div>
                 }>
                   <OfficeCanvas
-                    agents={state.agents}
-                    runtimeStatus={state.runtimeStatus}
+                    agents={engineAgents}
+                    runtimeStatus={engineRuntimeStatus}
                     onAgentClick={handleAgentClick}
                   />
                 </Suspense>

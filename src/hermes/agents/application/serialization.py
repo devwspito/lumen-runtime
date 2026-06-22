@@ -26,6 +26,7 @@ def agent_to_dict(agent: Agent) -> dict[str, Any]:
         "forbidden_phrases": list(agent.forbidden_phrases),
         "autonomy_level": agent.autonomy_level.value,
         "is_default": agent.is_default,
+        "department": agent.department,
         "created_at": agent.created_at.isoformat(),
         "updated_at": agent.updated_at.isoformat(),
     }
@@ -44,6 +45,9 @@ def draft_from_dict(data: dict[str, Any]) -> AgentDraft:
         # Fail-closed: valor desconocido → default conservador
         autonomy = AutonomyLevel.BALANCED
 
+    raw_dept = data.get("department")
+    department: str | None = str(raw_dept).strip() or None if raw_dept is not None else None
+
     return AgentDraft(
         name=str(data.get("name", "")).strip(),
         role=str(data.get("role", "")),
@@ -57,4 +61,5 @@ def draft_from_dict(data: dict[str, Any]) -> AgentDraft:
             str(p) for p in data.get("forbidden_phrases", []) if str(p).strip()
         ),
         autonomy_level=autonomy,
+        department=department,
     )

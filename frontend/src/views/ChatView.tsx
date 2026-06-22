@@ -19,7 +19,7 @@ import {
 import { useNavigate } from 'react-router-dom'
 import { useChat } from '../hooks/useChat'
 import type { ChatMessage, ToolStep } from '../hooks/useChat'
-import { listProviders } from '../api/client'
+import { listProviders, uploadWorkspaceFile, ApiError } from '../api/client'
 import type { Provider } from '../api/types'
 import { ChatBridgeContext } from '../components/Layout'
 
@@ -258,7 +258,82 @@ function ModelPicker() {
   )
 }
 
+// ── Attachment chip ───────────────────────────────────────────────────────────
+
+interface AttachmentChipProps {
+  name: string
+  uploading: boolean
+  error: boolean
+  onRemove: () => void
+}
+
+function AttachmentChip({ name, uploading, error, onRemove }: AttachmentChipProps) {
+  return (
+    <div
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 'var(--sp-2)',
+        background: error
+          ? 'color-mix(in srgb, var(--danger) 12%, transparent)'
+          : 'var(--card2)',
+        border: `1px solid ${error ? 'var(--danger)' : 'var(--line2)'}`,
+        borderRadius: 'var(--r-sm)',
+        padding: '2px var(--sp-2)',
+        fontSize: 'var(--text-caption)',
+        color: error ? 'var(--danger)' : 'var(--ink2)',
+        maxWidth: 200,
+      }}
+    >
+      {uploading ? (
+        <span className="spin" aria-hidden="true" style={{ fontSize: 10 }}>⟳</span>
+      ) : (
+        <span aria-hidden="true" style={{ fontSize: 11 }}>{error ? '⚠' : '📄'}</span>
+      )}
+      <span
+        style={{
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+          flex: 1,
+          minWidth: 0,
+        }}
+        title={name}
+      >
+        {name}
+      </span>
+      <button
+        type="button"
+        onClick={onRemove}
+        aria-label={`Quitar adjunto ${name}`}
+        style={{
+          border: 'none',
+          background: 'transparent',
+          color: 'inherit',
+          cursor: 'pointer',
+          padding: 0,
+          lineHeight: 1,
+          fontSize: 11,
+          opacity: 0.7,
+          flexShrink: 0,
+        }}
+        disabled={uploading}
+      >
+        ✕
+      </button>
+    </div>
+  )
+}
+
 // ── Composer ──────────────────────────────────────────────────────────────────
+
+interface PendingAttachment {
+  id: string
+  file: File
+  uploading: boolean
+  uploadedPath: string | null
+  error: boolean
+}
 
 interface ComposerProps {
   disabled: boolean
@@ -271,6 +346,8 @@ interface ComposerProps {
 
 function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: ComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([])
 
   // Auto-grow textarea
   useLayoutEffect(() => {
@@ -283,7 +360,9 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
   function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      if (!disabled && value.trim()) onSend(value)
+      if (!disabled && (value.trim() || attachments.some((a) => a.uploadedPath))) {
+        handleSend()
+      }
     }
   }
 
@@ -291,8 +370,94 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
     onChange(e.target.value)
   }
 
+  async function handleFileSelect(e: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files ?? [])
+    // Reset input so the same file can be re-attached after removal
+    e.target.value = ''
+    if (files.length === 0) return
+
+    const newAttachments: PendingAttachment[] = files.map((f) => ({
+      id: `${Date.now()}-${Math.random()}`,
+      file: f,
+      uploading: true,
+      uploadedPath: null,
+      error: false,
+    }))
+
+    setAttachments((prev) => [...prev, ...newAttachments])
+
+    // Upload each file concurrently
+    await Promise.all(
+      newAttachments.map(async (att) => {
+        try {
+          const result = await uploadWorkspaceFile(att.file)
+          setAttachments((prev) =>
+            prev.map((a) =>
+              a.id === att.id ? { ...a, uploading: false, uploadedPath: result.path } : a,
+            ),
+          )
+        } catch (err) {
+          const msg = err instanceof ApiError ? err.message : 'Error al subir el archivo.'
+          console.error(`Attachment upload failed for ${att.file.name}: ${msg}`)
+          setAttachments((prev) =>
+            prev.map((a) =>
+              a.id === att.id ? { ...a, uploading: false, error: true } : a,
+            ),
+          )
+        }
+      }),
+    )
+  }
+
+  function removeAttachment(id: string) {
+    setAttachments((prev) => prev.filter((a) => a.id !== id))
+  }
+
+  function handleSend() {
+    const uploadedPaths = attachments
+      .filter((a) => a.uploadedPath !== null)
+      .map((a) => a.uploadedPath as string)
+
+    let text = value
+    if (uploadedPaths.length > 0) {
+      const refs = uploadedPaths.map((p) => `[Adjunto: ${p}]`).join('\n')
+      text = text.trim() ? `${text}\n\n${refs}` : refs
+    }
+
+    if (text.trim()) {
+      onSend(text)
+      setAttachments([])
+    }
+  }
+
+  const anyUploading = attachments.some((a) => a.uploading)
+  const canSend = !disabled && !anyUploading && (value.trim() !== '' || attachments.some((a) => a.uploadedPath))
+
   return (
     <div className="composer-wrap">
+      {/* Attachment chips */}
+      {attachments.length > 0 && (
+        <div
+          style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: 'var(--sp-2)',
+            paddingBottom: 'var(--sp-2)',
+          }}
+          aria-label="Archivos adjuntos"
+        >
+          {attachments.map((att) => (
+            <AttachmentChip
+              key={att.id}
+              name={att.file.name}
+              uploading={att.uploading}
+              error={att.error}
+              onRemove={() => removeAttachment(att.id)}
+            />
+          ))}
+        </div>
+      )}
+
       <div className="composer-box">
         <textarea
           ref={textareaRef}
@@ -306,6 +471,42 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
           rows={1}
         />
         <div className="composer-toolbar">
+          {/* Hidden file input — triggered by the attach button */}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*,.pdf,.txt,.md,.docx,.csv"
+            multiple
+            className="sr-only"
+            aria-label="Adjuntar archivo"
+            onChange={handleFileSelect}
+            tabIndex={-1}
+          />
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={disabled}
+            aria-label="Adjuntar archivo (imágenes, PDF, documentos)"
+            title="Adjuntar archivo"
+            style={{
+              border: 'none',
+              background: 'transparent',
+              color: 'var(--ink3)',
+              cursor: 'pointer',
+              padding: 'var(--sp-1)',
+              borderRadius: 'var(--r-sm)',
+              fontSize: 16,
+              lineHeight: 1,
+              display: 'flex',
+              alignItems: 'center',
+              transition: 'color 150ms ease',
+            }}
+            onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = 'var(--ink)' }}
+            onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = 'var(--ink3)' }}
+          >
+            <AttachIcon />
+          </button>
+
           <ModelPicker />
           <div className="composer-toolbar-right">
             {isStreaming ? (
@@ -320,12 +521,13 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
             ) : (
               <button
                 className="composer-send"
-                onClick={() => { if (value.trim()) onSend(value) }}
-                disabled={disabled || !value.trim()}
+                onClick={handleSend}
+                disabled={!canSend}
                 aria-label="Enviar mensaje (Enter)"
+                aria-busy={anyUploading}
                 type="button"
               >
-                {STRINGS.send}
+                {anyUploading ? 'Subiendo…' : STRINGS.send}
               </button>
             )}
           </div>
@@ -342,6 +544,20 @@ function ChevronIcon() {
   return (
     <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
       <path d="M4 3l4 3-4 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function AttachIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path
+        d="M13.5 7.5l-6 6a4 4 0 01-5.657-5.657l6-6a2.5 2.5 0 013.535 3.535L5.5 11.25a1 1 0 01-1.414-1.414L10 4"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
     </svg>
   )
 }

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
+import { sileo } from 'sileo'
 import { listConfiguredTasks, listRecentTasks, createTask, deleteTask, toggleTask, listAgents, ApiError } from '../api/client'
 import type { ConfiguredTask, RecentTask, Agent, CreateTaskPayload } from '../api/types'
 
@@ -145,16 +146,10 @@ function calReducer(s: CalState, a: CalAction): CalState {
   }
 }
 
-interface Toast { id: number; message: string; kind: 'ok' | 'warn' | 'error' }
-let seq = 0
-function useToasts() {
-  const [toasts, setToasts] = useState<Toast[]>([])
-  const show = (message: string, kind: Toast['kind'] = 'ok') => {
-    const id = ++seq
-    setToasts(t => [...t, { id, message, kind }])
-    setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 4000)
-  }
-  return { toasts, show }
+function show(message: string, kind: 'ok' | 'warn' | 'error' = 'ok') {
+  if (kind === 'ok') sileo.success({ title: message })
+  else if (kind === 'error') sileo.error({ title: message })
+  else sileo.warning({ title: message })
 }
 
 export default function CalendarView() {
@@ -165,7 +160,6 @@ export default function CalendarView() {
   const [calRef, setCalRef] = useState<Date>(() => { const n = new Date(); return new Date(n.getFullYear(), n.getMonth(), 1) })
   const [modalOpen, setModalOpen] = useState(false)
   const [modalPresetDate, setModalPresetDate] = useState<string | null>(null)
-  const { toasts, show } = useToasts()
 
   const agentsById = Object.fromEntries(state.agents.map(a => [a.id, a]))
 
@@ -236,8 +230,6 @@ export default function CalendarView() {
       </header>
 
       <div className="view-body cv-view-body">
-        <ToastList toasts={toasts} />
-
         {/* ── Scheduled tasks section ─────────────────────────────────────── */}
         <section className="cv-section" aria-label="Tareas programadas">
           <div className="cv-section-head">
@@ -729,17 +721,3 @@ function TaskModal({ agents, presetDate, onClose, onCreate }: TaskModalProps) {
   )
 }
 
-// ── Toast list ────────────────────────────────────────────────────────────────
-
-function ToastList({ toasts }: { toasts: Toast[] }) {
-  if (toasts.length === 0) return null
-  return (
-    <div className="cv-toast-list" aria-live="polite" aria-atomic="false">
-      {toasts.map(t => (
-        <div key={t.id} className={`cv-toast cv-toast--${t.kind}`} role="status">
-          {t.message}
-        </div>
-      ))}
-    </div>
-  )
-}

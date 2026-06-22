@@ -1,4 +1,5 @@
 import { useEffect, useReducer, useRef, useState } from 'react'
+import { sileo } from 'sileo'
 import { listMcpServers, addMcpServer, removeMcpServer, searchMcpRegistry, ApiError } from '../api/client'
 import type { McpServer, McpRegistryEntry } from '../api/types'
 
@@ -89,29 +90,24 @@ function reducer(_s: State, a: Action): State {
   }
 }
 
-interface Toast { id: number; message: string; kind: 'ok' | 'warn' | 'error'; durationMs?: number }
-let seq = 0
-function useToasts() {
-  const [toasts, setToasts] = useState<Toast[]>([])
-  const show = (message: string, kind: Toast['kind'] = 'ok', durationMs = 4000) => {
-    const id = ++seq
-    setToasts(t => [...t, { id, message, kind, durationMs }])
-    setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), durationMs)
-  }
-  return { toasts, show }
+function show(message: string, kind: 'ok' | 'warn' | 'error' = 'ok', durationMs = 4000) {
+  if (kind === 'ok') sileo.success({ title: message, duration: durationMs })
+  else if (kind === 'error') sileo.error({ title: message, duration: durationMs })
+  else sileo.warning({ title: message, duration: durationMs })
 }
 
 export default function McpView() {
   const [state, dispatch] = useReducer(reducer, { status: 'loading' })
   const [registryResults, setRegistryResults] = useState<McpRegistryEntry[]>([])
   const [registryLoading, setRegistryLoading] = useState(false)
-  const { toasts, show } = useToasts()
   const regInputRef = useRef<HTMLInputElement>(null)
 
   function load() {
     dispatch({ type: 'LOADING' })
     listMcpServers()
-      .then(servers => dispatch({ type: 'LOADED', servers }))
+      // Ruflo is a first-class Lumen integration, not a user-managed MCP server.
+      // The backend already hides it but we filter defensively client-side too.
+      .then(servers => dispatch({ type: 'LOADED', servers: servers.filter(s => s.slug !== 'ruflo') }))
       .catch((e: unknown) => dispatch({
         type: 'FAILED',
         message: e instanceof ApiError ? e.message : 'No se pudieron cargar los servidores MCP.',
@@ -179,8 +175,6 @@ export default function McpView() {
       </header>
 
       <div className="view-body cv-view-body">
-        <ToastList toasts={toasts} />
-
         {/* ── Active servers ──────────────────────────────────────────────── */}
         <section className="cv-section" aria-label="Servidores activos">
           <h2 className="cv-section-label">Servidores activos</h2>
@@ -477,17 +471,3 @@ function AddMcpForm({ onAdded, onToast }: AddMcpFormProps) {
   )
 }
 
-// ── Toast list ────────────────────────────────────────────────────────────────
-
-function ToastList({ toasts }: { toasts: Toast[] }) {
-  if (toasts.length === 0) return null
-  return (
-    <div className="cv-toast-list" aria-live="polite" aria-atomic="false">
-      {toasts.map(t => (
-        <div key={t.id} className={`cv-toast cv-toast--${t.kind}`} role="status">
-          {t.message}
-        </div>
-      ))}
-    </div>
-  )
-}

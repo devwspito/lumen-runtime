@@ -1780,36 +1780,6 @@ details[open] .tool-summary-group__chevron { transform: rotate(90deg); }
 
 .cv-search-row .cv-input { flex: 1; min-width: 0; }
 
-/* ── Toast list (per-view, fixed to top-right) ───────────────────────────── */
-
-.cv-toast-list {
-  position: fixed;
-  top: var(--sp-5);
-  right: var(--sp-5);
-  z-index: 300;
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-  max-width: 380px;
-  pointer-events: none;
-}
-
-.cv-toast {
-  padding: var(--sp-3) var(--sp-4);
-  border-radius: var(--r-sm);
-  font-size: var(--text-body);
-  font-weight: 500;
-  background: var(--card2);
-  color: var(--ink);
-  border: 1px solid var(--line2);
-  box-shadow: var(--shadow-floating);
-  pointer-events: auto;
-}
-
-.cv-toast--ok    { border-left: 3px solid var(--ok); }
-.cv-toast--warn  { border-left: 3px solid var(--warn); }
-.cv-toast--error { border-left: 3px solid var(--danger); }
-.cv-toast--info  { border-left: 3px solid var(--info); }
 
 /* ═══════════════════════════════════════════════════════════════════════════
    Providers view

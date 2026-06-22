@@ -58,6 +58,10 @@ _MIGRATION_AUTONOMY_LEVEL = (
     "ALTER TABLE agents ADD COLUMN autonomy_level TEXT NOT NULL DEFAULT 'balanced'"
 )
 
+# Idempotent migration: adds department to existing DBs without it.
+# NULL default → treated as "mis-agentes" by the roster endpoint.
+_MIGRATION_DEPARTMENT = "ALTER TABLE agents ADD COLUMN department TEXT"
+
 
 def _now_iso() -> str:
     return datetime.now(tz=UTC).isoformat()
@@ -73,6 +77,7 @@ class SqliteAgentRegistry:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(_SCHEMA)
             self._migrate_autonomy_level(conn)
+            self._migrate_department(conn)
         self._ensure_default()
 
     @staticmethod
@@ -80,6 +85,15 @@ class SqliteAgentRegistry:
         """Añade autonomy_level a DBs existentes sin la columna (idempotente)."""
         try:
             conn.execute(_MIGRATION_AUTONOMY_LEVEL)
+        except sqlite3.OperationalError:
+            # La columna ya existe — migration idempotente.
+            pass
+
+    @staticmethod
+    def _migrate_department(conn: sqlite3.Connection) -> None:
+        """Añade department (nullable) a DBs existentes sin la columna (idempotente)."""
+        try:
+            conn.execute(_MIGRATION_DEPARTMENT)
         except sqlite3.OperationalError:
             # La columna ya existe — migration idempotente.
             pass
@@ -116,8 +130,8 @@ class SqliteAgentRegistry:
             INSERT OR IGNORE INTO agents (
               agent_id, name, color, role, register_tone, primary_mission,
               instructions, language, golden_rules, forbidden_phrases,
-              is_default, autonomy_level, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              is_default, autonomy_level, department, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 agent.agent_id,
@@ -132,6 +146,7 @@ class SqliteAgentRegistry:
                 json.dumps(list(agent.forbidden_phrases), ensure_ascii=False),
                 1 if agent.is_default else 0,
                 agent.autonomy_level.value,
+                agent.department,
                 agent.created_at.isoformat(),
                 agent.updated_at.isoformat(),
             ),
@@ -139,12 +154,14 @@ class SqliteAgentRegistry:
 
     @staticmethod
     def _row_to_agent(row: sqlite3.Row) -> Agent:
-        raw_autonomy = row["autonomy_level"] if "autonomy_level" in row.keys() else "balanced"
+        keys = row.keys()
+        raw_autonomy = row["autonomy_level"] if "autonomy_level" in keys else "balanced"
         try:
             autonomy = AutonomyLevel(raw_autonomy)
         except ValueError:
             # Dato corrupto en DB → default conservador (fail-safe).
             autonomy = AutonomyLevel.BALANCED
+        department: str | None = row["department"] if "department" in keys else None
         return Agent(
             agent_id=row["agent_id"],
             name=row["name"],
@@ -158,6 +175,7 @@ class SqliteAgentRegistry:
             forbidden_phrases=tuple(json.loads(row["forbidden_phrases"])),
             is_default=bool(row["is_default"]),
             autonomy_level=autonomy,
+            department=department,
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )
@@ -199,6 +217,7 @@ class SqliteAgentRegistry:
             forbidden_phrases=draft.forbidden_phrases,
             is_default=False,
             autonomy_level=draft.autonomy_level,
+            department=draft.department,
             created_at=now,
             updated_at=now,
         )
@@ -245,6 +264,7 @@ class SqliteAgentRegistry:
                 forbidden_phrases=draft.forbidden_phrases,
                 is_default=existing.is_default,
                 autonomy_level=draft.autonomy_level,
+                department=draft.department,
                 created_at=existing.created_at,
                 updated_at=datetime.now(tz=UTC),
             )
@@ -255,7 +275,7 @@ class SqliteAgentRegistry:
                   name = ?, color = ?, role = ?, register_tone = ?,
                   primary_mission = ?, instructions = ?, language = ?,
                   golden_rules = ?, forbidden_phrases = ?,
-                  autonomy_level = ?, updated_at = ?
+                  autonomy_level = ?, department = ?, updated_at = ?
                 WHERE agent_id = ?
                 """,
                 (
@@ -269,6 +289,7 @@ class SqliteAgentRegistry:
                     json.dumps(list(updated.golden_rules), ensure_ascii=False),
                     json.dumps(list(updated.forbidden_phrases), ensure_ascii=False),
                     updated.autonomy_level.value,
+                    updated.department,
                     updated.updated_at.isoformat(),
                     agent_id,
                 ),

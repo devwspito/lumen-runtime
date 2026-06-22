@@ -1211,6 +1211,9 @@ def create_app() -> FastAPI:
         create_agents_router,
         create_composio_router,
     )
+    from hermes.shell_server.cowork.roster_api import (  # noqa: PLC0415
+        create_roster_router,
+    )
     from hermes.shell_server.cowork.skills_api import (  # noqa: PLC0415
         create_skills_hub_router,
     )
@@ -1231,6 +1234,9 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(create_providers_router())
+    # Roster must be registered BEFORE agents_router to avoid FastAPI resolving
+    # /api/v1/agents/roster as /api/v1/agents/{agent_id}.
+    app.include_router(create_roster_router())
     app.include_router(create_agents_router())
     app.include_router(create_composio_router())
     app.include_router(create_skills_hub_router())

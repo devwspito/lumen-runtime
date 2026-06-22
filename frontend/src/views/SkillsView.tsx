@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
+import { sileo } from 'sileo'
 import {
   listSkills, searchSkillsHub, listHubSkills, installSkill, getHubOpStatus,
   uninstallHubSkill, promoteSkill,
@@ -54,16 +55,10 @@ function installedReducer(_s: InstalledState, a: InstalledAction): InstalledStat
 // Teach-skill phase: discriminated union of the 4 states
 type TeachPhase = 'idle' | 'form' | 'recording' | 'synth'
 
-interface Toast { id: number; message: string; kind: 'ok' | 'warn' | 'error' }
-let seq = 0
-function useToasts() {
-  const [toasts, setToasts] = useState<Toast[]>([])
-  const show = (message: string, kind: Toast['kind'] = 'ok') => {
-    const id = ++seq
-    setToasts(t => [...t, { id, message, kind }])
-    setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 5000)
-  }
-  return { toasts, show }
+function show(message: string, kind: 'ok' | 'warn' | 'error' = 'ok') {
+  if (kind === 'ok') sileo.success({ title: message })
+  else if (kind === 'error') sileo.error({ title: message })
+  else sileo.warning({ title: message })
 }
 
 export default function SkillsView() {
@@ -76,8 +71,6 @@ export default function SkillsView() {
   const teachSessionRef = useRef<string | null>(null)
   const teachNameRef = useRef<HTMLInputElement>(null)
   const teachDescRef = useRef<HTMLTextAreaElement>(null)
-  const { toasts, show } = useToasts()
-
   // ── Skill name for teach form (needed inside stop handler)
   const teachNameValueRef = useRef('')
 
@@ -230,8 +223,6 @@ export default function SkillsView() {
       </header>
 
       <div className="view-body cv-view-body">
-        <ToastList toasts={toasts} />
-
         {/* ── Teach a skill ─────────────────────────────────────────────── */}
         <section className="cv-section" aria-label="Enseñar una skill">
           <h2 className="cv-section-label">Enseñar una skill</h2>
@@ -494,16 +485,3 @@ function HubResultRow({ item, installedNames, onInstall }: HubResultRowProps) {
 }
 
 // ── Toast list ────────────────────────────────────────────────────────────────
-
-function ToastList({ toasts }: { toasts: Toast[] }) {
-  if (toasts.length === 0) return null
-  return (
-    <div className="cv-toast-list" aria-live="polite" aria-atomic="false">
-      {toasts.map(t => (
-        <div key={t.id} className={`cv-toast cv-toast--${t.kind}`} role="status">
-          {t.message}
-        </div>
-      ))}
-    </div>
-  )
-}

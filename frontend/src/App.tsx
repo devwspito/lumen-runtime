@@ -1,5 +1,6 @@
 import { lazy, Suspense } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { Toaster } from 'sileo'
 import Layout from './components/Layout'
 import ChatView from './views/ChatView'
 import ProvidersView from './views/ProvidersView'
@@ -25,6 +26,7 @@ function OfficeFallback() {
 export default function App() {
   return (
     <BrowserRouter basename="/app">
+      <Toaster position="top-right" />
       <Routes>
         <Route element={<Layout />}>
           <Route index element={<Navigate to="/chat" replace />} />

@@ -1,4 +1,5 @@
 import { useEffect, useReducer, useRef, useState } from 'react'
+import { sileo } from 'sileo'
 import {
   listProviders, listNativeProviders, addProvider, setActiveProvider,
   testProvider, deleteProvider, startProviderOAuth, getProviderOAuthStatus,
@@ -55,22 +56,14 @@ function reducer(_state: State, action: Action): State {
   }
 }
 
-interface Toast { id: number; message: string; kind: 'ok' | 'warn' | 'error' }
-let toastSeq = 0
-
-function useToasts() {
-  const [toasts, setToasts] = useState<Toast[]>([])
-  const show = (message: string, kind: Toast['kind'] = 'ok') => {
-    const id = ++toastSeq
-    setToasts(t => [...t, { id, message, kind }])
-    setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 4000)
-  }
-  return { toasts, show }
+function show(message: string, kind: 'ok' | 'warn' | 'error' = 'ok') {
+  if (kind === 'ok') sileo.success({ title: message })
+  else if (kind === 'error') sileo.error({ title: message })
+  else sileo.warning({ title: message })
 }
 
 export default function ProvidersView() {
   const [state, dispatch] = useReducer(reducer, { status: 'loading' })
-  const { toasts, show } = useToasts()
 
   function load() {
     dispatch({ type: 'RELOAD' })
@@ -104,8 +97,6 @@ export default function ProvidersView() {
       </header>
 
       <div className="view-body cv-view-body">
-        <ToastList toasts={toasts} />
-
         {state.status === 'loading' && (
           <div className="state-container" aria-busy="true" aria-live="polite">
             <p className="state-label">Cargando proveedores…</p>
@@ -183,7 +174,7 @@ interface ProviderRowProps {
   provider: Provider
   isConfigured: boolean
   onRefresh: () => void
-  onToast: (msg: string, kind: Toast['kind']) => void
+  onToast: (msg: string, kind: 'ok' | 'warn' | 'error') => void
 }
 
 function ProviderRow({ provider, isConfigured, onRefresh, onToast }: ProviderRowProps) {
@@ -377,7 +368,7 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast }: ProviderRow
 
 interface CustomProviderCardProps {
   onAdded: () => void
-  onToast: (msg: string, kind: Toast['kind']) => void
+  onToast: (msg: string, kind: 'ok' | 'warn' | 'error') => void
 }
 
 function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
@@ -484,17 +475,3 @@ function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
   )
 }
 
-// ── Toast list ────────────────────────────────────────────────────────────────
-
-function ToastList({ toasts }: { toasts: Toast[] }) {
-  if (toasts.length === 0) return null
-  return (
-    <div className="cv-toast-list" aria-live="polite" aria-atomic="false">
-      {toasts.map(t => (
-        <div key={t.id} className={`cv-toast cv-toast--${t.kind}`} role="status">
-          {t.message}
-        </div>
-      ))}
-    </div>
-  )
-}

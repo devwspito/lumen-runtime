@@ -1,4 +1,5 @@
 import { useEffect, useReducer, useRef, useState } from 'react'
+import { sileo } from 'sileo'
 import {
   getComposioStatus, listComposioConnected, listComposioApps,
   connectComposioApp, setComposioApiKey,
@@ -31,23 +32,16 @@ function composioReducer(_s: ComposioState, a: ComposioAction): ComposioState {
   }
 }
 
-interface Toast { id: number; message: string; kind: 'ok' | 'warn' | 'error' | 'info' }
-let seq = 0
-
-function useToasts() {
-  const [toasts, setToasts] = useState<Toast[]>([])
-  const show = (message: string, kind: Toast['kind'] = 'ok') => {
-    const id = ++seq
-    setToasts(t => [...t, { id, message, kind }])
-    setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 5000)
-  }
-  return { toasts, show }
+function show(message: string, kind: 'ok' | 'warn' | 'error' | 'info' = 'ok') {
+  if (kind === 'ok') sileo.success({ title: message })
+  else if (kind === 'error') sileo.error({ title: message })
+  else if (kind === 'warn') sileo.warning({ title: message })
+  else sileo.info({ title: message })
 }
 
 export default function IntegrationsView() {
   const [composioState, dispatch] = useReducer(composioReducer, { status: 'loading' })
   const [wsStatus, setWsStatus] = useState<WebSearchStatus | null>(null)
-  const { toasts, show } = useToasts()
 
   async function loadComposio() {
     dispatch({ type: 'LOADING' })
@@ -85,8 +79,6 @@ export default function IntegrationsView() {
       </header>
 
       <div className="view-body cv-view-body">
-        <ToastList toasts={toasts} />
-
         {/* ── Web search (Brave) ─────────────────────────────────────────── */}
         <section className="cv-section" aria-label="Búsqueda web">
           <h2 className="cv-section-label">Búsqueda web</h2>
@@ -347,17 +339,3 @@ function WebSearchCard({ status, onSaved, onToast }: WebSearchCardProps) {
   )
 }
 
-// ── Toast list ────────────────────────────────────────────────────────────────
-
-function ToastList({ toasts }: { toasts: Toast[] }) {
-  if (toasts.length === 0) return null
-  return (
-    <div className="cv-toast-list" aria-live="polite" aria-atomic="false">
-      {toasts.map(t => (
-        <div key={t.id} className={`cv-toast cv-toast--${t.kind}`} role="status">
-          {t.message}
-        </div>
-      ))}
-    </div>
-  )
-}
