@@ -75,12 +75,45 @@ function _autonomyLabel(level) {
 // ── Live state ─────────────────────────────────────────────────────────────────
 
 /**
+ * Map a raw tool name to a short friendly label for the status line.
+ *
+ * Rules (in order):
+ *  - mcp__ruflo__<suffix>  → "ruflo: <suffix>"  (uses i18n.toolRuflo template)
+ *  - tool_search            → i18n.toolSearch
+ *  - anything else          → raw name, truncated to 28 chars
+ */
+function _toolLabel(toolName) {
+  if (!toolName) return '';
+  if (toolName.startsWith('mcp__ruflo__')) {
+    const suffix = toolName.slice('mcp__ruflo__'.length);
+    return t('office.toolRuflo').replace('{name}', suffix);
+  }
+  if (toolName === 'tool_search') return t('office.toolSearch');
+  return toolName.length > 28 ? toolName.slice(0, 27) + '…' : toolName;
+}
+
+/**
+ * Find the live-activity entry for the given agentId from the runtime payload.
+ * Returns the tool name string, or '' if nothing is dispatching for that agent.
+ */
+function _activeTool(agentId, runtime) {
+  const activity = runtime != null && Array.isArray(runtime.activity)
+    ? runtime.activity
+    : [];
+  const entry = activity.find(e => e.agent_id === agentId);
+  return entry ? (entry.tool || '') : '';
+}
+
+/**
  * Apply active + working state to every rendered agent card.
  *
  * Cards expose data-agent-id. The active agent is determined by activeId
  * (from /agents/active). Working state is driven by runtime.active_task_count > 0
  * (real daemon count, never faked). Only the active agent gets the working
  * animation — non-active agents are never animated regardless of count.
+ *
+ * When a real tool is dispatching (runtime.activity contains an entry for the
+ * active agent), its friendly label is shown under the card status text.
  *
  * Animation classes live in style.css under @media (prefers-reduced-motion: no-preference)
  * so the keyframes are never applied when the user prefers reduced motion.
@@ -96,6 +129,11 @@ function _applyLiveState(activeId, runtime) {
     const color  = avatar ? avatar.dataset.color || 'var(--accent)' : 'var(--accent)';
 
     if (isActive && working) {
+      const rawTool  = _activeTool(activeId, runtime);
+      const toolText = rawTool
+        ? t('office.workingOn').replace('{tool}', _toolLabel(rawTool))
+        : t('office.working');
+
       if (dot) {
         dot.style.background = 'var(--ok)';
         dot.title = t('office.working');
@@ -106,7 +144,7 @@ function _applyLiveState(activeId, runtime) {
         avatar.style.boxShadow = `0 0 0 4px ${color}33`;
         avatar.style.animation = 'oc-pulse 1.4s ease-in-out infinite';
       }
-      if (status) { status.textContent = t('office.working'); status.style.color = 'var(--ok)'; }
+      if (status) { status.textContent = toolText; status.style.color = 'var(--ok)'; }
       card.style.borderColor = color;
     } else if (isActive) {
       if (dot) {
@@ -128,6 +166,27 @@ function _applyLiveState(activeId, runtime) {
       card.style.borderColor = 'var(--line)';
     }
   });
+
+  // ── Swarm card live state ────────────────────────────────────────────────
+  // The swarm card is rebuilt once; _applyLiveState mutates it on each poll.
+  const swarmCard = document.querySelector('.oc-swarm-card');
+  if (swarmCard) {
+    const rufloActive = runtime != null && runtime.ruflo_active === true;
+    const swarmStatus = swarmCard.querySelector('.oc-swarm-card__live-status');
+    if (rufloActive) {
+      swarmCard.classList.add('oc-swarm-card--active');
+      if (swarmStatus) {
+        swarmStatus.textContent = t('office.swarmActive');
+        swarmStatus.hidden = false;
+      }
+    } else {
+      swarmCard.classList.remove('oc-swarm-card--active');
+      if (swarmStatus) {
+        swarmStatus.textContent = '';
+        swarmStatus.hidden = true;
+      }
+    }
+  }
 }
 
 // ── Agent card ─────────────────────────────────────────────────────────────────
@@ -212,6 +271,9 @@ function _buildSwarmCard(rufloServer) {
   card.className = 'oc-swarm-card';
   card.setAttribute('role', 'status');
   card.setAttribute('aria-label', t('office.deptSwarm'));
+  card.setAttribute('aria-live', 'polite');
+  // oc-swarm-card__live-status: mutated by _applyLiveState on each poll.
+  // Hidden by default; visible only when ruflo_active signal is true.
   card.innerHTML = `
     <span class="oc-swarm-card__icon" aria-hidden="true">⚡</span>
     <span class="oc-swarm-card__name">${esc(t('office.deptSwarm'))}</span>
@@ -221,6 +283,7 @@ function _buildSwarmCard(rufloServer) {
       </span>
       ${toolCount > 0 ? `<span class="oc-badge oc-badge--tools">${toolCount} ${esc(t('office.swarmTools'))}</span>` : ''}
     </span>
+    <span class="oc-swarm-card__live-status" aria-live="polite" hidden></span>
     <p class="oc-swarm-card__hint">${esc(t('office.swarmHint'))}</p>`;
   return card;
 }

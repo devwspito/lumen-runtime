@@ -409,15 +409,16 @@ class DbusRuntimeServiceWiring:
         return self._agent_registry.active_agent_id()
 
     def runtime_status(self) -> dict:
-        """Return the real live runtime status: state, active_task_count, active_agent_id.
+        """Return the real live runtime status: state, active_task_count, active_agent_id,
+        activity (in-flight tool per task), and ruflo_active signal.
 
         Read-only, no authZ — same policy as get_active_agent / list_providers.
-        Fail-soft: any error returns the idle shape so the UI always gets a valid dict.
+        Fail-soft: core keys always present; activity/ruflo_active omitted on error.
         """
         try:
             count = self._worker_count_fn() if self._worker_count_fn is not None else 0
             active_agent_id = self.get_active_agent()
-            return {
+            status: dict = {
                 "state": "working" if count > 0 else "idle",
                 "active_task_count": count,
                 "active_agent_id": active_agent_id,
@@ -431,6 +432,18 @@ class DbusRuntimeServiceWiring:
                 "active_agent_id": "",
                 "captured_at": datetime.now(tz=UTC).isoformat(),
             }
+
+        try:
+            from hermes.runtime import live_activity  # noqa: PLC0415
+            activity = live_activity.snapshot()
+            status["activity"] = activity
+            status["ruflo_active"] = any(
+                e.get("tool", "").startswith("mcp__ruflo__") for e in activity
+            )
+        except Exception:  # noqa: BLE001 — activity is additive; omit on error
+            logger.debug("hermes.dbus.runtime_status_activity_error", exc_info=True)
+
+        return status
 
     async def set_active_agent(self, *, agent_id: str, sender_uid: int) -> None:
         self._authorize(sender_uid, operation="set_active_agent")

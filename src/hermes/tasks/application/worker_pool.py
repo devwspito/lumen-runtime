@@ -311,6 +311,14 @@ class WorkerPool:
                 await self._process(item)
             finally:
                 self._active_count -= 1
+                # Remove any live-activity entry for this task so the registry
+                # never leaks a completed tool. Fail-soft: import errors or
+                # registry errors must never kill the worker.
+                try:
+                    from hermes.runtime import live_activity  # noqa: PLC0415
+                    live_activity.clear(str(item.id))
+                except Exception:  # noqa: BLE001
+                    pass
 
     async def _idle_with_wake(self, seconds: float) -> None:
         """Espera interruptible: wake_one() o shutdown sale antes del timeout."""

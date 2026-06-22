@@ -437,6 +437,8 @@ def _build_tool_call_emitter(
     task_id: "UUID",
     loop: "asyncio.AbstractEventLoop",
     accumulator: "list[dict[str, Any]] | None" = None,
+    *,
+    live_agent_id: str = "",
 ) -> "Callable[[str, dict[str, Any]], None]":
     """Return a sync callable that emits a tool_call StreamFrame from the executor thread.
 
@@ -451,13 +453,23 @@ def _build_tool_call_emitter(
     order) so the engine can persist the tool steps on CycleOutput.tool_steps —
     enabling a conversation reload to reconstruct the tool-step cards (the live
     frames alone are not persisted).
+
+    `live_agent_id`: when provided, each dispatch also records the tool in the
+    process-wide live_activity registry so runtime_status can surface it.
     """
     from hermes.tasks.control_plane.domain.ports import StreamChunkKind, TaskStreamChunk  # noqa: PLC0415
+    from hermes.runtime import live_activity  # noqa: PLC0415
+
+    _task_id_str = str(task_id)
 
     def _emitter(function_name: str, function_args: dict[str, Any]) -> None:
         descriptor = _describe_tool_call(function_name, function_args)
         if accumulator is not None:
             accumulator.append(descriptor)
+        # Record real in-flight tool BEFORE emitting the frame so the registry
+        # is always up-to-date by the time the frame reaches the client.
+        if live_agent_id:
+            live_activity.record(_task_id_str, live_agent_id, function_name)
         chunk = TaskStreamChunk(kind=StreamChunkKind.TOOL_CALL, tool_call=descriptor)
         try:
             fut = asyncio.run_coroutine_threadsafe(
@@ -1824,9 +1836,11 @@ class NousReasoningEngine:
                 conversation_id=_conv_id_for_dbus,
             )
             # Build the tool_call frame emitter from the same chunk_sink/task_id/loop.
+            # Pass live_agent_id so each dispatch also updates the live_activity registry.
             self._chunk_sink_emitter: "Callable[[str, dict[str, Any]], None] | None" = (
                 _build_tool_call_emitter(
-                    _chunk_sink, _task_id_for_stream, loop, accumulator=_tool_steps_acc
+                    _chunk_sink, _task_id_for_stream, loop, accumulator=_tool_steps_acc,
+                    live_agent_id=active_agent_id or "",
                 )
             )
         else:

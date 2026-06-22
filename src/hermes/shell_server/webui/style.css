@@ -1979,6 +1979,33 @@ details[open] .tool-summary-group__chevron { transform: rotate(90deg); }
   max-width: 360px;
 }
 
+/* Live-status label: shown only when ruflo_active is true (toggled by JS). */
+.oc-swarm-card__live-status {
+  font-size: var(--text-caption);
+  font-weight: 600;
+  color: var(--ok);
+  flex-basis: 100%;
+  padding-top: 2px;
+}
+
+/* Active state: pulsing border + icon glow when Cerebro is using ruflo. */
+.oc-swarm-card--active {
+  border-color: var(--ok);
+  box-shadow: 0 0 0 1px var(--ok);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .oc-swarm-card--active .oc-swarm-card__icon {
+    animation: oc-pulse 1.4s ease-in-out infinite;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .oc-swarm-card--active .oc-swarm-card__icon {
+    animation: none;
+  }
+}
+
 /* Agent drawer */
 .oc-drawer-backdrop {
   position: fixed;
