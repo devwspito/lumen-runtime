@@ -22,7 +22,15 @@ _TTL_WITHOUT_SHA256 = 3_600  # 1 h
 
 
 class ScanBlockedError(RuntimeError):
-    """Raised when auto_block_fail=True and scan verdict is FAIL."""
+    """Raised when auto_block_fail=True and scan verdict is FAIL.
+
+    ``record`` carries the ScanRecord that produced the FAIL so callers can
+    surface the real score and risks to the UI without a second DB lookup.
+    """
+
+    def __init__(self, message: str, record: "ScanRecord | None" = None) -> None:
+        super().__init__(message)
+        self.record = record
 
 
 class ScanService:
@@ -78,7 +86,8 @@ class ScanService:
             if policy.auto_block_fail and cached.verdict == Verdict.FAIL:
                 raise ScanBlockedError(
                     f"Install blocked (cached): scan verdict FAIL "
-                    f"for {target.kind}:{target.identifier}"
+                    f"for {target.kind}:{target.identifier}",
+                    record=cached,
                 )
             return cached
 
@@ -121,10 +130,21 @@ class ScanService:
         if must_block:
             raise ScanBlockedError(
                 f"Install blocked: scan verdict FAIL (score={score_value}) "
-                f"for {target.kind}:{target.identifier}"
+                f"for {target.kind}:{target.identifier}",
+                record=record,
             )
 
         return record
+
+    def allow_target(self, scan_id: UUID) -> None:
+        """Record an owner-sovereign ALLOWED decision for a previously scanned target.
+
+        Called by the install mutator after the owner explicitly accepts a FAIL
+        verdict.  The scan ALWAYS ran first — this only records the decision so
+        the next scan() call finds decision=ALLOWED in the cache and lets the
+        install proceed.
+        """
+        self._history_repo.update_decision(scan_id, ScanDecision.ALLOWED)
 
     # ------------------------------------------------------------------
     # Private helpers

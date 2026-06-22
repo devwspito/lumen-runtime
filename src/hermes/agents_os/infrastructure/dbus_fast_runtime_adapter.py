@@ -702,11 +702,15 @@ class Runtime1ServiceInterface(ServiceInterface):
         return json.dumps(self._wiring.list_hub_skills())
 
     @method()
-    async def InstallHubSkill(self, identifier: "s") -> "s":  # noqa: N802,F821,UP037
-        """Instala una skill del hub (thread + op_id sondeable)."""
+    async def InstallHubSkill(self, identifier: "s", force: "b") -> "s":  # noqa: N802,F821,UP037
+        """Instala una skill del hub (thread + op_id sondeable).
+
+        force=True: owner-sovereign override — honrado SOLO porque el sender_uid ya
+        pasó el gate de operador (_resolve_current_sender_uid + _authorize_and_resolve).
+        """
         sender_uid = await self._resolve_current_sender_uid()
         return json.dumps(self._wiring.install_hub_skill(
-            identifier=identifier, sender_uid=sender_uid))
+            identifier=identifier, sender_uid=sender_uid, force=bool(force)))
 
     @method()
     async def UninstallHubSkill(self, name: "s") -> "s":  # noqa: N802,F821,UP037

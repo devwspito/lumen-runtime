@@ -42,6 +42,7 @@ logger = logging.getLogger("hermes.shell_server.cowork.skills_api")
 
 class InstallSkillRequest(BaseModel):
     identifier: str = Field(min_length=1, description="Hub skill identifier (e.g. 'pdf-tools')")
+    force: bool = Field(default=False, description="Owner-sovereign override: install despite FAIL verdict")
 
 
 class SynthesizeSkillRequest(BaseModel):
@@ -254,10 +255,15 @@ def create_skills_hub_router() -> APIRouter:
 
     @router.post("/install", status_code=202)
     async def install_hub_skill(request: Request, body: InstallSkillRequest) -> dict:
-        """Install a skill from the hub. Returns {op_id, status}."""
+        """Install a skill from the hub. Returns {op_id, status}.
+
+        When body.force=True the owner-sovereign override is forwarded to the
+        daemon.  The operator-token middleware already fronts this route so only
+        authenticated operators can set force.
+        """
         proxy = request.app.state.dbus_proxy
         try:
-            return await proxy.call_mutator("install_hub_skill", body.identifier)
+            return await proxy.call_mutator("install_hub_skill", body.identifier, body.force)
         except AgentUnavailable as exc:
             _raise_503(exc, "install_hub_skill")
 

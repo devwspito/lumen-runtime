@@ -269,9 +269,15 @@ export function listHubSkills() {
   return request('/skills/hub').catch(_emptyOnNotFound([]));
 }
 
-/** Install a hub skill. Body MUST be {identifier}. Returns 202 {op_id, status}. */
-export function installSkill(identifier) {
-  return request('/skills/hub/install', { method: 'POST', body: JSON.stringify({ identifier }) });
+/** Install a hub skill. Returns 202 {op_id, status} or {ok:false, blocked, score, risks, scan_id}.
+ *  force=true: owner-sovereign override — sends the FAIL scan result's scan_id back to the daemon
+ *  so it records decision=ALLOWED and proceeds.  Only call with force=true after the owner has
+ *  explicitly confirmed the risk shown in the blocked response.
+ * @param {string} identifier
+ * @param {boolean} [force=false]
+ */
+export function installSkill(identifier, force = false) {
+  return request('/skills/hub/install', { method: 'POST', body: JSON.stringify({ identifier, force }) });
 }
 
 /** Poll an async hub install/uninstall operation. */

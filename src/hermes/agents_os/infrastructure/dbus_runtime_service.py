@@ -1239,26 +1239,81 @@ class DbusRuntimeServiceWiring:
             "risks": risks,
         })
 
-    def install_hub_skill(self, *, identifier: str, sender_uid: int) -> dict:
+    def install_hub_skill(self, *, identifier: str, sender_uid: int, force: bool = False) -> dict:
         """Instala una skill del hub (clona + valida). Muta → authZ operador.
 
         Operación de red/git potencialmente larga → corre en thread y se
         sondea con get_hub_op_status(op_id). Mismo patrón que el OAuth.
 
-        Security: runs a ScanService scan BEFORE do_install. Fail-safe: if
-        the scan raises, a WARNING is logged and the install proceeds normally
-        (scan is additive; must never block the install path). If the scan
+        Security: runs a ScanService scan BEFORE do_install. If the scan
         verdict is FAIL and policy.auto_block_fail is True, the install is
-        blocked and a ScanCompleted + InstallReviewRequested signal is emitted.
+        blocked. When force=True (operator-gated path only) the block dict is
+        returned to the caller with scan_id so the owner can review real score
+        and risks. On force=True we record decision=ALLOWED via
+        ScanService.allow_target(), then re-run the scan — the cache now
+        returns decision=ALLOWED so scan_service no longer raises → proceed.
         """
         self._authorize_and_resolve(sender_uid, operation="install_hub_skill")
         ident = (identifier or "").strip()
         if not ident:
             return {"error": "identifier vacío"}
+
         scan_result = self._scan_hub_target(ident)
         if scan_result is not None and scan_result.get("blocked"):
-            return scan_result
-        return _start_hub_op("install", ident, scan_record=scan_result.get("record") if scan_result else None, signal_emitter=self._scan_signal_emitter)
+            if not force:
+                return scan_result
+            return self._apply_owner_override_and_rescan(ident, scan_result)
+
+        return _start_hub_op(
+            "install", ident,
+            scan_record=scan_result.get("record") if scan_result else None,
+            signal_emitter=self._scan_signal_emitter,
+        )
+
+    def _apply_owner_override_and_rescan(self, identifier: str, block: dict) -> dict:
+        """Record owner-sovereign ALLOWED decision then re-scan so the gate passes.
+
+        Invariant: the scan ALREADY ran (block was produced by _scan_hub_target).
+        This only sets decision=ALLOWED on the existing record, never skips the scan.
+        """
+        from uuid import UUID as _UUID  # noqa: PLC0415
+
+        scan_svc = self._scan_service_lazy()
+        if scan_svc is None:
+            return {"ok": False, "blocked": True,
+                    "error": "Security Center no desplegado — no se puede registrar override."}
+
+        scan_id_str = block.get("scan_id") or ""
+        try:
+            scan_id = _UUID(scan_id_str)
+        except (ValueError, AttributeError):
+            return {"ok": False, "blocked": True,
+                    "error": f"scan_id inválido en el bloqueo: {scan_id_str!r}"}
+
+        scan_svc.allow_target(scan_id)
+        logger.warning(
+            "hermes.dbus.install_owner_override identifier=%s scan_id=%s "
+            "— instalación permitida por decisión SOBERANA del dueño",
+            identifier, scan_id_str,
+        )
+
+        # Re-run: cache now shows decision=ALLOWED → scan_service returns the
+        # record without raising ScanBlockedError.
+        scan_result2 = self._scan_hub_target(identifier)
+        if scan_result2 is not None and scan_result2.get("blocked"):
+            # Should not happen after allow_target — surface as error.
+            logger.error(
+                "hermes.dbus.install_owner_override_still_blocked identifier=%s "
+                "scan_id=%s — override set but re-scan still blocked",
+                identifier, scan_id_str,
+            )
+            return scan_result2
+
+        return _start_hub_op(
+            "install", identifier,
+            scan_record=scan_result2.get("record") if scan_result2 else None,
+            signal_emitter=self._scan_signal_emitter,
+        )
 
     def uninstall_hub_skill(self, *, name: str, sender_uid: int) -> dict:
         """Desinstala una skill del hub. Muta → authZ operador."""
@@ -1347,11 +1402,18 @@ class DbusRuntimeServiceWiring:
                 "hermes.dbus.install_scan_blocked kind=%s identifier=%s: %s",
                 kind, identifier, exc,
             )
-            scan_data = self._serialize_scan_record_from_blocked(identifier)
+            if exc.record is not None:
+                block = self._build_block_dict_from_record(exc.record, exc)
+                scan_data = self._serialize_scan_record(exc.record)
+            else:
+                block = {"ok": False, "blocked": True,
+                         "error": f"Instalación bloqueada por política de seguridad: {exc}"}
+                scan_data = self._serialize_scan_record_from_blocked(identifier)
             if emit_signals:
-                self._emit_scan_signals(str(exc), "FAIL", scan_data)
-            return {"ok": False, "blocked": True,
-                    "error": f"Instalación bloqueada por política de seguridad: {exc}"}
+                self._emit_scan_signals(
+                    block.get("scan_id") or str(exc), "FAIL", scan_data
+                )
+            return block
         except Exception as exc:  # noqa: BLE001 — scanner desplegado que revienta → fail-CLOSED
             logger.error(
                 "hermes.dbus.install_scan_errored kind=%s identifier=%s: %s "
@@ -1395,6 +1457,27 @@ class DbusRuntimeServiceWiring:
                 ),
             }
         return {"record": record}
+
+    @staticmethod
+    def _build_block_dict_from_record(record: "Any", exc: "Any") -> dict:
+        """Build a rich block response dict from a real ScanRecord.
+
+        Exposes the actual score, scan_id and human-readable risk strings so the
+        UI can show the owner a meaningful summary before offering the override.
+        """
+        risks = [
+            f"[{r.severity.value}] {r.category}: {r.message}"
+            for r in record.score.risks
+        ]
+        return {
+            "ok": False,
+            "blocked": True,
+            "score": record.score.value,
+            "verdict": record.verdict.value,
+            "scan_id": str(record.id),
+            "risks": risks,
+            "error": f"Instalación bloqueada por política de seguridad: {exc}",
+        }
 
     def _serialize_scan_record_from_blocked(self, identifier: str) -> str:
         """Minimal JSON for a blocked install when we have no ScanRecord object."""

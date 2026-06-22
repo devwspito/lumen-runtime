@@ -211,38 +211,68 @@ export async function renderSkillsView(container) {
         const name = skill.name ?? identifier;
         if (btn) { btn.disabled = true; btn.textContent = t('skills.installing'); }
         try {
-          const op = await installSkill(identifier);   // 202 {op_id} | {ok:false, blocked, error}
-          // The daemon returns {ok:false, blocked, error} with a 2xx status when the
-          // Security Center scan BLOCKS the skill. Without this guard the UI read it as
-          // "queued" and left the button stuck on "Instalando…" forever (silent fail).
-          if (op && (op.ok === false || op.blocked || op.error)) {
+          const op = await installSkill(identifier);   // 202 {op_id} | {ok:false, blocked, ...}
+          // The daemon returns {ok:false, blocked, score, risks, scan_id} with a 2xx
+          // status when the Security Center BLOCKS the install. Offer the owner an
+          // explicit override dialog with the real score and top risks.
+          if (op && op.blocked) {
+            const risksText = (op.risks ?? []).slice(0, 3).join('; ') || 'varios';
+            const msg = t('skills.installBlockedConfirm', {
+              score: op.score ?? '?',
+              risks: risksText,
+            });
+            if (await confirmDialog(msg)) {
+              await _doInstall(identifier, name, btn, true);
+            } else {
+              if (btn) { btn.disabled = false; btn.textContent = t('skills.install'); }
+            }
+            return;
+          }
+          if (op && (op.ok === false || op.error)) {
             throw new Error(op.error || t('skills.installFailed', { reason: 'security' }));
           }
-          const opId = op?.op_id;
-          if (opId) {
-            showToast(t('skills.installQueued', { name }), 'ok');
-            pollHubOp(opId, {
-              onDone: () => {
-                showToast(t('skills.skillInstalled', { name }), 'ok');
-                if (btn) { btn.disabled = true; btn.textContent = t('skills.alreadyInstalled'); }
-                loadInstalled();
-              },
-              onError: (r) => {
-                showToast(t('skills.installFailed', { reason: r }), 'error');
-                if (btn) { btn.disabled = false; btn.textContent = t('skills.install'); }
-              },
-            });
-          } else {
-            // No op_id and not blocked → install completed synchronously.
-            showToast(t('skills.skillInstalled', { name }), 'ok');
-            if (btn) { btn.disabled = true; btn.textContent = t('skills.alreadyInstalled'); }
-            loadInstalled();
-          }
+          _handleInstallOp(op, name, btn);
         } catch (e) {
           showToast(t('skills.installFailed', { reason: e.message }), 'error');
           if (btn) { btn.disabled = false; btn.textContent = t('skills.install'); }
         }
       })));
+
+      function _handleInstallOp(op, name, btn) {
+        const opId = op?.op_id;
+        if (opId) {
+          showToast(t('skills.installQueued', { name }), 'ok');
+          pollHubOp(opId, {
+            onDone: () => {
+              showToast(t('skills.skillInstalled', { name }), 'ok');
+              if (btn) { btn.disabled = true; btn.textContent = t('skills.alreadyInstalled'); }
+              loadInstalled();
+            },
+            onError: (r) => {
+              showToast(t('skills.installFailed', { reason: r }), 'error');
+              if (btn) { btn.disabled = false; btn.textContent = t('skills.install'); }
+            },
+          });
+        } else {
+          // No op_id and not blocked → install completed synchronously.
+          showToast(t('skills.skillInstalled', { name }), 'ok');
+          if (btn) { btn.disabled = true; btn.textContent = t('skills.alreadyInstalled'); }
+          loadInstalled();
+        }
+      }
+
+      async function _doInstall(identifier, name, btn, force) {
+        try {
+          const op2 = await installSkill(identifier, force);
+          if (op2 && (op2.ok === false || op2.blocked || op2.error)) {
+            throw new Error(op2.error || t('skills.installFailed', { reason: 'security' }));
+          }
+          _handleInstallOp(op2, name, btn);
+        } catch (e) {
+          showToast(t('skills.installFailed', { reason: e.message }), 'error');
+          if (btn) { btn.disabled = false; btn.textContent = t('skills.install'); }
+        }
+      }
     }
   }
 

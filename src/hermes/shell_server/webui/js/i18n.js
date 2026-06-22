@@ -266,6 +266,7 @@ const STRINGS = {
     'skills.stateDeprecated': 'Obsoleta',
     'skills.installFailed': 'No se pudo instalar: {reason}',
     'skills.voiceRequired': 'Narra en voz alta durante la grabación para guardar la skill.',
+    'skills.installBlockedConfirm': 'El Centro de Seguridad puntuó esta skill {score}/100 (no superó el control). Riesgos: {risks}. ¿Instalar de todas formas, bajo tu responsabilidad?',
 
     'integrations.title': 'Integraciones',
     'integrations.subtitle': 'Conecta tus apps vía Composio.',
@@ -670,6 +671,7 @@ const STRINGS = {
     'skills.stateDeprecated': 'Deprecated',
     'skills.installFailed': 'Could not install: {reason}',
     'skills.voiceRequired': 'Narrate out loud during the recording to save the skill.',
+    'skills.installBlockedConfirm': 'The Security Center scored this skill {score}/100 (did not pass the check). Risks: {risks}. Install anyway, at your own risk?',
 
     'integrations.title': 'Integrations',
     'integrations.subtitle': 'Connect your apps via Composio.',
