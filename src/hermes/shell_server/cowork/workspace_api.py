@@ -221,8 +221,10 @@ def create_workspace_router() -> APIRouter:
         dest.write_bytes(b"".join(chunks))
 
         logger.info(
+            # 'name' is a reserved LogRecord attribute — using it in `extra` raises
+            # KeyError and 500s the upload. Use a non-reserved key.
             "hermes.cowork.workspace.file_uploaded",
-            extra={"name": dest.name, "size": total},
+            extra={"upload_name": dest.name, "upload_size": total},
         )
         return {"name": dest.name, "path": str(dest), "size": total}
 
