@@ -374,6 +374,15 @@ class Runtime1ServiceInterface(ServiceInterface):
         return self._wiring.get_active_agent()
 
     @method()
+    async def GetRuntimeStatus(self) -> "s":  # noqa: N802,F821,UP037
+        """Estado en tiempo real del runtime (read-only, no authZ).
+
+        Devuelve JSON: {state, active_task_count, active_agent_id, captured_at}.
+        Fail-soft: cualquier error devuelve el shape idle.
+        """
+        return json.dumps(self._wiring.runtime_status())
+
+    @method()
     async def SetActiveAgent(self, agent_id: "s") -> "b":  # noqa: N802,F821,UP037
         """Marca el agente activo. by = UID del bus (CTRL-P1-3)."""
         sender_uid = await self._resolve_current_sender_uid()

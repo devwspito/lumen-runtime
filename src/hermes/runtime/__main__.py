@@ -1620,6 +1620,10 @@ async def _run(*, systemd_notify: bool) -> None:
         cerebro_browser_manager=cerebro_browser_manager,
         nous_engine=engine,
         install_executor=_install_executor_ref,
+        # Wire the live worker count so GetRuntimeStatus reflects real in-flight work.
+        # orchestrator.active_worker_count() reads self._pool._active_count (set once
+        # run_forever() starts the pool). Returns 0 before pool is running (correct).
+        worker_count_fn=orchestrator.active_worker_count,
     )
 
     # JailedBrowser eager start: pre-warm the confined headless Chromium so the
@@ -1820,6 +1824,7 @@ def _start_dbus_adapter_if_available(
     cerebro_browser_manager=None,
     nous_engine=None,
     install_executor=None,
+    worker_count_fn=None,  # Callable[[], int] | None — live in-flight count
 ) -> "tuple[object | None, asyncio.Task | None]":
     """Arranca el adapter D-Bus si dbus-fast está instalado y hay bus de sistema.
 
@@ -1965,6 +1970,9 @@ def _start_dbus_adapter_if_available(
             # FR-013 consent subject alignment: pin the consent subject to the
             # daemon owner so the UI, seed, and broker all address the same record.
             operator_id=operator_id,
+            # Live in-flight worker count: passed from the orchestrator instance
+            # in _run() so GetRuntimeStatus returns the real count, not zero.
+            worker_count_fn=worker_count_fn,
         )
 
         # Step 2 of two-step DbusInstallExecutor construction: inject the live

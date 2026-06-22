@@ -76,14 +76,17 @@ function _autonomyLabel(level) {
 
 /**
  * Apply active + working state to every rendered agent card.
- * Cards expose data-agent-id; status-dot and avatar have class names.
+ *
+ * Cards expose data-agent-id. The active agent is determined by activeId
+ * (from /agents/active). Working state is driven by runtime.active_task_count > 0
+ * (real daemon count, never faked). Only the active agent gets the working
+ * animation — non-active agents are never animated regardless of count.
+ *
+ * Animation classes live in style.css under @media (prefers-reduced-motion: no-preference)
+ * so the keyframes are never applied when the user prefers reduced motion.
  */
 function _applyLiveState(activeId, runtime) {
-  const working = runtime && (
-    runtime.state === 'working' ||
-    runtime.state === 'busy' ||
-    (runtime.active_task_count || 0) > 0
-  );
+  const working = runtime != null && (runtime.active_task_count || 0) > 0;
 
   document.querySelectorAll('.oc-agent-card').forEach((card) => {
     const isActive = card.dataset.agentId === activeId;
@@ -93,17 +96,33 @@ function _applyLiveState(activeId, runtime) {
     const color  = avatar ? avatar.dataset.color || 'var(--accent)' : 'var(--accent)';
 
     if (isActive && working) {
-      if (dot)    { dot.style.background = 'var(--ok)'; dot.title = t('office.working'); }
-      if (avatar) { avatar.style.boxShadow = `0 0 0 4px ${color}33`; avatar.style.animation = 'oc-pulse 1.4s ease-in-out infinite'; }
+      if (dot) {
+        dot.style.background = 'var(--ok)';
+        dot.title = t('office.working');
+        dot.classList.add('oc-agent-card__dot--working');
+      }
+      if (avatar) {
+        avatar.style.setProperty('--oc-pulse-color', color);
+        avatar.style.boxShadow = `0 0 0 4px ${color}33`;
+        avatar.style.animation = 'oc-pulse 1.4s ease-in-out infinite';
+      }
       if (status) { status.textContent = t('office.working'); status.style.color = 'var(--ok)'; }
       card.style.borderColor = color;
     } else if (isActive) {
-      if (dot)    { dot.style.background = 'var(--accent)'; dot.title = t('office.activeIdle'); }
+      if (dot) {
+        dot.style.background = 'var(--accent)';
+        dot.title = t('office.activeIdle');
+        dot.classList.remove('oc-agent-card__dot--working');
+      }
       if (avatar) { avatar.style.boxShadow = `0 0 0 3px ${color}22`; avatar.style.animation = ''; }
       if (status) { status.textContent = t('office.activeIdle'); status.style.color = 'var(--ink3)'; }
       card.style.borderColor = color;
     } else {
-      if (dot)    { dot.style.background = 'var(--ink4)'; dot.title = ''; }
+      if (dot) {
+        dot.style.background = 'var(--ink4)';
+        dot.title = '';
+        dot.classList.remove('oc-agent-card__dot--working');
+      }
       if (avatar) { avatar.style.boxShadow = 'none'; avatar.style.animation = ''; }
       if (status) { status.textContent = ''; }
       card.style.borderColor = 'var(--line)';
@@ -418,12 +437,6 @@ export async function renderOfficeView(container) {
   _stopPolling();
 
   container.innerHTML = `
-    <style>
-      @keyframes oc-pulse {
-        0%, 100% { transform: scale(1); }
-        50%       { transform: scale(1.07); }
-      }
-    </style>
     <div class="capability-view oc-view">
       <div class="cv-header oc-view__header">
         <div class="oc-view__header-text">

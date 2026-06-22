@@ -90,6 +90,7 @@ class AgentLoopOrchestrator:
         self._conversation_repo = conversation_repo  # SQLiteConversationRepository | None
         self._shutdown = asyncio.Event()
         self._wake: MonoWorkerWakeSignal = MonoWorkerWakeSignal()
+        self._pool: Any | None = None  # set by run_forever(); read by active_worker_count()
 
     # ------------------------------------------------------------------
     # Public API
@@ -129,7 +130,7 @@ class AgentLoopOrchestrator:
         # Delegar en WorkerPool(size=1) — ciclo claim->_process->mark intacto.
         from hermes.tasks.application.worker_pool import WorkerPool  # noqa: PLC0415
 
-        pool = WorkerPool(
+        self._pool = pool = WorkerPool(
             queue=self._queue,
             state=self._state,
             engine=self._engine,
@@ -158,6 +159,16 @@ class AgentLoopOrchestrator:
     def request_shutdown(self) -> None:
         """Señaliza parada limpia (SIGTERM del daemon)."""
         self._shutdown.set()
+
+    def active_worker_count(self) -> int:
+        """Return the number of workers currently processing a task.
+
+        Returns 0 before run_forever() is called (pool not yet created).
+        Safe to call from any context — reads a plain int attribute.
+        """
+        if self._pool is None:
+            return 0
+        return self._pool.active_worker_count()
 
     @property
     def wake_signal(self) -> MonoWorkerWakeSignal:

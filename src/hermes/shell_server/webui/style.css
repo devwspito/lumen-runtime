@@ -1839,6 +1839,41 @@ details[open] .tool-summary-group__chevron { transform: rotate(90deg); }
   color: var(--ink3);
 }
 
+/* ── Office working-state animations ──────────────────────────────────────── */
+
+/* Avatar glow + subtle scale when agent is actively processing a task.
+   Keyframes live here (not in an inline <style>) so prefers-reduced-motion
+   wrapping is applied once and respected system-wide. */
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes oc-pulse {
+    0%, 100% {
+      transform: scale(1);
+      filter: drop-shadow(0 0 0px transparent);
+    }
+    50% {
+      transform: scale(1.07);
+      filter: drop-shadow(0 0 8px var(--oc-pulse-color, var(--accent)));
+    }
+  }
+
+  @keyframes oc-dot-pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50%       { opacity: 0.55; transform: scale(1.35); }
+  }
+
+  .oc-agent-card__dot--working {
+    animation: oc-dot-pulse 1.4s ease-in-out infinite;
+  }
+}
+
+/* Reduced-motion: static working indicator (no animation, colour only). */
+@media (prefers-reduced-motion: reduce) {
+  .oc-agent-card__dot--working {
+    /* Colour applied by JS; no animation per user preference. */
+    animation: none;
+  }
+}
+
 /* Badges */
 .oc-badge {
   display: inline-flex;

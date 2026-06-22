@@ -931,12 +931,23 @@ def create_app() -> FastAPI:
 
     @app.get("/api/v1/runtime/status")
     async def runtime_status() -> dict[str, Any]:
-        return {
-            "state": "idle",
-            "active_task_count": 0,
-            "telemetry_enabled": False,
-            "captured_at": datetime.now(tz=UTC).isoformat(),
-        }
+        """Real live runtime status from the daemon via D-Bus GetRuntimeStatus.
+
+        Fail-soft: if the daemon is unavailable returns the idle shape with
+        available=false — never 500s, never blocks the Office view from rendering.
+        """
+        try:
+            data = await app.state.dbus_proxy.call_dict("get_runtime_status")
+            data.setdefault("available", True)
+            return data
+        except Exception:  # noqa: BLE001 — AgentUnavailable or any transient error
+            return {
+                "state": "idle",
+                "active_task_count": 0,
+                "active_agent_id": "",
+                "available": False,
+                "captured_at": datetime.now(tz=UTC).isoformat(),
+            }
 
     # ------------------------------------------------------------------
     # Tasks dashboard (F007 — supervision read-only)

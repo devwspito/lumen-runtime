@@ -56,6 +56,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from uuid import UUID
 
@@ -291,6 +292,10 @@ class DbusRuntimeServiceWiring:
         # and the broker all address the same operator record.
         # Fallback to _uid_to_uuid(sender_uid) when None (CI/test/backward-compat).
         operator_id: "UUID | None" = None,
+        # Zero-arg callable returning the real in-flight worker count.
+        # Injected from __main__ via orchestrator.active_worker_count.
+        # None → runtime_status reports active_task_count=0 (honest degradation).
+        worker_count_fn: "Callable[[], int] | None" = None,
     ) -> None:
         self._state = agent_state
         self._gate = approval_gate
@@ -327,6 +332,9 @@ class DbusRuntimeServiceWiring:
         self._audit_entries: list[AuditEntry] = []
         # FR-013: owner operator UUID for consent subject alignment (see _consent_operator).
         self._operator_id: "UUID | None" = operator_id
+        # Live in-flight worker count accessor (injected from __main__).
+        # None → runtime_status reports 0 (honest degradation, not a lie).
+        self._worker_count_fn: Callable[[], int] | None = worker_count_fn
 
     # ------------------------------------------------------------------
     # Kill-switch (CTRL-12 / KILL-1)
@@ -399,6 +407,30 @@ class DbusRuntimeServiceWiring:
         if self._agent_registry is None:
             return ""
         return self._agent_registry.active_agent_id()
+
+    def runtime_status(self) -> dict:
+        """Return the real live runtime status: state, active_task_count, active_agent_id.
+
+        Read-only, no authZ — same policy as get_active_agent / list_providers.
+        Fail-soft: any error returns the idle shape so the UI always gets a valid dict.
+        """
+        try:
+            count = self._worker_count_fn() if self._worker_count_fn is not None else 0
+            active_agent_id = self.get_active_agent()
+            return {
+                "state": "working" if count > 0 else "idle",
+                "active_task_count": count,
+                "active_agent_id": active_agent_id,
+                "captured_at": datetime.now(tz=UTC).isoformat(),
+            }
+        except Exception:  # noqa: BLE001 — never crash a status read
+            logger.warning("hermes.dbus.runtime_status_error", exc_info=True)
+            return {
+                "state": "idle",
+                "active_task_count": 0,
+                "active_agent_id": "",
+                "captured_at": datetime.now(tz=UTC).isoformat(),
+            }
 
     async def set_active_agent(self, *, agent_id: str, sender_uid: int) -> None:
         self._authorize(sender_uid, operation="set_active_agent")
