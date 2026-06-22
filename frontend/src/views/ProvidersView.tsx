@@ -1,0 +1,500 @@
+import { useEffect, useReducer, useRef, useState } from 'react'
+import {
+  listProviders, listNativeProviders, addProvider, setActiveProvider,
+  testProvider, deleteProvider, startProviderOAuth, getProviderOAuthStatus,
+  ApiError,
+} from '../api/client'
+import type { Provider } from '../api/types'
+
+// Mirrors vanilla providers.js: badge colours per kind/auth-type
+const KIND_COLORS: Record<string, string> = {
+  anthropic: '#D97706', openai: '#10A37F', openai_compatible: '#10A37F',
+  google: '#4285F4', gemini: '#4285F4', azure: '#0078D4', mistral: '#FF7000',
+  groq: '#F55036', ollama: '#6B7280', nous: '#7C3AED', cohere: '#39594D',
+  vllm: '#7C3AED', oauth: '#8B5CF6', 'api key': '#6B7280', subscription: '#8B5CF6',
+  modelo: '#6B7280',
+}
+
+const OAUTH_IDS = new Set(['nous', 'openai-codex', 'xai-oauth'])
+
+function badgeLabel(p: Provider): string {
+  if (p.kind) return p.kind
+  const a = String(p.auth_type ?? '').toLowerCase()
+  if (a.includes('oauth')) return 'OAuth'
+  if (a.includes('api')) return 'API key'
+  return 'Modelo'
+}
+
+function isOAuthProvider(p: Provider): boolean {
+  const id = p.provider_id ?? ''
+  return Boolean(p.supports_oauth)
+    || /oauth/i.test(String(p.auth_type ?? ''))
+    || OAUTH_IDS.has(id)
+}
+
+function providerName(p: Provider): string {
+  return p.alias ?? p.name ?? p.provider_id ?? ''
+}
+
+// Discriminated state to make impossible combinations unreachable
+type State =
+  | { status: 'loading' }
+  | { status: 'error'; message: string }
+  | { status: 'success'; configured: Provider[]; native: Provider[] }
+
+type Action =
+  | { type: 'LOADED'; configured: Provider[]; native: Provider[] }
+  | { type: 'FAILED'; message: string }
+  | { type: 'RELOAD' }
+
+function reducer(_state: State, action: Action): State {
+  switch (action.type) {
+    case 'LOADED': return { status: 'success', configured: action.configured, native: action.native }
+    case 'FAILED': return { status: 'error', message: action.message }
+    case 'RELOAD': return { status: 'loading' }
+  }
+}
+
+interface Toast { id: number; message: string; kind: 'ok' | 'warn' | 'error' }
+let toastSeq = 0
+
+function useToasts() {
+  const [toasts, setToasts] = useState<Toast[]>([])
+  const show = (message: string, kind: Toast['kind'] = 'ok') => {
+    const id = ++toastSeq
+    setToasts(t => [...t, { id, message, kind }])
+    setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 4000)
+  }
+  return { toasts, show }
+}
+
+export default function ProvidersView() {
+  const [state, dispatch] = useReducer(reducer, { status: 'loading' })
+  const { toasts, show } = useToasts()
+
+  function load() {
+    dispatch({ type: 'RELOAD' })
+    Promise.all([listProviders(), listNativeProviders()])
+      .then(([configured, native]) => {
+        dispatch({
+          type: 'LOADED',
+          configured: Array.isArray(configured) ? configured : [],
+          native: Array.isArray(native) ? native : [],
+        })
+      })
+      .catch((err: unknown) => {
+        dispatch({
+          type: 'FAILED',
+          message: err instanceof ApiError ? err.message : 'No se pudieron cargar los proveedores.',
+        })
+      })
+  }
+
+  useEffect(() => { load() }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const configuredIds = state.status === 'success'
+    ? new Set(state.configured.map(p => p.provider_id))
+    : new Set<string>()
+
+  return (
+    <>
+      <header className="view-header">
+        <h1 className="view-title">Proveedores</h1>
+        <p className="view-subtitle">Conecta modelos de IA. Activa el que Lumen usará por defecto.</p>
+      </header>
+
+      <div className="view-body cv-view-body">
+        <ToastList toasts={toasts} />
+
+        {state.status === 'loading' && (
+          <div className="state-container" aria-busy="true" aria-live="polite">
+            <p className="state-label">Cargando proveedores…</p>
+          </div>
+        )}
+
+        {state.status === 'error' && (
+          <div className="state-container" role="alert">
+            <p className="state-error">{state.message}</p>
+            <button className="cv-btn cv-btn--secondary" onClick={load}>Reintentar</button>
+          </div>
+        )}
+
+        {state.status === 'success' && (
+          <>
+            <section className="cv-section" aria-label="Proveedores configurados">
+              <h2 className="cv-section-label">Configurados</h2>
+              {state.configured.length === 0
+                ? <p className="cv-empty">Sin proveedores configurados. Añade uno del catálogo.</p>
+                : (
+                  <ul className="cv-list" role="list">
+                    {state.configured.map(p => (
+                      <li key={p.provider_id}>
+                        <ProviderRow
+                          provider={p}
+                          isConfigured
+                          onRefresh={load}
+                          onToast={show}
+                        />
+                      </li>
+                    ))}
+                  </ul>
+                )
+              }
+            </section>
+
+            <section className="cv-section" aria-label="Modelo propio o local">
+              <h2 className="cv-section-label">Modelo propio / local</h2>
+              <CustomProviderCard onAdded={load} onToast={show} />
+            </section>
+
+            <section className="cv-section" aria-label="Catálogo nativo Hermes">
+              <h2 className="cv-section-label">Catálogo nativo Hermes</h2>
+              {state.native.length === 0
+                ? <p className="cv-empty">Catálogo no disponible en esta versión.</p>
+                : (
+                  <ul className="cv-list" role="list">
+                    {state.native
+                      .filter(p => !configuredIds.has(p.provider_id))
+                      .map(p => (
+                        <li key={p.provider_id}>
+                          <ProviderRow
+                            provider={p}
+                            isConfigured={false}
+                            onRefresh={load}
+                            onToast={show}
+                          />
+                        </li>
+                      ))
+                    }
+                  </ul>
+                )
+              }
+            </section>
+          </>
+        )}
+      </div>
+    </>
+  )
+}
+
+// ── Provider row ──────────────────────────────────────────────────────────────
+
+interface ProviderRowProps {
+  provider: Provider
+  isConfigured: boolean
+  onRefresh: () => void
+  onToast: (msg: string, kind: Toast['kind']) => void
+}
+
+function ProviderRow({ provider, isConfigured, onRefresh, onToast }: ProviderRowProps) {
+  const [testing, setTesting] = useState(false)
+  const [oauthPending, setOauthPending] = useState(false)
+  const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const label = badgeLabel(provider)
+  const color = KIND_COLORS[label.toLowerCase()] ?? '#6B7280'
+  const name = providerName(provider)
+  const id = provider.provider_id ?? ''
+
+  async function handleActivate() {
+    try {
+      await setActiveProvider(id)
+      onToast(`${name} activado`, 'ok')
+      onRefresh()
+    } catch (e) {
+      onToast(e instanceof Error ? e.message : 'Error', 'error')
+    }
+  }
+
+  async function handleTest() {
+    setTesting(true)
+    try {
+      const r = await testProvider(id)
+      onToast(r?.ok ? 'Conexión exitosa' : 'Sin respuesta', r?.ok ? 'ok' : 'warn')
+    } catch (e) {
+      onToast(e instanceof Error ? e.message : 'Error', 'error')
+    } finally { setTesting(false) }
+  }
+
+  async function handleDelete() {
+    if (!window.confirm(`¿Eliminar ${name}?`)) return
+    try {
+      await deleteProvider(id)
+      onToast('Proveedor eliminado', 'ok')
+      onRefresh()
+    } catch (e) {
+      onToast(e instanceof Error ? e.message : 'Error', 'error')
+    }
+  }
+
+  async function handleAdd() {
+    const apiKey = window.prompt(`API key para ${name}:`)
+    if (!apiKey) return
+    try {
+      await addProvider({
+        provider_id: id,
+        alias: provider.alias ?? provider.name,
+        api_key: apiKey,
+        kind: provider.kind ?? provider.category,
+      })
+      onToast('Proveedor añadido', 'ok')
+      onRefresh()
+    } catch (e) {
+      onToast(e instanceof Error ? e.message : 'Error', 'error')
+    }
+  }
+
+  async function handleOAuth() {
+    setOauthPending(true)
+    let r: Record<string, unknown>
+    try {
+      r = await startProviderOAuth(id)
+    } catch (e) {
+      onToast(e instanceof Error ? e.message : 'No se pudo conectar', 'error')
+      setOauthPending(false)
+      return
+    }
+
+    if (!r || r['error']) {
+      onToast(`No se pudo conectar: ${(r?.['error'] as string) ?? 'unknown'}`, 'error')
+      setOauthPending(false)
+      return
+    }
+
+    const session = r['session_id'] as string | undefined
+    const url = (r['auth_url'] ?? r['verification_url']) as string | undefined
+    const code = r['user_code'] as string | undefined
+
+    if (url) {
+      window.open(url, '_blank', 'noopener,noreferrer')
+      onToast(`Abriendo el navegador para conectar ${name}…`, 'ok')
+    }
+    if (code) {
+      onToast(`Ve a ${url ?? ''} e introduce el código: ${code}`, 'ok')
+    } else {
+      onToast(`Esperando autorización de ${name}…`, 'ok')
+    }
+
+    if (!session) { setOauthPending(false); return }
+
+    const intervalMs = Math.max(2000, ((r['poll_interval'] as number | undefined) ?? 4) * 1000)
+    const deadline = Date.now() + Math.max(60, ((r['expires_in'] as number | undefined) ?? 600)) * 1000
+
+    const poll = async () => {
+      if (Date.now() > deadline) {
+        onToast('La sesión de conexión expiró — vuelve a intentarlo', 'warn')
+        setOauthPending(false)
+        return
+      }
+      const st = await getProviderOAuthStatus(session)
+      const status = String(st?.status ?? '').toLowerCase()
+      if (status === 'approved' || status === 'connected' || status === 'success') {
+        onToast(`${name} conectado`, 'ok')
+        setOauthPending(false)
+        onRefresh()
+        return
+      }
+      if (status === 'error' || status === 'failed') {
+        onToast(`No se pudo conectar: ${st?.error_message ?? st?.error ?? 'unknown'}`, 'error')
+        setOauthPending(false)
+        return
+      }
+      if (status === 'expired') {
+        onToast('La sesión de conexión expiró — vuelve a intentarlo', 'warn')
+        setOauthPending(false)
+        return
+      }
+      pollRef.current = setTimeout(poll, intervalMs)
+    }
+    pollRef.current = setTimeout(poll, intervalMs)
+  }
+
+  // Cleanup on unmount
+  useEffect(() => () => {
+    if (pollRef.current) clearTimeout(pollRef.current)
+  }, [])
+
+  return (
+    <div className={`provider-row${isConfigured && provider.is_active ? ' provider-row--active' : ''}`}>
+      <div className="provider-row__left">
+        <div className="provider-row__name">{name}</div>
+        <div className="provider-row__meta">
+          <span
+            className="provider-badge"
+            style={{ background: `${color}22`, color }}
+          >
+            {label}
+          </span>
+          {provider.default_model && (
+            <span className="provider-row__model">{provider.default_model}</span>
+          )}
+          {isConfigured && provider.is_active && (
+            <span className="provider-row__active-tag">Activo</span>
+          )}
+        </div>
+      </div>
+      <div className="provider-row__actions">
+        {isConfigured ? (
+          <>
+            {!provider.is_active && (
+              <button className="cv-btn cv-btn--secondary cv-btn--sm" onClick={handleActivate}>
+                Activar
+              </button>
+            )}
+            <button
+              className="cv-btn cv-btn--ghost cv-btn--sm"
+              onClick={handleTest}
+              disabled={testing}
+            >
+              {testing ? 'Probando…' : 'Probar'}
+            </button>
+            <button
+              className="cv-btn cv-btn--ghost cv-btn--sm cv-btn--danger"
+              onClick={handleDelete}
+              aria-label={`Eliminar proveedor ${name}`}
+            >
+              ✕
+            </button>
+          </>
+        ) : isOAuthProvider(provider) ? (
+          <button
+            className="cv-btn cv-btn--secondary cv-btn--sm"
+            onClick={handleOAuth}
+            disabled={oauthPending}
+          >
+            {oauthPending ? 'Conectando…' : 'Conectar'}
+          </button>
+        ) : (
+          <button className="cv-btn cv-btn--secondary cv-btn--sm" onClick={handleAdd}>
+            Añadir
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── Custom provider card (OpenAI-compatible) ──────────────────────────────────
+
+interface CustomProviderCardProps {
+  onAdded: () => void
+  onToast: (msg: string, kind: Toast['kind']) => void
+}
+
+function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
+  const [open, setOpen] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const aliasRef = useRef<HTMLInputElement>(null)
+  const urlRef = useRef<HTMLInputElement>(null)
+  const modelRef = useRef<HTMLInputElement>(null)
+  const keyRef = useRef<HTMLInputElement>(null)
+
+  async function handleSave() {
+    const base_url = urlRef.current?.value.trim() ?? ''
+    const default_model = modelRef.current?.value.trim() ?? ''
+    const alias = aliasRef.current?.value.trim() || default_model || 'Modelo local'
+    const api_key = keyRef.current?.value.trim() || undefined
+
+    if (!base_url || !default_model) {
+      onToast('Pon al menos la Base URL y el modelo.', 'warn')
+      return
+    }
+
+    setSaving(true)
+    try {
+      await addProvider({ kind: 'openai_compatible', alias, default_model, base_url, api_key, set_active: true })
+      onToast('Proveedor añadido', 'ok')
+      setOpen(false)
+      if (aliasRef.current) aliasRef.current.value = ''
+      if (urlRef.current) urlRef.current.value = ''
+      if (modelRef.current) modelRef.current.value = ''
+      if (keyRef.current) keyRef.current.value = ''
+      onAdded()
+    } catch (e) {
+      onToast(e instanceof Error ? e.message : 'Error', 'error')
+    } finally { setSaving(false) }
+  }
+
+  return (
+    <div className="cv-teach-card">
+      <p className="cv-teach-intro">
+        Conecta cualquier endpoint compatible con OpenAI: vLLM, LM Studio, Ollama o un servidor propio.
+      </p>
+      {!open ? (
+        <button className="cv-btn cv-btn--secondary cv-btn--sm" onClick={() => setOpen(true)}>
+          + Añadir modelo propio
+        </button>
+      ) : (
+        <div className="cv-form-stack">
+          <label className="cv-label" htmlFor="pv-c-alias">Nombre</label>
+          <input
+            id="pv-c-alias"
+            ref={aliasRef}
+            className="cv-input"
+            type="text"
+            placeholder='Nombre (p. ej. "Qwen local")'
+            autoComplete="off"
+          />
+          <label className="cv-label" htmlFor="pv-c-url">Base URL</label>
+          <input
+            id="pv-c-url"
+            ref={urlRef}
+            className="cv-input"
+            type="text"
+            placeholder="Base URL (p. ej. https://tu-servidor/v1)"
+            autoComplete="off"
+          />
+          <label className="cv-label" htmlFor="pv-c-model">Modelo</label>
+          <input
+            id="pv-c-model"
+            ref={modelRef}
+            className="cv-input"
+            type="text"
+            placeholder="Modelo (p. ej. qwen3.6-35b-a3b)"
+            autoComplete="off"
+          />
+          <label className="cv-label" htmlFor="pv-c-key">API key</label>
+          {/* Never echo back: password input for secrets */}
+          <input
+            id="pv-c-key"
+            ref={keyRef}
+            className="cv-input"
+            type="password"
+            placeholder="API key (si tu servidor la requiere)"
+            autoComplete="new-password"
+          />
+          <p className="cv-hint">La Base URL debe terminar en /v1. La API key solo si tu servidor la pide.</p>
+          <div className="cv-form-actions">
+            <button
+              className="cv-btn cv-btn--primary cv-btn--sm"
+              onClick={handleSave}
+              disabled={saving}
+            >
+              {saving ? 'Guardando…' : 'Guardar y activar'}
+            </button>
+            <button
+              className="cv-btn cv-btn--ghost cv-btn--sm"
+              onClick={() => setOpen(false)}
+            >
+              Cancelar
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Toast list ────────────────────────────────────────────────────────────────
+
+function ToastList({ toasts }: { toasts: Toast[] }) {
+  if (toasts.length === 0) return null
+  return (
+    <div className="cv-toast-list" aria-live="polite" aria-atomic="false">
+      {toasts.map(t => (
+        <div key={t.id} className={`cv-toast cv-toast--${t.kind}`} role="status">
+          {t.message}
+        </div>
+      ))}
+    </div>
+  )
+}

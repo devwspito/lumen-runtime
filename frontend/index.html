@@ -10,11 +10,10 @@
     <!-- Theme applied before first paint to avoid FOUC -->
     <script>
       (function () {
-        var t =
-          localStorage.getItem('lumen-theme') ||
-          (window.matchMedia('(prefers-color-scheme: dark)').matches
-            ? 'dark'
-            : 'light');
+        // Dark "Sereno" is the product identity — default to it unconditionally.
+        // Only an explicit user choice (localStorage) overrides; OS preference does NOT
+        // (headless / light-mode machines were silently flipping the whole app to light).
+        var t = localStorage.getItem('lumen-theme') || 'dark';
         document.documentElement.setAttribute('data-theme', t);
       })();
     </script>

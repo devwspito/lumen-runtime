@@ -9,6 +9,21 @@ import type {
   ConversationSummary,
   StreamFrame,
   CreateAgentPayload,
+  Provider,
+  Skill,
+  HubSkillResult,
+  HubInstallResponse,
+  HubOpStatus,
+  ComposioStatus,
+  ComposioApp,
+  WebSearchStatus,
+  McpServer,
+  McpRegistryEntry,
+  McpAddResponse,
+  ConfiguredTasksResponse,
+  RecentTasksResponse,
+  CreateTaskPayload,
+  ConfiguredTask,
 } from './types'
 
 // Mirrors the timeout strategy in vanilla api.js: snappy GETs fail fast;
@@ -109,8 +124,210 @@ export function createAgent(payload: CreateAgentPayload): Promise<Agent> {
   return request<Agent>('/agents', { method: 'POST', body: JSON.stringify(payload) })
 }
 
-export function listMcpServers(): Promise<Array<{ id: string; slug: string; name: string }>> {
-  return request<Array<{ id: string; slug: string; name: string }>>('/mcp/servers').catch(() => [])
+// ── Providers ─────────────────────────────────────────────────────────────────
+
+export function listProviders(): Promise<Provider[]> {
+  return request<Provider[]>('/providers').catch(() => [])
+}
+
+export function listNativeProviders(): Promise<Provider[]> {
+  return request<Provider[]>('/providers/native').catch(() => [])
+}
+
+export function addProvider(payload: Record<string, unknown>): Promise<Provider> {
+  return request<Provider>('/providers', { method: 'POST', body: JSON.stringify(payload) })
+}
+
+export function setActiveProvider(providerId: string): Promise<unknown> {
+  return request<unknown>(`/providers/${encodeURIComponent(providerId)}/activate`, { method: 'POST' })
+}
+
+export function testProvider(providerId: string): Promise<{ ok?: boolean }> {
+  return request<{ ok?: boolean }>(
+    `/providers/${encodeURIComponent(providerId)}/test`,
+    { method: 'POST', timeoutMs: 60_000 },
+  )
+}
+
+export function deleteProvider(providerId: string): Promise<unknown> {
+  return request<unknown>(`/providers/${encodeURIComponent(providerId)}`, { method: 'DELETE' })
+}
+
+export function startProviderOAuth(providerId: string): Promise<Record<string, unknown>> {
+  return request<Record<string, unknown>>(
+    `/providers/${encodeURIComponent(providerId)}/oauth/start`,
+    { method: 'POST' },
+  )
+}
+
+export function getProviderOAuthStatus(sessionId: string): Promise<{ status?: string; error?: string; error_message?: string }> {
+  return request<{ status?: string; error?: string; error_message?: string }>(
+    `/providers/oauth/${encodeURIComponent(sessionId)}`,
+  ).catch(() => ({ status: 'unknown' }))
+}
+
+// ── Skills ────────────────────────────────────────────────────────────────────
+
+export function listSkills(): Promise<Skill[]> {
+  return request<Skill[]>('/skills').catch(() => [])
+}
+
+export function searchSkillsHub(query: string): Promise<{ results?: HubSkillResult[] } | HubSkillResult[]> {
+  return request<{ results?: HubSkillResult[] } | HubSkillResult[]>(
+    `/skills/hub/search?q=${encodeURIComponent(query)}`,
+  ).catch(() => [])
+}
+
+export function listHubSkills(): Promise<HubSkillResult[]> {
+  return request<HubSkillResult[]>('/skills/hub').catch(() => [])
+}
+
+export function installSkill(identifier: string, force = false): Promise<HubInstallResponse> {
+  return request<HubInstallResponse>('/skills/hub/install', {
+    method: 'POST',
+    body: JSON.stringify({ identifier, force }),
+  })
+}
+
+export function getHubOpStatus(opId: string): Promise<HubOpStatus> {
+  return request<HubOpStatus>(`/skills/hub/ops/${encodeURIComponent(opId)}`).catch(
+    () => ({ status: 'unknown' }),
+  )
+}
+
+export function uninstallHubSkill(name: string): Promise<HubInstallResponse> {
+  return request<HubInstallResponse>(`/skills/hub/${encodeURIComponent(name)}`, { method: 'DELETE' })
+}
+
+export function promoteSkill(packageId: string): Promise<unknown> {
+  return request<unknown>(`/skills/${encodeURIComponent(packageId)}/promote`, {
+    method: 'POST',
+    body: JSON.stringify({ confirm: true }),
+  })
+}
+
+export function createTrainingSession(payload: { skill_name: string; description: string; surface_kind: string }): Promise<{ session_id: string }> {
+  return request<{ session_id: string }>('/training', { method: 'POST', body: JSON.stringify(payload) })
+}
+
+export function startTrainingRecording(sessionId: string): Promise<unknown> {
+  return request<unknown>(`/training/${encodeURIComponent(sessionId)}/start`, { method: 'POST', body: '{}' })
+}
+
+export function stopTrainingRecording(sessionId: string): Promise<unknown> {
+  return request<unknown>(`/training/${encodeURIComponent(sessionId)}/stop`, { method: 'POST', body: '{}' })
+}
+
+export function synthesizeSkill(sessionId: string): Promise<unknown> {
+  return request<unknown>(`/training/${encodeURIComponent(sessionId)}/synthesize`, { method: 'POST', body: '{}' })
+}
+
+export function abandonTrainingSession(sessionId: string): Promise<unknown> {
+  return request<unknown>(
+    `/training/${encodeURIComponent(sessionId)}/abandon`,
+    { method: 'POST', body: '{}' },
+  ).catch(() => ({}))
+}
+
+// ── Integrations (Composio) ───────────────────────────────────────────────────
+
+export function getComposioStatus(): Promise<ComposioStatus> {
+  return request<ComposioStatus>('/integrations/composio/status').catch(
+    () => ({ has_key: false, enabled: false, entity_id: '' }),
+  )
+}
+
+export function listComposioConnected(): Promise<ComposioApp[]> {
+  return request<ComposioApp[]>('/integrations/composio/connected').catch(() => [])
+}
+
+export function listComposioApps(): Promise<ComposioApp[]> {
+  return request<ComposioApp[]>('/integrations/composio/toolkits').catch(() => [])
+}
+
+export function connectComposioApp(slug: string): Promise<{ redirect_url?: string }> {
+  return request<{ redirect_url?: string }>('/integrations/composio/connect', {
+    method: 'POST',
+    body: JSON.stringify({ toolkit_slug: slug }),
+  })
+}
+
+export function setComposioApiKey(apiKey: string): Promise<unknown> {
+  return request<unknown>('/integrations/composio/key', {
+    method: 'POST',
+    body: JSON.stringify({ api_key: apiKey }),
+  })
+}
+
+export function getWebSearchStatus(): Promise<WebSearchStatus> {
+  return request<WebSearchStatus>('/web-search/status').catch(
+    () => ({ brave: false, ddgs_fallback: true }),
+  )
+}
+
+export function setWebSearchKey(provider: string, apiKey: string): Promise<{ ok?: boolean; error?: string }> {
+  return request<{ ok?: boolean; error?: string }>('/web-search/key', {
+    method: 'POST',
+    body: JSON.stringify({ provider, api_key: apiKey }),
+  })
+}
+
+// ── MCP ───────────────────────────────────────────────────────────────────────
+
+export function listMcpServers(): Promise<McpServer[]> {
+  return request<McpServer[]>('/mcp').catch(() => [])
+}
+
+export function addMcpServer(payload: Record<string, unknown>): Promise<McpAddResponse> {
+  // The daemon connects eagerly and reports failures as {ok:false} with 2xx.
+  // The request<T> helper already throws ApiError on ok:false, but addMcpServer
+  // also does a dedicated tool_count=0 warning, so we return raw and let callers
+  // surface that separately.
+  return request<McpAddResponse>('/mcp', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+    timeoutMs: 300_000,
+  })
+}
+
+export function removeMcpServer(serverId: string): Promise<unknown> {
+  return request<unknown>(`/mcp/${encodeURIComponent(serverId)}`, { method: 'DELETE' })
+}
+
+export function searchMcpRegistry(query: string, limit = 30): Promise<McpRegistryEntry[]> {
+  return request<McpRegistryEntry[]>(
+    `/mcp/registry?q=${encodeURIComponent(query)}&limit=${limit}`,
+    { timeoutMs: 25_000 },
+  ).catch(() => [])
+}
+
+// ── Tasks ─────────────────────────────────────────────────────────────────────
+
+export function listConfiguredTasks(): Promise<ConfiguredTasksResponse> {
+  return request<ConfiguredTasksResponse>('/tasks/configured').catch(
+    () => ({ available: false, tasks: [] }),
+  )
+}
+
+export function listRecentTasks(limit = 20): Promise<RecentTasksResponse> {
+  return request<RecentTasksResponse>(`/tasks/recent?limit=${limit}`).catch(
+    () => ({ available: false, tasks: [] }),
+  )
+}
+
+export function createTask(payload: CreateTaskPayload): Promise<ConfiguredTask> {
+  return request<ConfiguredTask>('/tasks/scheduled', { method: 'POST', body: JSON.stringify(payload) })
+}
+
+export function deleteTask(taskId: string): Promise<unknown> {
+  return request<unknown>(`/tasks/scheduled/${encodeURIComponent(taskId)}`, { method: 'DELETE' })
+}
+
+export function toggleTask(taskId: string, enabled: boolean): Promise<unknown> {
+  return request<unknown>(`/tasks/scheduled/${encodeURIComponent(taskId)}/enabled`, {
+    method: 'POST',
+    body: JSON.stringify({ enabled }),
+  })
 }
 
 // ── Runtime ───────────────────────────────────────────────────────────────────

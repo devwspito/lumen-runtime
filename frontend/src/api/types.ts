@@ -72,6 +72,174 @@ export interface ToolCallDescriptor {
   target?: string
 }
 
+// ── Providers ─────────────────────────────────────────────────────────────────
+
+export interface Provider {
+  provider_id: string
+  alias?: string
+  name?: string
+  kind?: string
+  category?: string
+  auth_type?: string
+  default_model?: string
+  base_url?: string
+  is_active?: boolean
+  supports_oauth?: boolean
+}
+
+// ── Skills ────────────────────────────────────────────────────────────────────
+
+export interface Skill {
+  package_id?: string
+  skill_id?: string
+  skill_name?: string
+  name?: string
+  slug?: string
+  state?: string
+  version?: string
+  surface_kinds?: string | string[]
+}
+
+export interface HubSkillResult {
+  identifier?: string
+  slug?: string
+  name?: string
+  skill_name?: string  // listHubSkills may return installed items with this field
+  description?: string
+  trust_level?: string
+  source?: string
+  repo?: string
+  url?: string
+  homepage?: string
+}
+
+export interface HubInstallResponse {
+  op_id?: string
+  status?: string
+  ok?: boolean
+  blocked?: boolean
+  score?: number
+  risks?: string[]
+  scan_id?: string
+  error?: string
+}
+
+export interface HubOpStatus {
+  status?: string
+  error?: string
+  message?: string
+}
+
+// ── Integrations (Composio) ───────────────────────────────────────────────────
+
+export interface ComposioStatus {
+  has_key: boolean
+  enabled?: boolean
+  entity_id?: string
+}
+
+export interface ComposioApp {
+  slug: string
+  name?: string
+  description?: string
+  logo?: string
+}
+
+export interface WebSearchStatus {
+  brave?: boolean
+  ddgs_fallback?: boolean
+}
+
+// ── MCP ───────────────────────────────────────────────────────────────────────
+
+export interface McpServer {
+  server_id?: string
+  id?: string
+  slug?: string    // registry / ruflo entries may use slug as the identifier
+  name?: string
+  label?: string
+  argv?: string | string[]
+  health?: string
+  tool_count?: number
+}
+
+export interface McpRegistryEntry {
+  server_id?: string
+  id?: string
+  name?: string
+  label?: string
+  description?: string
+  argv?: string | string[]
+  runner?: string
+  repository?: string
+  homepage?: string
+  website?: string
+  tag?: string
+  installable?: boolean
+  unsupported_reason?: string
+  env_vars?: Array<string | { key: string; label?: string; required?: boolean; secret?: boolean }>
+}
+
+export interface McpAddResponse {
+  server_id?: string
+  tool_count?: number
+  ok?: boolean
+  error?: string
+}
+
+// ── Tasks ─────────────────────────────────────────────────────────────────────
+
+export interface ConfiguredTask {
+  trigger_id?: string
+  task_id?: string
+  id?: string
+  label?: string
+  title?: string
+  name?: string
+  cron?: string
+  schedule?: string
+  recurrence?: string
+  recurrence_human?: string
+  trigger?: { cron?: string }
+  instruction?: string
+  enabled?: boolean
+  one_shot?: boolean
+  last_status?: string
+  next_run_at?: string
+  target_agent_id?: string
+  agent_id?: string
+  risk_ceiling?: string
+}
+
+export interface RecentTask {
+  task_id?: string
+  label?: string
+  name?: string
+  status?: string
+  claimed_at?: string
+  enqueued_at?: string
+  started_at?: string
+}
+
+export interface ConfiguredTasksResponse {
+  available?: boolean
+  tasks?: ConfiguredTask[]
+}
+
+export interface RecentTasksResponse {
+  available?: boolean
+  tasks?: RecentTask[]
+}
+
+export interface CreateTaskPayload {
+  label: string
+  cron: string
+  instruction: string
+  target_agent_id?: string
+  risk_ceiling?: string
+  one_shot?: boolean
+}
+
 // Frames emitted by the WebSocket stream — discriminated by `kind`.
 export type StreamFrame =
   | { kind: 'delta';          delta?: string; text?: string }
