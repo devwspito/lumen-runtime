@@ -71,9 +71,13 @@ RUN cd /tmp/whlbuild && python3 -m pip wheel . --no-deps -w /tmp/whl \
 COPY frontend/package.json frontend/package-lock.json /tmp/frontbuild/
 RUN cd /tmp/frontbuild && npm ci --ignore-scripts
 
+# FE_CACHEBUST: pass --build-arg FE_CACHEBUST=<unique> to force a clean rebuild of the
+# vite layer (the COPY-frontend layer can stale-cache across iterative rebuilds).
+ARG FE_CACHEBUST=0
+RUN echo "fe-cachebust ${FE_CACHEBUST}" > /tmp/.fe_cachebust
 COPY frontend/ /tmp/frontbuild/
-RUN cd /tmp/frontbuild && npm run build \
-    && mkdir -p /opt/lumen-webapp \
+RUN cd /tmp/frontbuild && rm -rf dist && npm run build \
+    && rm -rf /opt/lumen-webapp && mkdir -p /opt/lumen-webapp \
     && cp -r dist/. /opt/lumen-webapp/ \
     && rm -rf /tmp/frontbuild
 

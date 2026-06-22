@@ -23,3 +23,51 @@ export interface RuntimeStatus {
   state: string
   active_task_count: number
 }
+
+// ── Chat ──────────────────────────────────────────────────────────────────────
+
+export interface ChatStartPayload {
+  conversation_id?: string
+  user_message: string
+  dedup_key?: string
+}
+
+export interface ChatStartResponse {
+  task_id: string
+  stream_path?: string
+}
+
+export interface ConversationMessage {
+  role: 'user' | 'assistant' | 'tool'
+  content: string
+  tool_call?: ToolCallDescriptor
+}
+
+export interface ConversationDetail {
+  id: string
+  title?: string
+  messages: ConversationMessage[]
+}
+
+export interface ConversationSummary {
+  id: string
+  title?: string
+  created_at?: string
+  updated_at?: string
+}
+
+export interface ToolCallDescriptor {
+  tool?: string
+  tool_name?: string
+  label?: string
+  target?: string
+}
+
+// Frames emitted by the WebSocket stream — discriminated by `kind`.
+export type StreamFrame =
+  | { kind: 'delta';          delta?: string; text?: string }
+  | { kind: 'thinking_delta'; thinking?: string; delta?: string; text?: string }
+  | { kind: 'tool_call';      tool_call?: ToolCallDescriptor; tool?: string; label?: string; target?: string }
+  | { kind: 'status';         message?: string; status?: string }
+  | { kind: 'done' }
+  | { kind: 'error';          message?: string }

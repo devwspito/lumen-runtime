@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import Layout from './components/Layout'
 import AgentsView from './views/AgentsView'
+import ChatView from './views/ChatView'
 import ComingSoonView from './views/ComingSoonView'
 
 // basename="/app" matches the shell-server mount point and Vite's base: '/app/'
@@ -9,8 +10,8 @@ export default function App() {
     <BrowserRouter basename="/app">
       <Routes>
         <Route element={<Layout />}>
-          <Route index element={<Navigate to="/agentes" replace />} />
-          <Route path="chat" element={<ComingSoonView name="Chat" />} />
+          <Route index element={<Navigate to="/chat" replace />} />
+          <Route path="chat" element={<ChatView />} />
           <Route path="programadas" element={<ComingSoonView name="Programadas" />} />
           <Route path="agentes" element={<AgentsView />} />
           <Route path="office" element={<ComingSoonView name="Office" />} />
