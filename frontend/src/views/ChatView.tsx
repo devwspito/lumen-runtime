@@ -22,6 +22,7 @@ import type { ChatMessage, ToolStep } from '../hooks/useChat'
 import { listProviders, uploadWorkspaceFile, ApiError } from '../api/client'
 import type { Provider } from '../api/types'
 import { ChatBridgeContext } from '../components/Layout'
+import ContextPanel from '../components/ContextPanel'
 
 // ── i18n strings (ES, matching vanilla i18n.js) ───────────────────────────────
 
@@ -562,6 +563,15 @@ function AttachIcon() {
   )
 }
 
+function PanelToggleIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <rect x="1" y="2" width="14" height="12" rx="2" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M10 2v12" stroke="currentColor" strokeWidth="1.4" />
+    </svg>
+  )
+}
+
 function SpinnerIcon() {
   return (
     <svg className="spin" width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
@@ -575,6 +585,7 @@ function SpinnerIcon() {
 export default function ChatView() {
   const { messages, status, sendMessage, stopStream, convId, loadConversation } = useChat()
   const [composerText, setComposerText] = useState('')
+  const [panelOpen, setPanelOpen] = useState(false)
   const bodyRef = useRef<HTMLDivElement>(null)
   const userScrolledRef = useRef(false)
   const pinRef = useRef(true)
@@ -621,46 +632,64 @@ export default function ChatView() {
 
   return (
     <ChatBridgeContext.Provider value={{ activeConvId: convId, loadConversation }}>
-      <div className="chat-view">
-        {/* Topbar */}
-        <div className="chat-topbar">
-          <span className="chat-topbar-title">
-            {showWelcome ? 'Nueva conversación' : 'Chat'}
-          </span>
+      {/* Outer shell: chat column + optional context panel */}
+      <div className="chat-shell">
+        <div className="chat-view">
+          {/* Topbar */}
+          <div className="chat-topbar">
+            <span className="chat-topbar-title">
+              {showWelcome ? 'Nueva conversación' : 'Chat'}
+            </span>
+            <button
+              className="chat-topbar-panel-btn"
+              onClick={() => setPanelOpen(v => !v)}
+              aria-pressed={panelOpen}
+              aria-label={panelOpen ? 'Cerrar panel de contexto' : 'Mostrar panel de contexto'}
+              type="button"
+              title="Panel de contexto"
+            >
+              <PanelToggleIcon />
+            </button>
+          </div>
+
+          {/* Messages */}
+          <div
+            className="chat-body"
+            ref={bodyRef}
+            aria-live="polite"
+            aria-label="Mensajes del chat"
+          >
+            {showWelcome ? (
+              <Welcome onSuggestion={handleSuggestion} />
+            ) : (
+              messages.map((msg) =>
+                msg.type === 'user' ? (
+                  <UserMessage key={msg.id} text={msg.text} />
+                ) : (
+                  <AssistantMessage key={msg.id} message={msg} />
+                ),
+              )
+            )}
+          </div>
+
+          {/* Status bar */}
+          <StatusBar phase={status.phase} text={statusText} />
+
+          {/* Composer */}
+          <Composer
+            disabled={status.phase === 'sending'}
+            isStreaming={isStreaming}
+            onSend={handleSend}
+            onStop={stopStream}
+            value={composerText}
+            onChange={setComposerText}
+          />
         </div>
 
-        {/* Messages */}
-        <div
-          className="chat-body"
-          ref={bodyRef}
-          aria-live="polite"
-          aria-label="Mensajes del chat"
-        >
-          {showWelcome ? (
-            <Welcome onSuggestion={handleSuggestion} />
-          ) : (
-            messages.map((msg) =>
-              msg.type === 'user' ? (
-                <UserMessage key={msg.id} text={msg.text} />
-              ) : (
-                <AssistantMessage key={msg.id} message={msg} />
-              ),
-            )
-          )}
-        </div>
-
-        {/* Status bar */}
-        <StatusBar phase={status.phase} text={statusText} />
-
-        {/* Composer */}
-        <Composer
-          disabled={status.phase === 'sending'}
-          isStreaming={isStreaming}
-          onSend={handleSend}
-          onStop={stopStream}
-          value={composerText}
-          onChange={setComposerText}
-        />
+        {/* Context panel — mounts only when open; keeps data fresh on each open */}
+        {panelOpen && (
+          <ContextPanel onClose={() => setPanelOpen(false)} />
+        )}
       </div>
     </ChatBridgeContext.Provider>
   )

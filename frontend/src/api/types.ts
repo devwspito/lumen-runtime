@@ -328,6 +328,16 @@ export interface InstallDecisionPayload {
   riddle_answer: string | null
 }
 
+// ── Memory ────────────────────────────────────────────────────────────────────
+
+export interface MemoryItem {
+  id?: string
+  content?: string
+  text?: string
+  created_at?: string
+  [key: string]: unknown
+}
+
 // Frames emitted by the WebSocket stream — discriminated by `kind`.
 export type StreamFrame =
   | { kind: 'delta';          delta?: string; text?: string }

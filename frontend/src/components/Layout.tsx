@@ -90,6 +90,16 @@ function SecurityIcon() {
   )
 }
 
+function MemoriaIcon() {
+  return (
+    <svg className="nav-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M8 2a4 4 0 0 1 4 4c0 1.2-.4 2.4-1.2 3.2L8 14l-2.8-4.8A4 4 0 0 1 8 2Z"
+        stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
+      <circle cx="8" cy="6" r="1.5" stroke="currentColor" strokeWidth="1.2" />
+    </svg>
+  )
+}
+
 function PlusIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
@@ -107,6 +117,7 @@ const NAV_ITEMS: NavItem[] = [
   { to: '/mcp',          label: 'MCP',           icon: <McpIcon /> },
   { to: '/proveedores',  label: 'Proveedores',   icon: <ProvidersIcon /> },
   { to: '/seguridad',    label: 'Seguridad',     icon: <SecurityIcon /> },
+  { to: '/memoria',      label: 'Memoria',       icon: <MemoriaIcon /> },
 ]
 
 // ── Recientes ─────────────────────────────────────────────────────────────────

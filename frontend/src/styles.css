@@ -2871,3 +2871,255 @@ details[open] .tool-summary-group__chevron { transform: rotate(90deg); }
   color: var(--danger);
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+   Chat shell — wraps chat-view + optional context panel side by side
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.chat-shell {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* chat-view already has flex:1 but needs to be constrained when panel is open */
+.chat-shell > .chat-view {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Context-panel toggle button in the topbar */
+.chat-topbar-panel-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border: 1px solid var(--line2);
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ink4);
+  cursor: pointer;
+  transition: background var(--ease-hover), color var(--ease-hover), border-color var(--ease-hover);
+}
+
+.chat-topbar-panel-btn:hover {
+  background: var(--surface2);
+  color: var(--ink2);
+  border-color: var(--line2);
+}
+
+.chat-topbar-panel-btn[aria-pressed='true'] {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Context panel
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.ctx-panel {
+  width: 260px;
+  flex-shrink: 0;
+  border-left: 1px solid var(--line);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.ctx-panel-header {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+}
+
+.ctx-panel-title {
+  flex: 1;
+  font-size: var(--text-label);
+  font-weight: 600;
+  color: var(--ink2);
+  letter-spacing: -.01em;
+}
+
+.ctx-panel-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: transparent;
+  color: var(--ink4);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition: background var(--ease-hover), color var(--ease-hover);
+  flex-shrink: 0;
+}
+
+.ctx-panel-close:hover {
+  background: var(--surface2);
+  color: var(--ink2);
+}
+
+.ctx-panel-body {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Collapsible section */
+.ctx-panel-section {
+  border-bottom: 1px solid var(--line);
+}
+
+.ctx-panel-section:last-child {
+  border-bottom: none;
+}
+
+.ctx-panel-section__toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: var(--sp-3) var(--sp-4);
+  border: none;
+  background: transparent;
+  color: var(--ink3);
+  cursor: pointer;
+  transition: background var(--ease-hover);
+  text-align: left;
+}
+
+.ctx-panel-section__toggle:hover {
+  background: var(--surface2);
+}
+
+.ctx-panel-section__title {
+  font-size: var(--text-caption);
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--ink4);
+}
+
+/* List inside a panel section */
+.ctx-list {
+  list-style: none;
+  padding: 0 var(--sp-2) var(--sp-2);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+/* File row */
+.ctx-file-row__link {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-2);
+  border-radius: var(--r-sm);
+  color: var(--ink3);
+  text-decoration: none;
+  font-size: var(--text-label);
+  transition: background var(--ease-hover), color var(--ease-hover);
+  min-width: 0;
+}
+
+.ctx-file-row__link:hover {
+  background: var(--surface2);
+  color: var(--ink2);
+  text-decoration: none;
+}
+
+.ctx-file-row__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ctx-file-row--skeleton {
+  height: 30px;
+  border-radius: var(--r-sm);
+  background: linear-gradient(90deg, var(--card) 25%, var(--card2) 50%, var(--card) 75%);
+  background-size: 400px 100%;
+  animation: shimmer 1.4s infinite linear;
+  margin: 2px 0;
+}
+
+/* Skill / connector tag row */
+.ctx-tag-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-2);
+  border-radius: var(--r-sm);
+  color: var(--ink3);
+  font-size: var(--text-label);
+}
+
+.ctx-tag-row__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Skeleton inside section */
+.ctx-skeleton {
+  height: 30px;
+  margin: var(--sp-2);
+  border-radius: var(--r-sm);
+  background: linear-gradient(90deg, var(--card) 25%, var(--card2) 50%, var(--card) 75%);
+  background-size: 400px 100%;
+  animation: shimmer 1.4s infinite linear;
+}
+
+/* Empty state inside panel */
+.ctx-empty {
+  padding: var(--sp-2) var(--sp-4) var(--sp-3);
+  font-size: var(--text-label);
+  color: var(--ink4);
+  line-height: 1.5;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Memoria view
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.memory-list {
+  gap: var(--sp-2) !important;
+}
+
+.memory-item {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: var(--sp-3) var(--sp-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  list-style: none;
+}
+
+.memory-item__content {
+  font-size: var(--text-body);
+  color: var(--ink2);
+  line-height: 1.6;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.memory-item__time {
+  font-size: var(--text-caption);
+  color: var(--ink4);
+  font-family: var(--font-mono);
+}
+

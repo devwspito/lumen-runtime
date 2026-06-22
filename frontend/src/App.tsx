@@ -9,6 +9,7 @@ import McpView from './views/McpView'
 import SkillsView from './views/SkillsView'
 import CalendarView from './views/CalendarView'
 import SeguridadView from './views/SeguridadView'
+import MemoriaView from './views/MemoriaView'
 
 // Code-split OfficeView at the route boundary; it imports the canvas engine
 // which is non-trivial (~10 kB gzipped) and not needed on other routes.
@@ -44,6 +45,7 @@ export default function App() {
           <Route path="mcp" element={<McpView />} />
           <Route path="proveedores" element={<ProvidersView />} />
           <Route path="seguridad" element={<SeguridadView />} />
+          <Route path="memoria" element={<MemoriaView />} />
         </Route>
       </Routes>
     </BrowserRouter>

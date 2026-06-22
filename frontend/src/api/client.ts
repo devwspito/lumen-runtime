@@ -33,6 +33,7 @@ import type {
   InstallDecisionPayload,
   AgentRoster,
   WorkspaceFile,
+  MemoryItem,
 } from './types'
 
 // Mirrors the timeout strategy in vanilla api.js: snappy GETs fail fast;
@@ -531,6 +532,22 @@ export function setMfaOnDangers(enabled: boolean, totp: string, riddle_answer: s
     method: 'POST',
     body: JSON.stringify({ enabled, totp, riddle_answer }),
   })
+}
+
+// ── Memory ────────────────────────────────────────────────────────────────────
+
+export function listMemory(): Promise<MemoryItem[]> {
+  return request<MemoryItem[]>('/memory').catch(() => [])
+}
+
+export function searchMemory(query: string): Promise<MemoryItem[]> {
+  return request<MemoryItem[]>(`/memory/search?q=${encodeURIComponent(query)}`).catch(() => [])
+}
+
+// ── Workspace files (re-export for context panel) ─────────────────────────────
+
+export function listWorkspaceFiles(): Promise<WorkspaceFile[]> {
+  return request<WorkspaceFile[]>('/workspace/files').catch(() => [])
 }
 
 // ── WebSocket stream ──────────────────────────────────────────────────────────
