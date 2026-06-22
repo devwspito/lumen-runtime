@@ -488,6 +488,12 @@ class AgentLoopOrchestrator:
             TaskStreamChunk,
         )
 
+        # GATE 0 / M2 — persiste la respuesta del asistente ANTES de cerrar el stream.
+        # Si cerramos primero, el cliente recibe DONE y llama a GetConversation antes de
+        # que la BD tenga la fila → la UI no muestra la respuesta hasta refrescar varias
+        # veces (write-before-notify). Best-effort: fallo de escritura no rompe el ciclo.
+        self._persist_assistant_turn(item, narrative)
+
         if chunk_sink is not None:
             already_streamed = prior_emit_count > 0
             if not already_streamed:
@@ -497,11 +503,6 @@ class AgentLoopOrchestrator:
                 await chunk_sink.emit(task_id=item.id, chunk=delta_chunk)
             # Siempre cerramos el stream: el cliente espera el frame DONE.
             await chunk_sink.close(task_id=item.id, outcome="completed")
-
-        # GATE 0 / M2 — persiste la respuesta del asistente en el store de
-        # conversaciones para que GetConversation la devuelva a la UI.
-        # Best-effort: fallo de escritura no rompe el ciclo.
-        self._persist_assistant_turn(item, narrative)
 
         audit_entry_id, head_hash = await self._emit_chat_replied(item, narrative)
         await self._do_mark_completed(item, audit_entry_id, head_hash)

@@ -216,7 +216,11 @@ export async function renderSkillsView(container) {
           showToast(t('skills.installQueued', { name }), 'ok');
           if (opId) {
             pollHubOp(opId, {
-              onDone: () => { showToast(t('skills.skillInstalled', { name }), 'ok'); loadInstalled(); },
+              onDone: () => {
+                showToast(t('skills.skillInstalled', { name }), 'ok');
+                if (btn) { btn.disabled = true; btn.textContent = t('skills.alreadyInstalled'); }
+                loadInstalled();
+              },
               onError: (r) => {
                 showToast(t('skills.installFailed', { reason: r }), 'error');
                 if (btn) { btn.disabled = false; btn.textContent = t('skills.install'); }

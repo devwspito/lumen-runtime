@@ -248,49 +248,79 @@ export async function renderTasksView(container) {
 
   function taskCron(task) { return task.recurrence ?? task.cron ?? task.schedule ?? task.trigger?.cron ?? ''; }
 
+  // ── Month calendar (Calendly/Google-style): click a day → create modal ──
+  let _calRef = null;  // Date pinned to the 1st of the displayed month
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const ymd = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+
+  // Which configured tasks land on a given calendar date.
+  function tasksForDate(date, tasks) {
+    const out = [];
+    const monIdx = (date.getDay() + 6) % 7;        // JS 0=Sun..6=Sat → Mon=0..Sun=6
+    const dd = date.getDate(), mo = date.getMonth() + 1;
+    for (const tk of tasks) {
+      const cron = taskCron(tk);
+      if (tk.one_shot) {
+        const p = (cron || '').trim().split(/\s+/);
+        if (p.length >= 4 && parseInt(p[2], 10) === dd && parseInt(p[3], 10) === mo) {
+          out.push({ task: tk, time: parseCron(cron).time });
+        }
+      } else {
+        const { days, time, daily, valid } = parseCron(cron);
+        if (valid && (daily || days.has(monIdx))) out.push({ task: tk, time });
+      }
+    }
+    return out;
+  }
+
   async function loadBoard() {
     const board = document.getElementById('tasks-board');
     if (!board) return;
     const [result] = await Promise.all([listConfiguredTasks(), loadAgents()]);
-    const tasks = (result?.tasks ?? []).filter(tk => tk.enabled !== false || true);
-    if (tasks.length === 0) {
-      board.innerHTML = `<div class="cv-empty">${esc(t('tasks.boardEmpty'))}</div>`;
-      return;
-    }
-    // Bucket tasks per weekday (Mon..Sun) + a daily lane.
-    const cols = Array.from({ length: 7 }, () => []);
-    const daily = [];
-    for (const tk of tasks) {
-      const { days, time, daily: isDaily } = parseCron(taskCron(tk));
-      const chip = { task: tk, time };
-      if (isDaily || days.size === 0) daily.push(chip);
-      else days.forEach(d => cols[d].push(chip));
-    }
-    const chipHtml = (c) => `<div class="task-chip${c.task.enabled === false ? ' task-chip--off' : ''}">
+    const tasks = (result?.tasks ?? []);
+    if (!_calRef) { const n = new Date(); _calRef = new Date(n.getFullYear(), n.getMonth(), 1); }
+    renderMonth(board, tasks);
+  }
+
+  function renderMonth(board, tasks) {
+    const year = _calRef.getFullYear(), month = _calRef.getMonth();
+    const first = new Date(year, month, 1);
+    const start = new Date(year, month, 1 - ((first.getDay() + 6) % 7));  // back to Monday
+    const todayStr = ymd(new Date());
+    const chipHtml = (c) => `<div class="task-chip${c.task.enabled === false ? ' task-chip--off' : ''}" title="${esc(c.task.label ?? c.task.name ?? '')}">
         ${c.time ? `<span class="task-chip__time">${esc(c.time)}</span>` : ''}
-        <span class="task-chip__name" title="${esc(c.task.label ?? c.task.name ?? '')}">${esc(c.task.label ?? c.task.name ?? c.task.task_id ?? t('tasks.defaultName'))}</span>
+        <span class="task-chip__name">${esc(c.task.label ?? c.task.name ?? c.task.task_id ?? t('tasks.defaultName'))}</span>
         ${agentChip(c.task)}
       </div>`;
-    const dailyHtml = daily.length
-      ? `<div class="task-board__daily"><span class="task-board__daily-label">${esc(t('tasks.boardDaily'))}</span>
-          <div class="task-board__daily-chips">${daily.map(chipHtml).join('')}</div></div>`
-      : '';
-    const gridHtml = `<div class="task-board__grid">${
-      cols.map((chips, i) => `<div class="task-board__col" data-day="${i}" role="button" tabindex="0" title="${esc(t('tasks.addOnDay'))}">
-        <div class="task-board__dow">${esc(t(DOW_KEYS[i]))}</div>
-        <div class="task-board__cells">${chips.length ? chips.map(chipHtml).join('') : ''}<div class="task-board__add">+</div></div>
-      </div>`).join('')
-    }</div>`;
-    board.innerHTML = dailyHtml + gridHtml;
-    // Click a day → open the friendly create modal with that day preselected.
-    board.querySelectorAll('.task-board__col[data-day]').forEach(col => {
-      const open = (e) => {
-        // ignore clicks on an existing task chip (those are for future detail/edit)
-        if (e.target.closest('.task-chip')) return;
-        openTaskModal([Number(col.dataset.day)]);
-      };
-      col.addEventListener('click', open);
-      col.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(e); } });
+    let cells = '';
+    for (let i = 0; i < 42; i++) {
+      const d = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i);
+      const muted = d.getMonth() !== month ? ' cal__day--muted' : '';
+      const today = ymd(d) === todayStr ? ' cal__day--today' : '';
+      const chips = tasksForDate(d, tasks).map(chipHtml).join('');
+      cells += `<div class="cal__day${muted}${today}" data-date="${ymd(d)}" role="button" tabindex="0" title="${esc(t('tasks.addOnDay'))}">
+          <span class="cal__daynum">${d.getDate()}</span>
+          <div class="cal__chips">${chips}</div>
+        </div>`;
+    }
+    const monthLabel = _calRef.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+    board.innerHTML = `<div class="cal">
+        <div class="cal__head">
+          <button class="icon-btn" id="cal-prev" aria-label="previous month">‹</button>
+          <h3 class="cal__title">${esc(monthLabel)}</h3>
+          <button class="icon-btn" id="cal-next" aria-label="next month">›</button>
+          <button class="btn btn--secondary btn--sm" id="cal-today">${esc(t('tasks.today'))}</button>
+        </div>
+        <div class="cal__dows">${DOW_KEYS.map(k => `<div>${esc(t(k))}</div>`).join('')}</div>
+        <div class="cal__grid">${cells}</div>
+      </div>`;
+    board.querySelector('#cal-prev')?.addEventListener('click', () => { _calRef = new Date(year, month - 1, 1); renderMonth(board, tasks); });
+    board.querySelector('#cal-next')?.addEventListener('click', () => { _calRef = new Date(year, month + 1, 1); renderMonth(board, tasks); });
+    board.querySelector('#cal-today')?.addEventListener('click', () => { const n = new Date(); _calRef = new Date(n.getFullYear(), n.getMonth(), 1); loadBoard(); });
+    board.querySelectorAll('.cal__day[data-date]').forEach(cell => {
+      const open = (e) => { if (e.target.closest('.task-chip')) return; openTaskModal([], cell.dataset.date); };
+      cell.addEventListener('click', open);
+      cell.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(e); } });
     });
   }
 
@@ -366,16 +396,23 @@ export async function renderTasksView(container) {
     container.querySelector('#tm-days-wrap').hidden = once;
     container.querySelector('#tm-date-wrap').hidden = !once;
   }
-  function openTaskModal(presetDays = []) {
+  function openTaskModal(presetDays = [], presetDate = null) {
     if (!modal) return;
     container.querySelector('#tm-name').value = '';
     container.querySelector('#tm-prompt').value = '';
     container.querySelector('#tm-time').value = '09:00';
     container.querySelector('#tm-time-end').value = '';
-    container.querySelector('#tm-date').value = '';
-    container.querySelector('#tm-mode').value = 'recurrent';
     container.querySelector('#tm-risk').value = 'low';
-    dayChips().forEach(c => c.classList.toggle('is-on', presetDays.includes(Number(c.dataset.day))));
+    if (presetDate) {
+      // Clicked a specific calendar day → one-shot task on that date.
+      container.querySelector('#tm-mode').value = 'once';
+      container.querySelector('#tm-date').value = presetDate;
+      dayChips().forEach(c => c.classList.remove('is-on'));
+    } else {
+      container.querySelector('#tm-mode').value = 'recurrent';
+      container.querySelector('#tm-date').value = '';
+      dayChips().forEach(c => c.classList.toggle('is-on', presetDays.includes(Number(c.dataset.day))));
+    }
     syncEveryday();
     syncMode();
     modal.hidden = false;
