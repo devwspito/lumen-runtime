@@ -1,4 +1,7 @@
-import { NavLink, Outlet } from 'react-router-dom'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { NavLink, Outlet, useNavigate } from 'react-router-dom'
+import { listConversations } from '../api/client'
+import type { ConversationSummary } from '../api/types'
 
 interface NavItem {
   to: string
@@ -31,16 +34,6 @@ function AgentsIcon() {
       <circle cx="8" cy="5.5" r="2.5" stroke="currentColor" strokeWidth="1.4" />
       <path d="M2 14c0-3 2.686-4.5 6-4.5S14 11 14 14"
         stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-    </svg>
-  )
-}
-
-function OfficeIcon() {
-  return (
-    <svg className="nav-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <rect x="1" y="3" width="6" height="10" rx="1" stroke="currentColor" strokeWidth="1.4" />
-      <rect x="9" y="3" width="6" height="4" rx="1" stroke="currentColor" strokeWidth="1.4" />
-      <rect x="9" y="9" width="6" height="4" rx="1" stroke="currentColor" strokeWidth="1.4" />
     </svg>
   )
 }
@@ -88,6 +81,15 @@ function ProvidersIcon() {
   )
 }
 
+function SecurityIcon() {
+  return (
+    <svg className="nav-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M8 2L3 4v4c0 3.3 2.3 5.6 5 6.4C11.7 13.6 14 11.3 14 8V4L8 2Z"
+        stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
 function PlusIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
@@ -100,12 +102,157 @@ const NAV_ITEMS: NavItem[] = [
   { to: '/chat',         label: 'Chat',          icon: <ChatIcon /> },
   { to: '/programadas',  label: 'Programadas',   icon: <TasksIcon /> },
   { to: '/agentes',      label: 'Agentes',       icon: <AgentsIcon /> },
-  { to: '/office',       label: 'Office',        icon: <OfficeIcon /> },
   { to: '/skills',       label: 'Skills',        icon: <SkillsIcon /> },
   { to: '/integraciones',label: 'Integraciones', icon: <IntegrationsIcon /> },
   { to: '/mcp',          label: 'MCP',           icon: <McpIcon /> },
   { to: '/proveedores',  label: 'Proveedores',   icon: <ProvidersIcon /> },
+  { to: '/seguridad',    label: 'Seguridad',     icon: <SecurityIcon /> },
 ]
+
+// ── Recientes ─────────────────────────────────────────────────────────────────
+
+const PREVIEW_COUNT = 3
+
+function relativeTime(iso?: string): string {
+  if (!iso) return ''
+  const diff = Date.now() - new Date(iso).getTime()
+  const mins = Math.floor(diff / 60_000)
+  if (mins < 1) return 'Ahora'
+  if (mins < 60) return `Hace ${mins} min`
+  const hrs = Math.floor(mins / 60)
+  if (hrs < 24) return `Hace ${hrs} h`
+  return `Hace ${Math.floor(hrs / 24)} d`
+}
+
+function truncate(s: string, n: number) {
+  return s.length > n ? s.slice(0, n) + '…' : s
+}
+
+// ChatContext exposes the active conversation id and loadConversation so that
+// Recentes can highlight the current conversation and load a selected one.
+// We pass these in via props from Layout → ChatView bridge via context.
+// Since Layout doesn't directly own useChat, we use a lightweight shared context.
+
+interface ChatBridgeContextValue {
+  activeConvId: string | null
+  loadConversation(id: string): Promise<void>
+}
+
+import { createContext, useContext } from 'react'
+
+export const ChatBridgeContext = createContext<ChatBridgeContextValue>({
+  activeConvId: null,
+  loadConversation: async () => {},
+})
+
+function RecentsSection() {
+  const { activeConvId, loadConversation } = useContext(ChatBridgeContext)
+  const navigate = useNavigate()
+  const [conversations, setConversations] = useState<ConversationSummary[]>([])
+  const [loading, setLoading] = useState(true)
+  const [expanded, setExpanded] = useState(false)
+  const hasMounted = useRef(false)
+
+  const load = useCallback(() => {
+    listConversations()
+      .then(data => {
+        setConversations(Array.isArray(data) ? data : [])
+        setLoading(false)
+      })
+      .catch(() => { setLoading(false) })
+  }, [])
+
+  useEffect(() => {
+    if (!hasMounted.current) {
+      hasMounted.current = true
+      load()
+    }
+  }, [load])
+
+  // Re-load when the active conversation changes (new conversation started)
+  useEffect(() => {
+    if (hasMounted.current) load()
+  }, [activeConvId, load])
+
+  async function handleSelect(id: string) {
+    navigate('/chat')
+    await loadConversation(id)
+  }
+
+  const visible = expanded ? conversations : conversations.slice(0, PREVIEW_COUNT)
+  const overflow = conversations.length - PREVIEW_COUNT
+
+  if (loading) {
+    return (
+      <div className="sidebar-recents" aria-label="Conversaciones recientes">
+        <div className="sidebar-section-label">Recientes</div>
+        {Array.from({ length: PREVIEW_COUNT }, (_, i) => (
+          <div
+            key={i}
+            className="recent-item"
+            style={{ animation: `shimmer 1.4s ${i * 80}ms infinite linear` }}
+            aria-hidden="true"
+          />
+        ))}
+      </div>
+    )
+  }
+
+  if (conversations.length === 0) {
+    return (
+      <div className="sidebar-recents" aria-label="Conversaciones recientes">
+        <div className="sidebar-section-label">Recientes</div>
+        <p className="recent-empty">Sin conversaciones recientes</p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="sidebar-recents" aria-label="Conversaciones recientes">
+      <div className="sidebar-section-label">Recientes</div>
+      <ul role="listbox" aria-label="Conversaciones recientes">
+        {visible.map(c => {
+          const id = (c as ConversationSummary & { conversation_id?: string }).conversation_id ?? c.id
+          if (!id) return null
+          const title = c.title ?? 'Sin título'
+          const time = relativeTime(
+            (c as ConversationSummary & { last_msg_at?: string }).last_msg_at
+            ?? c.updated_at
+            ?? c.created_at
+          )
+          const isActive = id === activeConvId
+
+          return (
+            <li key={id} role="option" aria-selected={isActive}>
+              <button
+                className={`recent-item${isActive ? ' recent-item--active' : ''}`}
+                onClick={() => handleSelect(id)}
+                type="button"
+                title={title}
+              >
+                <span className="recent-title">{truncate(title, 38)}</span>
+                {time && <span className="recent-time">{time}</span>}
+              </button>
+            </li>
+          )
+        })}
+        {overflow > 0 && (
+          <li>
+            <button
+              className="recent-item"
+              style={{ color: 'var(--accent)', fontWeight: 500 }}
+              onClick={() => setExpanded(v => !v)}
+              type="button"
+              aria-expanded={expanded}
+            >
+              {expanded ? 'Ver menos' : `Cargar más (${overflow})`}
+            </button>
+          </li>
+        )}
+      </ul>
+    </div>
+  )
+}
 
 export default function Layout() {
   return (
@@ -131,8 +278,12 @@ export default function Layout() {
 
         {/* Scrollable area */}
         <div className="sidebar-scroll">
+          {/* Recientes */}
+          <RecentsSection />
+
           {/* Main nav */}
           <div className="sidebar-nav">
+            <div className="sidebar-section-label">Navegación</div>
             <ul role="list">
               {NAV_ITEMS.map(({ to, label, icon }) => (
                 <li key={to}>

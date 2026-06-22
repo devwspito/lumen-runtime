@@ -16,8 +16,12 @@ import {
   type KeyboardEvent,
   type ChangeEvent,
 } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useChat } from '../hooks/useChat'
 import type { ChatMessage, ToolStep } from '../hooks/useChat'
+import { listProviders } from '../api/client'
+import type { Provider } from '../api/types'
+import { ChatBridgeContext } from '../components/Layout'
 
 // ── i18n strings (ES, matching vanilla i18n.js) ───────────────────────────────
 
@@ -215,6 +219,45 @@ function StatusBar({ phase, text }: StatusBarProps) {
   )
 }
 
+// ── Model picker ──────────────────────────────────────────────────────────────
+
+function useActiveProvider() {
+  const [provider, setProvider] = useState<Provider | null>(null)
+
+  useEffect(() => {
+    listProviders()
+      .then(data => {
+        const arr = Array.isArray(data) ? data : []
+        setProvider(arr.find(p => p.is_active) ?? arr[0] ?? null)
+      })
+      .catch(() => setProvider(null))
+  }, [])
+
+  return provider
+}
+
+function ModelPicker() {
+  const navigate = useNavigate()
+  const provider = useActiveProvider()
+
+  const label = provider
+    ? (provider.default_model ?? provider.alias ?? provider.name ?? 'Modelo activo')
+    : 'Sin modelo configurado'
+
+  return (
+    <button
+      className="composer-model-picker"
+      onClick={() => navigate('/proveedores')}
+      title={provider ? `Proveedor: ${provider.alias ?? provider.name}` : 'Configura un modelo en Proveedores'}
+      type="button"
+      aria-label={provider ? `Modelo activo: ${label}. Ir a Proveedores` : 'Sin modelo. Ir a Proveedores'}
+    >
+      <span className="composer-model-picker__label">{label}</span>
+      <ChevronIcon />
+    </button>
+  )
+}
+
 // ── Composer ──────────────────────────────────────────────────────────────────
 
 interface ComposerProps {
@@ -263,6 +306,7 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
           rows={1}
         />
         <div className="composer-toolbar">
+          <ModelPicker />
           <div className="composer-toolbar-right">
             {isStreaming ? (
               <button
@@ -313,7 +357,7 @@ function SpinnerIcon() {
 // ── ChatView ──────────────────────────────────────────────────────────────────
 
 export default function ChatView() {
-  const { messages, status, sendMessage, stopStream } = useChat()
+  const { messages, status, sendMessage, stopStream, convId, loadConversation } = useChat()
   const [composerText, setComposerText] = useState('')
   const bodyRef = useRef<HTMLDivElement>(null)
   const userScrolledRef = useRef(false)
@@ -360,46 +404,48 @@ export default function ChatView() {
     : undefined
 
   return (
-    <div className="chat-view">
-      {/* Topbar */}
-      <div className="chat-topbar">
-        <span className="chat-topbar-title">
-          {showWelcome ? 'Nueva conversación' : 'Chat'}
-        </span>
+    <ChatBridgeContext.Provider value={{ activeConvId: convId, loadConversation }}>
+      <div className="chat-view">
+        {/* Topbar */}
+        <div className="chat-topbar">
+          <span className="chat-topbar-title">
+            {showWelcome ? 'Nueva conversación' : 'Chat'}
+          </span>
+        </div>
+
+        {/* Messages */}
+        <div
+          className="chat-body"
+          ref={bodyRef}
+          aria-live="polite"
+          aria-label="Mensajes del chat"
+        >
+          {showWelcome ? (
+            <Welcome onSuggestion={handleSuggestion} />
+          ) : (
+            messages.map((msg) =>
+              msg.type === 'user' ? (
+                <UserMessage key={msg.id} text={msg.text} />
+              ) : (
+                <AssistantMessage key={msg.id} message={msg} />
+              ),
+            )
+          )}
+        </div>
+
+        {/* Status bar */}
+        <StatusBar phase={status.phase} text={statusText} />
+
+        {/* Composer */}
+        <Composer
+          disabled={status.phase === 'sending'}
+          isStreaming={isStreaming}
+          onSend={handleSend}
+          onStop={stopStream}
+          value={composerText}
+          onChange={setComposerText}
+        />
       </div>
-
-      {/* Messages */}
-      <div
-        className="chat-body"
-        ref={bodyRef}
-        aria-live="polite"
-        aria-label="Mensajes del chat"
-      >
-        {showWelcome ? (
-          <Welcome onSuggestion={handleSuggestion} />
-        ) : (
-          messages.map((msg) =>
-            msg.type === 'user' ? (
-              <UserMessage key={msg.id} text={msg.text} />
-            ) : (
-              <AssistantMessage key={msg.id} message={msg} />
-            ),
-          )
-        )}
-      </div>
-
-      {/* Status bar */}
-      <StatusBar phase={status.phase} text={statusText} />
-
-      {/* Composer */}
-      <Composer
-        disabled={status.phase === 'sending'}
-        isStreaming={isStreaming}
-        onSend={handleSend}
-        onStop={stopStream}
-        value={composerText}
-        onChange={setComposerText}
-      />
-    </div>
+    </ChatBridgeContext.Provider>
   )
 }

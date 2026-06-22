@@ -24,6 +24,13 @@ import type {
   RecentTasksResponse,
   CreateTaskPayload,
   ConfiguredTask,
+  SecurityScan,
+  AuditHead,
+  EgressDomainsResponse,
+  PendingApproval,
+  MfaStatus,
+  PoliciesResponse,
+  InstallDecisionPayload,
 } from './types'
 
 // Mirrors the timeout strategy in vanilla api.js: snappy GETs fail fast;
@@ -362,6 +369,117 @@ export function getConversation(id: string): Promise<ConversationDetail> {
 export function listConversations(agentId?: string): Promise<ConversationSummary[]> {
   const qs = agentId ? `?agent_id=${encodeURIComponent(agentId)}` : ''
   return request<ConversationSummary[]>(`/chat/conversations${qs}`).catch(() => [])
+}
+
+// ── Security ──────────────────────────────────────────────────────────────────
+
+export function getSecurityScans(): Promise<SecurityScan[]> {
+  return request<SecurityScan[]>('/security/scans').catch(() => [])
+}
+
+export function getAuditChainHead(): Promise<AuditHead | null> {
+  return request<AuditHead>('/security/audit/head').catch(() => null)
+}
+
+export function getSecurityPolicy(): Promise<unknown> {
+  return request<unknown>('/security/policy').catch(() => null)
+}
+
+export function recordInstallDecision(payload: InstallDecisionPayload): Promise<unknown> {
+  return request<unknown>('/security/decisions', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+    timeoutMs: 30_000,
+  })
+}
+
+export function listEgressDomains(): Promise<EgressDomainsResponse> {
+  return request<EgressDomainsResponse>('/egress/domains').catch(() => ({ domains: [] }))
+}
+
+export function grantEgressDomain(domain: string): Promise<unknown> {
+  return request<unknown>('/egress/domains/grant', {
+    method: 'POST',
+    body: JSON.stringify({ domain }),
+  })
+}
+
+export function revokeEgressDomain(domain: string): Promise<unknown> {
+  return request<unknown>('/egress/domains/revoke', {
+    method: 'POST',
+    body: JSON.stringify({ domain }),
+  })
+}
+
+// ── Approvals (HITL) ──────────────────────────────────────────────────────────
+
+export function listPendingApprovals(): Promise<PendingApproval[]> {
+  return request<PendingApproval[]>('/approvals/pending').catch(() => [])
+}
+
+export function resolveApproval(
+  proposalId: string,
+  decision: string,
+  factors: { totp?: string | null; riddle_answer?: string | null; humanity?: string | null } = {},
+): Promise<unknown> {
+  return request<unknown>(`/approvals/${encodeURIComponent(proposalId)}`, {
+    method: 'POST',
+    body: JSON.stringify({
+      decision,
+      totp: factors.totp ?? null,
+      humanity: factors.humanity ?? null,
+      riddle_answer: factors.riddle_answer ?? null,
+    }),
+  })
+}
+
+// ── MFA enrollment ────────────────────────────────────────────────────────────
+
+export function mfaStatus(): Promise<MfaStatus> {
+  return request<MfaStatus>('/mfa/status').catch(() => ({ enrolled: false, riddle_set: false }))
+}
+
+export function mfaEnroll(totp: string | null = null): Promise<{ otpauth_uri?: string }> {
+  return request<{ otpauth_uri?: string }>('/mfa/enroll', {
+    method: 'POST',
+    body: JSON.stringify({ totp }),
+  })
+}
+
+export function mfaSetRiddle(totp: string, question: string, answer: string): Promise<unknown> {
+  return request<unknown>('/mfa/riddle', {
+    method: 'POST',
+    body: JSON.stringify({ totp, question, answer }),
+  })
+}
+
+// ── Security policies ─────────────────────────────────────────────────────────
+
+export function getPolicies(): Promise<PoliciesResponse> {
+  return request<PoliciesResponse>('/policies').catch(
+    () => ({ preset: 'equilibrado', tools: {}, mfa_on_dangers: true }),
+  )
+}
+
+export function setPolicyPreset(preset: string, totp: string, riddle_answer: string | null = null): Promise<unknown> {
+  return request<unknown>('/policies/preset', {
+    method: 'POST',
+    body: JSON.stringify({ preset, totp, riddle_answer }),
+  })
+}
+
+export function setPolicyTool(tool: string, enabled: boolean, totp: string, riddle_answer: string | null = null): Promise<unknown> {
+  return request<unknown>('/policies/tool', {
+    method: 'POST',
+    body: JSON.stringify({ tool, enabled, totp, riddle_answer }),
+  })
+}
+
+export function setMfaOnDangers(enabled: boolean, totp: string, riddle_answer: string | null = null): Promise<unknown> {
+  return request<unknown>('/policies/mfa_on_dangers', {
+    method: 'POST',
+    body: JSON.stringify({ enabled, totp, riddle_answer }),
+  })
 }
 
 // ── WebSocket stream ──────────────────────────────────────────────────────────

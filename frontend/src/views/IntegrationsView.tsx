@@ -244,7 +244,12 @@ function ComposioSetupCard({ onSaved, onToast }: ComposioSetupCardProps) {
 
   return (
     <div className="cv-teach-card">
-      <p className="cv-teach-intro">Configura tu API key de Composio para activar las integraciones.</p>
+      <p className="cv-teach-intro">Conecta Lumen a tus apps (Gmail, Slack, Notion y +250) vía Composio. Es gratis para empezar.</p>
+      <p className="cv-teach-intro">
+        1) Entra en{' '}
+        <a href="https://app.composio.dev/developers" target="_blank" rel="noopener noreferrer">app.composio.dev</a>
+        {' '}· 2) Crea una cuenta gratis · 3) En <strong>Settings → API Keys</strong> genera una key (<code>ak_…</code>) y pégala aquí.
+      </p>
       <div className="cv-form-inline">
         <label className="sr-only" htmlFor="composio-apikey">API key de Composio</label>
         {/* Secret: password input, never echoed back */}

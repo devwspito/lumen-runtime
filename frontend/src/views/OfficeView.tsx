@@ -492,8 +492,8 @@ export default function OfficeView() {
       <header className="view-header office-view-header">
         <div className="office-header-row">
           <div>
-            <h1 className="view-title">Office</h1>
-            <p className="view-subtitle">El piso en tiempo real de tus agentes</p>
+            <h1 className="view-title">Agentes</h1>
+            <p className="view-subtitle">Tu equipo de IA — tarjetas o piso en vivo</p>
           </div>
 
           <div className="office-seg-toggle" role="group" aria-label="Vista de la oficina">

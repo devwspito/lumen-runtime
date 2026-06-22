@@ -240,6 +240,62 @@ export interface CreateTaskPayload {
   one_shot?: boolean
 }
 
+// ── Security ──────────────────────────────────────────────────────────────────
+
+export interface SecurityScan {
+  scan_id?: string
+  id?: string
+  name?: string
+  identifier?: string
+  target?: string
+  kind?: string
+  verdict?: string
+  severity?: string
+  score?: number
+  decision?: string
+}
+
+export interface AuditHead {
+  hash?: string
+  head?: string
+  timestamp?: string
+}
+
+export interface EgressDomainsResponse {
+  domains: string[]
+}
+
+export interface PendingApproval {
+  proposal_id: string
+  kind?: string
+  summary: string
+  target?: string
+  parameters?: Record<string, unknown>
+}
+
+export interface MfaStatus {
+  enrolled: boolean
+  riddle_set?: boolean
+}
+
+export interface PoliciesResponse {
+  preset?: string
+  tools?: Record<string, boolean>
+  mfa_on_dangers?: boolean
+}
+
+export interface InstallDecisionPayload {
+  scan_id: string
+  decision: 'allow'
+  identifier: string
+  kind: string
+  score: number
+  verdict: string
+  risks_json: string
+  totp: string
+  riddle_answer: string | null
+}
+
 // Frames emitted by the WebSocket stream — discriminated by `kind`.
 export type StreamFrame =
   | { kind: 'delta';          delta?: string; text?: string }

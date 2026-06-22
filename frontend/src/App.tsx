@@ -1,13 +1,13 @@
 import { lazy, Suspense } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import Layout from './components/Layout'
-import AgentsView from './views/AgentsView'
 import ChatView from './views/ChatView'
 import ProvidersView from './views/ProvidersView'
 import IntegrationsView from './views/IntegrationsView'
 import McpView from './views/McpView'
 import SkillsView from './views/SkillsView'
 import CalendarView from './views/CalendarView'
+import SeguridadView from './views/SeguridadView'
 
 // Code-split OfficeView at the route boundary; it imports the canvas engine
 // which is non-trivial (~10 kB gzipped) and not needed on other routes.
@@ -30,16 +30,18 @@ export default function App() {
           <Route index element={<Navigate to="/chat" replace />} />
           <Route path="chat" element={<ChatView />} />
           <Route path="programadas" element={<CalendarView />} />
-          <Route path="agentes" element={<AgentsView />} />
-          <Route path="office" element={
+          {/* Agentes = the unified team view (cards + live floor). Office merged in. */}
+          <Route path="agentes" element={
             <Suspense fallback={<OfficeFallback />}>
               <OfficeView />
             </Suspense>
           } />
+          <Route path="office" element={<Navigate to="/agentes" replace />} />
           <Route path="skills" element={<SkillsView />} />
           <Route path="integraciones" element={<IntegrationsView />} />
           <Route path="mcp" element={<McpView />} />
           <Route path="proveedores" element={<ProvidersView />} />
+          <Route path="seguridad" element={<SeguridadView />} />
         </Route>
       </Routes>
     </BrowserRouter>

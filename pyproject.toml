@@ -59,6 +59,9 @@ dev = [
 shell = [
     "fastapi>=0.115",
     "uvicorn>=0.32",
+    # Required by FastAPI/Starlette to parse multipart/form-data (UploadFile).
+    # Without this, POST /api/v1/workspace/files raises a 400 at runtime.
+    "python-multipart>=0.0.9",
     # PyJWT with cryptography backend — required for Cloudflare Access RS256
     # JWT verification in the mirror server (cf_access_verifier.py).
     # PyJWT[crypto] ensures RSA algorithm support via cryptography>=3.4.

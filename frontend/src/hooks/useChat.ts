@@ -6,7 +6,7 @@
  */
 
 import { useCallback, useReducer, useRef } from 'react'
-import { postChat, openTaskStream } from '../api/client'
+import { postChat, openTaskStream, getConversation } from '../api/client'
 import type { StreamCallbacks } from '../api/client'
 import type { StreamFrame } from '../api/types'
 import { renderMarkdown } from '../lib/markdown'
@@ -192,6 +192,7 @@ interface UseChatReturn {
   sendMessage(text: string): Promise<void>
   startNew(): void
   stopStream(): void
+  loadConversation(id: string): Promise<void>
 }
 
 export function useChat(): UseChatReturn {
@@ -290,6 +291,33 @@ export function useChat(): UseChatReturn {
     streamRef.current = openTaskStream(taskId, callbacks)
   }, [state.convId, stopStream])
 
+  const loadConversation = useCallback(async (id: string) => {
+    stopStream()
+    try {
+      const detail = await getConversation(id)
+      const messages: ChatMessage[] = detail.messages
+        .filter(m => m.role === 'user' || m.role === 'assistant')
+        .map(m => {
+          if (m.role === 'user') {
+            return { type: 'user' as const, id: genUUID(), text: m.content }
+          }
+          return {
+            type: 'assistant' as const,
+            id: genUUID(),
+            thinkingText: '',
+            thinkingDone: true,
+            toolSteps: [],
+            activityText: '',
+            renderedHtml: renderMarkdown(m.content),
+            isStreaming: false,
+          }
+        })
+      dispatch({ type: 'LOAD_MESSAGES', convId: id, messages })
+    } catch {
+      dispatch({ type: 'STATUS_ERROR', message: 'No se pudo cargar la conversación.' })
+    }
+  }, [stopStream])
+
   return {
     convId: state.convId,
     messages: state.messages,
@@ -297,5 +325,6 @@ export function useChat(): UseChatReturn {
     sendMessage,
     startNew,
     stopStream,
+    loadConversation,
   }
 }
