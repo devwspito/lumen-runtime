@@ -76,6 +76,8 @@ class AgentDraft:
     golden_rules: tuple[str, ...] = ()
     forbidden_phrases: tuple[str, ...] = ()
     autonomy_level: AutonomyLevel = _DEFAULT_AUTONOMY
+    # Nullable: None → "mis-agentes" bucket in the roster view.
+    department: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +96,8 @@ class Agent:
     forbidden_phrases: tuple[str, ...] = ()
     is_default: bool = False
     autonomy_level: AutonomyLevel = _DEFAULT_AUTONOMY
+    # Nullable: None → rendered in "mis-agentes" by the roster endpoint.
+    department: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(tz=UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(tz=UTC))
 

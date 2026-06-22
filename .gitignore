@@ -17,3 +17,4 @@ build/
 *.raw
 *.iso
 node_modules/
+frontend/dist/

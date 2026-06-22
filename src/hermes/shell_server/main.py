@@ -1211,6 +1211,9 @@ def create_app() -> FastAPI:
         create_agents_router,
         create_composio_router,
     )
+    from hermes.shell_server.cowork.roster_api import (  # noqa: PLC0415
+        create_roster_router,
+    )
     from hermes.shell_server.cowork.skills_api import (  # noqa: PLC0415
         create_skills_hub_router,
     )
@@ -1231,6 +1234,9 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(create_providers_router())
+    # Roster must be registered BEFORE agents_router to avoid FastAPI resolving
+    # /api/v1/agents/roster as /api/v1/agents/{agent_id}.
+    app.include_router(create_roster_router())
     app.include_router(create_agents_router())
     app.include_router(create_composio_router())
     app.include_router(create_skills_hub_router())
@@ -1278,7 +1284,16 @@ def create_app() -> FastAPI:
         # earlier so neither is shadowed.
         app.mount("/webui", _NoCacheStatic(directory=str(_webui_dir)), name="webui")
 
-        @app.get("/", include_in_schema=False)
+        # The React SPA is now the default UI at "/" (see the React block below,
+        # which registers a "/" → "/app/" redirect). The legacy vanilla UI stays
+        # reachable at "/classic". If the React bundle is ABSENT (dev without
+        # `npm run build`), we fall back to serving the vanilla UI at "/" too, so
+        # the server is never UI-less.
+        _react_dist_present = Path(
+            os.environ.get("LUMEN_REACT_DIST", "/opt/lumen-webapp")
+        ).is_dir()
+
+        @app.get("/classic", include_in_schema=False)
         async def _serve_webui_index(request: Request):  # noqa: ANN202
             # C3 PASS-5: do NOT serve the stable operator token to unauthenticated
             # GET /. The owner proves possession of the bootstrap secret (?k=… or
@@ -1319,11 +1334,126 @@ def create_app() -> FastAPI:
             # persisted by any intermediary or the browser disk cache.
             return HTMLResponse(page, headers={"Cache-Control": "no-store"})
 
+        if not _react_dist_present:
+            # No React bundle → vanilla is also the root UI (dev fallback).
+            app.add_api_route("/", _serve_webui_index, include_in_schema=False)
+
         logger.info("hermes.shell_server.webui.mounted", extra={"path": str(_webui_dir)})
     else:
         logger.info(
             "hermes.shell_server.webui.absent",
             extra={"path": str(_webui_dir), "note": "web UI not bundled — API-only mode"},
+        )
+
+    # ------------------------------------------------------------------
+    # React SPA — served at /app/ in parallel with the vanilla UI at /.
+    # The vanilla UI remains untouched; /app/ is the progressive replacement.
+    # Absent at build time (dev without frontend build) → skipped silently.
+    #
+    # Baked path: /opt/lumen-webapp  (set by Containerfile).
+    # Override for local dev: LUMEN_REACT_DIST env var.
+    #
+    # Token injection: same mechanism as the vanilla UI — the bootstrap
+    # handshake injects window.__LUMEN_TOKEN__ into the served index.html.
+    # The placeholder comment <!--lumen-token-injection-placeholder--> in
+    # frontend/index.html marks where the <script> tag is inserted (defence
+    # in depth: even if </head> appears twice, the placeholder is unique).
+    # ------------------------------------------------------------------
+    _react_dist = Path(
+        os.environ.get("LUMEN_REACT_DIST", "/opt/lumen-webapp")
+    )
+    if _react_dist.is_dir():
+        from fastapi.responses import HTMLResponse  # noqa: PLC0415
+        from fastapi.staticfiles import StaticFiles  # noqa: PLC0415
+        import json as _json_mod_react  # noqa: PLC0415
+
+        # Vite hashes asset filenames → long-term cache is safe for assets/;
+        # index.html itself must revalidate (it carries the injected token).
+        app.mount(
+            "/app/assets",
+            StaticFiles(directory=str(_react_dist / "assets")),
+            name="react-assets",
+        )
+
+        def _build_react_page(request: Request) -> str:
+            """Read, optionally inject token, return the React index.html."""
+            page = (_react_dist / "index.html").read_text(encoding="utf-8")
+            presented = (
+                request.query_params.get("k")
+                or request.headers.get("x-lumen-bootstrap", "")
+            )
+            if presented and _commitment_matches(
+                app.state.shell_bootstrap_commitment or "", presented
+            ):
+                session_token = app.state.mint_session_token()
+                inject = (
+                    "<script>window.__LUMEN_TOKEN__="
+                    + _json_mod_react.dumps(session_token)
+                    + ";</script>"
+                )
+                # Replace the placeholder comment first (preferred); fall back
+                # to </head> so it works even if the placeholder is absent.
+                if "<!--lumen-token-injection-placeholder-->" in page:
+                    page = page.replace(
+                        "<!--lumen-token-injection-placeholder-->", inject, 1
+                    )
+                else:
+                    page = page.replace("</head>", inject + "</head>", 1)
+            return page
+
+        @app.get("/app", include_in_schema=False)
+        @app.get("/app/", include_in_schema=False)
+        async def _serve_react_index(request: Request):  # noqa: ANN202
+            return HTMLResponse(
+                _build_react_page(request),
+                headers={"Cache-Control": "no-store"},
+            )
+
+        # SPA fallback: any /app/<client-side-route> that is NOT a real file
+        # must return index.html so React Router can handle it.
+        @app.get("/app/{path:path}", include_in_schema=False)
+        async def _serve_react_spa_fallback(
+            request: Request, path: str  # noqa: ARG001
+        ):  # noqa: ANN202
+            # If a real file exists under _react_dist (hashed JS/CSS chunks etc.
+            # not under /assets/) serve it directly.  Otherwise hand off to React
+            # Router by returning index.html.
+            candidate = _react_dist / path
+            if candidate.is_file():
+                from fastapi.responses import FileResponse  # noqa: PLC0415
+                return FileResponse(str(candidate))
+            return HTMLResponse(
+                _build_react_page(request),
+                headers={"Cache-Control": "no-store"},
+            )
+
+        from fastapi.responses import RedirectResponse  # noqa: PLC0415
+        import urllib.parse as _urlparse  # noqa: PLC0415
+
+        @app.get("/", include_in_schema=False)
+        async def _root_to_react(request: Request):  # noqa: ANN202
+            # React is the default UI. Preserve the ?k= bootstrap secret across the
+            # hop so the owner's `GET /?k=<secret>` lands authenticated on the SPA.
+            # no-store: the redirect Location carries the secret — never cache it.
+            k = request.query_params.get("k")
+            target = "/app/"
+            if k:
+                target += "?k=" + _urlparse.quote(k, safe="")
+            return RedirectResponse(
+                target, status_code=307, headers={"Cache-Control": "no-store"}
+            )
+
+        logger.info(
+            "hermes.shell_server.react_webui.mounted",
+            extra={"path": str(_react_dist)},
+        )
+    else:
+        logger.info(
+            "hermes.shell_server.react_webui.absent",
+            extra={
+                "path": str(_react_dist),
+                "note": "React dist not found — run `npm run build` in frontend/",
+            },
         )
 
     return app

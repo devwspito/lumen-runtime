@@ -50,11 +50,16 @@ def create_mcp_router() -> APIRouter:
     async def list_mcp_servers(request: Request) -> list[dict]:
         """List configured MCP servers with status and tool_count.
 
+        Ruflo is filtered out: it is a system-level MCP ("Powered by Ruflo")
+        that the operator should not manage via the MCP view. It remains
+        fully functional as an MCP — it is only hidden from this surface.
+
         Fail-soft: returns [] when daemon unavailable.
         """
         proxy = request.app.state.dbus_proxy
         try:
-            return await proxy.call_list("list_mcp_servers")
+            servers = await proxy.call_list("list_mcp_servers")
+            return [s for s in servers if s.get("server_id") != "ruflo"]
         except AgentUnavailable as exc:
             logger.warning(
                 "hermes.mcp.list_unavailable",

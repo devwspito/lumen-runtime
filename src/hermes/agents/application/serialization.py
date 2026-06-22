@@ -13,7 +13,7 @@ from hermes.agents.domain.agent import Agent, AgentDraft, AutonomyLevel, autonom
 
 
 def agent_to_dict(agent: Agent) -> dict[str, Any]:
-    return {
+    d: dict[str, Any] = {
         "agent_id": agent.agent_id,
         "name": agent.name,
         "color": agent.color,
@@ -26,9 +26,14 @@ def agent_to_dict(agent: Agent) -> dict[str, Any]:
         "forbidden_phrases": list(agent.forbidden_phrases),
         "autonomy_level": agent.autonomy_level.value,
         "is_default": agent.is_default,
+        "department": agent.department,
         "created_at": agent.created_at.isoformat(),
         "updated_at": agent.updated_at.isoformat(),
     }
+    # Expose "id" as an alias for "agent_id" so all consumers (REST
+    # routers, roster builder, React frontend) can rely on a single key.
+    d["id"] = d["agent_id"]
+    return d
 
 
 def draft_from_dict(data: dict[str, Any]) -> AgentDraft:
@@ -44,6 +49,9 @@ def draft_from_dict(data: dict[str, Any]) -> AgentDraft:
         # Fail-closed: valor desconocido → default conservador
         autonomy = AutonomyLevel.BALANCED
 
+    raw_dept = data.get("department")
+    department: str | None = str(raw_dept).strip() or None if raw_dept is not None else None
+
     return AgentDraft(
         name=str(data.get("name", "")).strip(),
         role=str(data.get("role", "")),
@@ -57,4 +65,5 @@ def draft_from_dict(data: dict[str, Any]) -> AgentDraft:
             str(p) for p in data.get("forbidden_phrases", []) if str(p).strip()
         ),
         autonomy_level=autonomy,
+        department=department,
     )

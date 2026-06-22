@@ -64,6 +64,7 @@ _AGENT_DRAFT_ALLOWED_KEYS = frozenset({
     "name", "role", "register", "primary_mission", "instructions",
     "color", "language", "golden_rules", "forbidden_phrases",
     "autonomy_level", "agent_id",
+    "department",  # nullable string; null → "mis-agentes" bucket in the roster
 })
 
 # Allow-list of keys accepted in a house rule (Fix-10).

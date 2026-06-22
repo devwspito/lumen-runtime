@@ -40,3 +40,8 @@ build/
 
 # Test files (not needed in image)
 tests/
+
+# React frontend: node_modules and build output are regenerated inside the
+# container. Exclude them from the build context to keep it small.
+frontend/node_modules/
+frontend/dist/

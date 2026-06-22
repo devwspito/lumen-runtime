@@ -56,11 +56,30 @@ RUN cd /tmp/whlbuild && python3 -m pip wheel . --no-deps -w /tmp/whl \
     && python3 -m pip install --no-cache-dir \
       aiohttp composio==0.13.1 dbus-fast rfc3161ng structlog tenacity \
       cryptography playwright pytesseract selectolax \
-      mcp fastapi 'uvicorn[standard]' PyJWT websockets httpx croniter \
+      mcp fastapi 'uvicorn[standard]' python-multipart PyJWT websockets httpx croniter \
       rich textual \
     # pydantic LAST word (determinism; matches the OS build's pin order)
     && python3 -m pip install --no-cache-dir 'pydantic==2.10.6' 'pydantic-core==2.27.2' \
     && rm -rf /tmp/whlbuild /tmp/whl
+
+# ── React SPA (frontend/) — build INSIDE the container ──────────────────────
+# Layer-cache strategy (mirrors the Python wheel-build pattern above):
+#   1. Copy only package manifests → npm ci (heavy layer, rarely invalidated).
+#   2. Copy the rest of frontend/ → vite build (fast layer, invalidated on src changes).
+# Output is placed at /opt/lumen-webapp — the path shell-server reads via the
+# LUMEN_REACT_DIST env default (src/hermes/shell_server/main.py: _react_dist).
+COPY frontend/package.json frontend/package-lock.json /tmp/frontbuild/
+RUN cd /tmp/frontbuild && npm ci --ignore-scripts
+
+# FE_CACHEBUST: pass --build-arg FE_CACHEBUST=<unique> to force a clean rebuild of the
+# vite layer (the COPY-frontend layer can stale-cache across iterative rebuilds).
+ARG FE_CACHEBUST=0
+RUN echo "fe-cachebust ${FE_CACHEBUST}" > /tmp/.fe_cachebust
+COPY frontend/ /tmp/frontbuild/
+RUN cd /tmp/frontbuild && rm -rf dist && npm run build \
+    && rm -rf /opt/lumen-webapp && mkdir -p /opt/lumen-webapp \
+    && cp -r dist/. /opt/lumen-webapp/ \
+    && rm -rf /tmp/frontbuild
 
 # Browser automation = the npm stack (agent-browser + @playwright/mcp), EXACTLY as
 # the OS image runs it. The wheel's python playwright-extra/stagehand-py are not on
