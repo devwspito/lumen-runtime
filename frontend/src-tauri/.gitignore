@@ -1,0 +1,6 @@
+# Rust / Tauri build artifacts
+/target
+/gen/schemas
+
+# Generated icons (run `tauri icon <logo.png>` to (re)generate them locally)
+/icons

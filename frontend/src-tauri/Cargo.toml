@@ -1,0 +1,22 @@
+[package]
+name = "lumen"
+version = "0.1.0"
+description = "Lumen — native thin client for the Lumen runtime"
+edition = "2021"
+rust-version = "1.77.2"
+
+# The native side is a thin client: it opens a window onto the Lumen web UI
+# served by the runtime (a VM/container). It does NOT bundle the backend.
+
+[lib]
+name = "lumen_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
