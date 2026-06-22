@@ -776,6 +776,15 @@ export default function OfficeView() {
     navigate(`/chat?agent_id=${encodeURIComponent(agentId)}`)
   }, [navigate])
 
+  // Fullscreen for the live floor — many users want the office maximised.
+  const liveRef = useRef<HTMLDivElement>(null)
+  const toggleFullscreen = useCallback(() => {
+    const el = liveRef.current
+    if (!el) return
+    if (document.fullscreenElement) void document.exitFullscreen()
+    else void el.requestFullscreen?.()
+  }, [])
+
   // Convert roster agents to the engine's LumenAgent shape for the canvas
   const engineAgents: LumenAgent[] = state.status === 'ready'
     ? allAgents(state.roster).map(rosterAgentToLumenAgent)
@@ -849,7 +858,14 @@ export default function OfficeView() {
             )}
 
             {tab === 'live' && (
-              <div className="office-live-container">
+              <div className="office-live-container" ref={liveRef}>
+                <button
+                  type="button"
+                  className="office-fullscreen-btn"
+                  onClick={toggleFullscreen}
+                  aria-label="Pantalla completa"
+                  title="Pantalla completa"
+                >⛶</button>
                 <Suspense fallback={
                   <div className="state-container">
                     <p className="state-label">Cargando mapa…</p>
