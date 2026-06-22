@@ -426,7 +426,11 @@ export function buildOfficeLayout(
     const roleKey = spec.isDirector
       ? "executive"
       : spec.role?.toLowerCase() || "default"
-    const floorColor = ROOM_COLORS[roleKey] || ROOM_COLORS["default"]
+    // Prefer a per-department color if one is registered, fall back to role color
+    const floorColor =
+      (spec.deptId ? ROOM_COLORS[spec.deptId] : undefined) ||
+      ROOM_COLORS[roleKey] ||
+      ROOM_COLORS["default"]
 
     // ── Individual workstations ──────────────────────
     const innerStartCol = zCol + ZONE_PAD

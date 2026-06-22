@@ -45,6 +45,12 @@ export interface LumenAgent {
   color: string
   is_default: boolean
   autonomy_level: string
+  /** The real department id from the roster (e.g. "cerebro", "ruflo-escritura", …) */
+  department_id: string
+  /** The department kind from the roster — drives room role/color */
+  department_kind: "cerebro" | "factory" | "custom"
+  /** Human-readable department name for the room label */
+  department_name: string
 }
 
 export interface LumenRuntimeStatus {
@@ -72,25 +78,31 @@ interface DepartmentInfo {
   is_director_dept?: boolean
 }
 
-// ── Department grouping for Lumen ──────────────────────────────
-// Lumen has no department API.  We synthesise three rooms:
-//   "Cerebro"     — the is_default agent
-//   "Mis agentes" — all other agents
-//   "Swarm ruflo" — synthesised when ruflo_active is true (empty room, populated at runtime)
+// ── Map roster department kind → engine room role ──────────────
 
-const DEPT_CEREBRO = "dept-cerebro"
-const DEPT_AGENTES = "dept-agentes"
-const DEPT_RUFLO = "dept-ruflo"
+const KIND_TO_ROLE: Record<string, string> = {
+  cerebro: "executive",
+  factory: "research",
+  custom: "operations",
+}
 
-function buildDepartments(hasRuflo: boolean): DepartmentInfo[] {
-  const depts: DepartmentInfo[] = [
-    { id: DEPT_CEREBRO, name: "Cerebro", role: "executive", is_director_dept: true },
-    { id: DEPT_AGENTES, name: "Mis agentes", role: "operations" },
-  ]
-  if (hasRuflo) {
-    depts.push({ id: DEPT_RUFLO, name: "Swarm ruflo", role: "research" })
+// ── Derive departments and agent infos from the real roster ────
+// One DepartmentInfo per unique department_id in the agent list.
+// Cerebro comes first; the rest are sorted alphabetically by name.
+
+function buildDepartmentsFromAgents(agents: LumenAgent[]): DepartmentInfo[] {
+  const seen = new Map<string, DepartmentInfo>()
+  for (const a of agents) {
+    if (!seen.has(a.department_id)) {
+      seen.set(a.department_id, {
+        id: a.department_id,
+        name: a.department_name,
+        role: KIND_TO_ROLE[a.department_kind] ?? "operations",
+        is_director_dept: a.department_kind === "cerebro",
+      })
+    }
   }
-  return depts
+  return Array.from(seen.values())
 }
 
 function toAgentInfos(
@@ -104,7 +116,7 @@ function toAgentInfos(
   return agents.map((a) => ({
     id: a.id,
     name: a.name,
-    department_id: a.is_default ? DEPT_CEREBRO : DEPT_AGENTES,
+    department_id: a.department_id,
     status: activeIds.has(a.id) ? "busy" : "online",
   }))
 }
@@ -147,8 +159,7 @@ export class OfficeState {
     canvasWidth?: number,
     canvasHeight?: number,
   ): void {
-    const hasRuflo = runtimeStatus.ruflo_active === true
-    const depts = buildDepartments(hasRuflo)
+    const depts = buildDepartmentsFromAgents(agents)
     const agentInfos = toAgentInfos(agents, runtimeStatus)
 
     // Two-pass layout: tight → viewport-expanded

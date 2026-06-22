@@ -14,10 +14,11 @@ const OfficeCanvas = lazy(() =>
 // ── Map roster → engine types ─────────────────────────────────────────────────
 
 /**
- * Converts a RosterAgent into the LumenAgent shape expected by the office engine.
- * The engine only needs id/name/role/primary_mission/color/is_default/autonomy_level.
+ * Converts a RosterAgent + its parent RosterDepartment into the LumenAgent
+ * shape expected by the office engine. The department info is required so the
+ * engine can build one room per department from the real roster structure.
  */
-function rosterAgentToLumenAgent(a: RosterAgent): LumenAgent {
+function rosterAgentToLumenAgent(a: RosterAgent, dept: RosterDepartment): LumenAgent {
   return {
     id: a.id,
     name: a.name,
@@ -26,6 +27,9 @@ function rosterAgentToLumenAgent(a: RosterAgent): LumenAgent {
     color: a.color ?? '#0A84FF',
     is_default: a.is_default,
     autonomy_level: 'balanced',
+    department_id: dept.id,
+    department_kind: dept.kind,
+    department_name: dept.name,
   }
 }
 
@@ -56,10 +60,6 @@ function dataReducer(state: DataState, action: DataAction): DataState {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-function allAgents(roster: AgentRoster): RosterAgent[] {
-  return roster.departments.flatMap((d) => d.agents)
-}
 
 function activeAgentIds(runtimeStatus: RuntimeStatus): Set<string> {
   const ids = new Set<string>()
@@ -785,10 +785,15 @@ export default function OfficeView() {
     else void el.requestFullscreen?.()
   }, [])
 
-  // Convert roster agents to the engine's LumenAgent shape for the canvas
+  // Convert roster agents to the engine's LumenAgent shape for the canvas.
+  // Each agent carries its department info so the engine builds one room per department.
   const engineAgents: LumenAgent[] = state.status === 'ready'
-    ? allAgents(state.roster).map(rosterAgentToLumenAgent)
+    ? state.roster.departments.flatMap((dept) =>
+        dept.agents.map((a) => rosterAgentToLumenAgent(a, dept))
+      )
     : []
+
+  const totalAgentCount = engineAgents.length
 
   const engineRuntimeStatus: LumenRuntimeStatus = state.status === 'ready'
     ? state.runtimeStatus
@@ -801,7 +806,12 @@ export default function OfficeView() {
         <div className="office-header-row">
           <div>
             <h1 className="view-title">Agentes</h1>
-            <p className="view-subtitle">Tu equipo de IA — tarjetas o piso en vivo</p>
+            <p className="view-subtitle">
+              {state.status === 'ready'
+                ? `Tu equipo de ${totalAgentCount} agente${totalAgentCount !== 1 ? 's' : ''}`
+                : 'Tu equipo de IA'}
+              {' — tarjetas o piso en vivo'}
+            </p>
           </div>
 
           <div className="office-seg-toggle" role="group" aria-label="Vista de la oficina">
