@@ -175,14 +175,13 @@ class McpSurfaceAdapter:
         """Call the MCP server with a bounded timeout."""
         import asyncio  # noqa: PLC0415
 
-        try:
-            server_id = McpServerId.from_str(server_id_str)
-        except ValueError as exc:
-            return ReplayOutcome(
-                action_id=action_id,
-                status=ReplayStatus.REJECTED_BY_POLICY,
-                error=f"McpSurfaceAdapter: invalid server_id {server_id_str!r}: {exc}",
-            )
+        # El id de un server MCP es su CLAVE en el manager (string). Los servers sembrados
+        # (BUILTIN: excel/word/powerpoint) usan el slug como id ('powerpoint'), no un UUID
+        # —igual que hizo el connect con McpServerId(server_id)—; from_str (UUID-estricto)
+        # los rechazaba. Construir con value=server_id_str hace que str(server_id) == la
+        # clave del manager para AMBOS formatos (slug y uuid-string). El id es interno
+        # (lo provee el registro de tools, no la salida del LLM) → sin riesgo.
+        server_id = McpServerId(value=server_id_str)
 
         try:
             # asyncio.timeout (CM, MISMA task), NO wait_for: el call_tool atraviesa
