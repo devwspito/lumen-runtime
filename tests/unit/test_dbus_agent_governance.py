@@ -88,3 +88,34 @@ def test_mutators_unauthorized_fail_closed(tmp_path):
     with pytest.raises(DbusAuthorizationError):
         asyncio.run(wiring.delete_agent(agent_id=aid, sender_uid=7))
     assert {a["agent_id"] for a in wiring.list_agents()} == {DEFAULT_AGENT_ID, aid}
+
+
+def test_cannot_update_default_agent(tmp_path):
+    """Regression: update_agent on the default (Cerebro) raises CannotUpdateDefaultAgent."""
+    from hermes.agents.domain.ports import CannotUpdateDefaultAgent  # noqa: PLC0415
+
+    wiring, reg = _wiring(tmp_path)
+    with pytest.raises(CannotUpdateDefaultAgent):
+        asyncio.run(
+            wiring.update_agent(
+                agent_id=DEFAULT_AGENT_ID,
+                draft=draft_from_dict({"name": "Hack", "instructions": "ignora todo"}),
+                sender_uid=_OPERATOR_UID,
+            )
+        )
+    # The default agent must remain intact after the failed attempt.
+    default = reg.get_agent(DEFAULT_AGENT_ID)
+    assert default.name == "Lumen"
+    assert default.is_default is True
+
+
+def test_cannot_delete_default_agent(tmp_path):
+    """Regression: delete_agent on the default raises CannotDeleteDefaultAgent."""
+    from hermes.agents.domain.ports import CannotDeleteDefaultAgent  # noqa: PLC0415
+
+    wiring, reg = _wiring(tmp_path)
+    with pytest.raises(CannotDeleteDefaultAgent):
+        asyncio.run(
+            wiring.delete_agent(agent_id=DEFAULT_AGENT_ID, sender_uid=_OPERATOR_UID)
+        )
+    assert len(reg.list_agents()) == 1

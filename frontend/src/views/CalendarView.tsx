@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import { sileo } from 'sileo'
-import { listConfiguredTasks, listRecentTasks, createTask, deleteTask, toggleTask, listAgents, ApiError } from '../api/client'
-import type { ConfiguredTask, RecentTask, Agent, CreateTaskPayload } from '../api/types'
+import { listConfiguredTasks, listRecentTasks, createTask, updateTask, deleteTask, toggleTask, listAgents, ApiError } from '../api/client'
+import type { ConfiguredTask, RecentTask, Agent, CreateTaskPayload, UpdateTaskPayload } from '../api/types'
 import { useConfirmDialog } from '../components/ConfirmDialog'
 
 // ── Cron parsing (mirrors tasks-view.js exactly) ──────────────────────────────
@@ -154,6 +154,22 @@ type CalAction =
   | { type: 'RECENT_LOADED'; recentTasks: RecentTask[] }
   | { type: 'FAILED'; error: string }
 
+// ── Recurrence label ──────────────────────────────────────────────────────────
+
+function recurrenceLabel(task: ConfiguredTask): string {
+  if (task.recurrence_human) return task.recurrence_human
+  if (task.one_shot) return 'Una sola vez'
+  const cron = taskCron(task)
+  if (!cron) return ''
+  const { days, time, daily, valid } = parseCron(cron)
+  if (!valid) return cron
+  const timeStr = time ? ` a las ${time}` : ''
+  if (daily) return `Todos los días${timeStr}`
+  const dayNames = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom']
+  const dayList = Array.from(days).sort((a, b) => a - b).map(d => dayNames[d]).join(', ')
+  return `${dayList}${timeStr}`
+}
+
 function calReducer(s: CalState, a: CalAction): CalState {
   switch (a.type) {
     case 'LOADED': return { ...s, tasks: a.tasks, recentTasks: a.recentTasks, agents: a.agents, loading: false, error: null }
@@ -177,6 +193,8 @@ export default function CalendarView() {
   const [calRef, setCalRef] = useState<Date>(() => { const n = new Date(); return new Date(n.getFullYear(), n.getMonth(), 1) })
   const [modalOpen, setModalOpen] = useState(false)
   const [modalPresetDate, setModalPresetDate] = useState<string | null>(null)
+  const [detailTask, setDetailTask] = useState<ConfiguredTask | null>(null)
+  const [editTask, setEditTask] = useState<ConfiguredTask | null>(null)
   const [confirm, ConfirmDialogNode] = useConfirmDialog()
 
   const agentsById = Object.fromEntries(state.agents.map(a => [a.id, a]))
@@ -287,7 +305,20 @@ export default function CalendarView() {
           {state.loading && <div className="cv-skeleton" aria-busy="true" />}
           {state.error && <p className="state-error" role="alert">{state.error}</p>}
 
-          {!state.loading && !state.error && (
+          {!state.loading && !state.error && state.tasks.length === 0 && (
+            <div style={{ textAlign: 'center', padding: 'var(--sp-8) 0' }}>
+              <p className="cv-empty">Sin tareas programadas.</p>
+              <button
+                className="cv-btn cv-btn--primary cv-btn--sm"
+                style={{ marginTop: 'var(--sp-4)' }}
+                onClick={() => openModal()}
+              >
+                + Crear primera tarea
+              </button>
+            </div>
+          )}
+
+          {!state.loading && !state.error && state.tasks.length > 0 && (
             <>
               {/* ── Month calendar ─────────────────────────────────────────── */}
               {viewMode === 'board' && (
@@ -297,26 +328,25 @@ export default function CalendarView() {
                   onChangeMonth={setCalRef}
                   agentLabel={agentLabel}
                   onDayClick={(date) => openModal(date)}
+                  onTaskClick={setDetailTask}
                 />
               )}
 
               {/* ── List view ─────────────────────────────────────────────── */}
               {viewMode === 'list' && (
-                state.tasks.length === 0
-                  ? <p className="cv-empty">Sin tareas programadas.</p>
-                  : (
-                    <ul className="cv-list" role="list">
-                      {state.tasks.map((task, i) => (
-                        <li key={task.trigger_id ?? task.task_id ?? i}>
-                          <ConfiguredTaskRow
-                            task={task}
-                            onToggle={handleToggle}
-                            onDelete={handleDelete}
-                          />
-                        </li>
-                      ))}
-                    </ul>
-                  )
+                <ul className="cv-list" role="list">
+                  {state.tasks.map((task, i) => (
+                    <li key={task.trigger_id ?? task.task_id ?? i}>
+                      <ConfiguredTaskRow
+                        task={task}
+                        onViewDetail={setDetailTask}
+                        onEdit={setEditTask}
+                        onToggle={handleToggle}
+                        onDelete={handleDelete}
+                      />
+                    </li>
+                  ))}
+                </ul>
               )}
             </>
           )}
@@ -358,6 +388,43 @@ export default function CalendarView() {
           }}
         />
       )}
+
+      {/* ── Edit task modal ───────────────────────────────────────────────── */}
+      {editTask && (
+        <TaskModal
+          agents={state.agents}
+          presetDate={null}
+          editTask={editTask}
+          onClose={() => setEditTask(null)}
+          onCreate={async (payload) => {
+            const id = editTask.trigger_id ?? editTask.task_id ?? editTask.id ?? ''
+            try {
+              await updateTask(id, payload as UpdateTaskPayload)
+              show('Tarea actualizada', 'ok')
+              setEditTask(null)
+              reloadTasks()
+            } catch (e) {
+              // 404/405 means the PUT endpoint is not yet available — graceful degrade
+              if (e instanceof ApiError && (e.status === 404 || e.status === 405)) {
+                show('La edición de tareas aún no está disponible en el servidor.', 'warn')
+                setEditTask(null)
+              } else {
+                show(e instanceof Error ? e.message : 'Error', 'error')
+              }
+            }
+          }}
+        />
+      )}
+
+      {/* ── Task detail drawer ────────────────────────────────────────────── */}
+      {detailTask && (
+        <TaskDetailDrawer
+          task={detailTask}
+          agentLabel={agentLabel}
+          onClose={() => setDetailTask(null)}
+          onEdit={(t) => { setDetailTask(null); setEditTask(t) }}
+        />
+      )}
     </>
   )
 }
@@ -370,9 +437,10 @@ interface MonthCalendarProps {
   onChangeMonth: (d: Date) => void
   agentLabel: (task: ConfiguredTask) => string
   onDayClick: (date: string) => void
+  onTaskClick: (task: ConfiguredTask) => void
 }
 
-function MonthCalendar({ tasks, calRef, onChangeMonth, agentLabel, onDayClick }: MonthCalendarProps) {
+function MonthCalendar({ tasks, calRef, onChangeMonth, agentLabel, onDayClick, onTaskClick }: MonthCalendarProps) {
   const year = calRef.getFullYear()
   const month = calRef.getMonth()
   const todayStr = ymd(new Date())
@@ -452,7 +520,17 @@ function MonthCalendar({ tasks, calRef, onChangeMonth, agentLabel, onDayClick }:
                     <div
                       key={i}
                       className={`task-chip${c.task.enabled === false ? ' task-chip--off' : ''}`}
-                      title={c.task.label ?? c.task.name ?? ''}
+                      title={`${c.task.label ?? c.task.name ?? ''} — clic para ver detalle`}
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`${c.task.label ?? c.task.name ?? 'Tarea'}: ver detalle`}
+                      onClick={(e) => { e.stopPropagation(); onTaskClick(c.task) }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault(); e.stopPropagation(); onTaskClick(c.task)
+                        }
+                      }}
+                      style={{ cursor: 'pointer' }}
                     >
                       {c.time && <span className="task-chip__time">{c.time}</span>}
                       <span className="task-chip__name">{c.task.label ?? c.task.name ?? c.task.task_id ?? 'Tarea'}</span>
@@ -478,11 +556,13 @@ function MonthCalendar({ tasks, calRef, onChangeMonth, agentLabel, onDayClick }:
 
 interface ConfiguredTaskRowProps {
   task: ConfiguredTask
+  onViewDetail: (task: ConfiguredTask) => void
+  onEdit: (task: ConfiguredTask) => void
   onToggle: (task: ConfiguredTask) => void
   onDelete: (task: ConfiguredTask) => void
 }
 
-function ConfiguredTaskRow({ task, onToggle, onDelete }: ConfiguredTaskRowProps) {
+function ConfiguredTaskRow({ task, onViewDetail, onEdit, onToggle, onDelete }: ConfiguredTaskRowProps) {
   const isEnabled = task.enabled !== false
   const sched = task.recurrence_human ?? task.recurrence ?? task.cron ?? task.schedule ?? ''
   const last = task.last_status ? statusMeta(task.last_status) : null
@@ -491,7 +571,15 @@ function ConfiguredTaskRow({ task, onToggle, onDelete }: ConfiguredTaskRowProps)
     : ''
 
   return (
-    <div className={`task-row${!isEnabled ? ' task-row--disabled' : ''}`}>
+    <div
+      className={`task-row${!isEnabled ? ' task-row--disabled' : ''}`}
+      style={{ cursor: 'pointer' }}
+      role="button"
+      tabIndex={0}
+      aria-label={`${task.label ?? task.name ?? 'Tarea'}: ver detalle`}
+      onClick={() => onViewDetail(task)}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onViewDetail(task) } }}
+    >
       <div className="task-row__info">
         <div className="task-row__name">
           {task.label ?? task.title ?? task.name ?? task.task_id ?? 'Tarea'}
@@ -500,8 +588,22 @@ function ConfiguredTaskRow({ task, onToggle, onDelete }: ConfiguredTaskRowProps)
         {sched && <div className="task-row__schedule">{sched}</div>}
         {nextRun && <div className="task-row__schedule">{nextRun}</div>}
       </div>
-      <div className="task-row__actions">
+      <div className="task-row__actions" onClick={(e) => e.stopPropagation()}>
         {last && <span className="task-status-chip">{last.label}</span>}
+        <button
+          className="cv-btn cv-btn--ghost cv-btn--sm"
+          onClick={() => onViewDetail(task)}
+          aria-label="Ver detalle de la tarea"
+        >
+          Ver
+        </button>
+        <button
+          className="cv-btn cv-btn--ghost cv-btn--sm"
+          onClick={() => onEdit(task)}
+          aria-label="Editar tarea"
+        >
+          Editar
+        </button>
         <button
           className="cv-btn cv-btn--ghost cv-btn--sm"
           onClick={() => onToggle(task)}
@@ -538,18 +640,136 @@ function RecentTaskRow({ task }: { task: RecentTask }) {
   )
 }
 
-// ── Task creation modal ───────────────────────────────────────────────────────
+// ── Task detail drawer ────────────────────────────────────────────────────────
+
+interface TaskDetailDrawerProps {
+  task: ConfiguredTask
+  agentLabel: (task: ConfiguredTask) => string
+  onClose: () => void
+  onEdit: (task: ConfiguredTask) => void
+}
+
+function TaskDetailDrawer({ task, agentLabel, onClose, onEdit }: TaskDetailDrawerProps) {
+  const titleId = 'task-detail-title'
+  const name = task.label ?? task.title ?? task.name ?? 'Tarea'
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  const recurrence = recurrenceLabel(task)
+  const nextRun = task.next_run_at
+    ? new Date(task.next_run_at).toLocaleString('es')
+    : null
+  const riskLabel = task.risk_ceiling === 'high' ? 'Alto' : 'Bajo'
+
+  return (
+    <div
+      className="office-drawer-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={titleId}
+      onClick={(e) => { if (e.target === e.currentTarget) onClose() }}
+    >
+      <div className="office-drawer">
+        <div className="office-drawer-header">
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <h2 id={titleId} className="office-drawer-title">{name}</h2>
+            {task.one_shot && (
+              <p className="agent-role" style={{ margin: 0 }}>Una sola vez</p>
+            )}
+          </div>
+          {task.enabled === false && (
+            <span className="task-meta-chip" style={{ marginRight: 'var(--sp-2)', flexShrink: 0 }}>
+              Pausada
+            </span>
+          )}
+          <button type="button" className="office-modal-close" onClick={onClose} aria-label="Cerrar">✕</button>
+        </div>
+
+        <div className="office-drawer-body" style={{ gap: 'var(--sp-4)' }}>
+          {task.instruction && (
+            <div>
+              <p style={{ fontSize: 'var(--text-label)', color: 'var(--ink4)', marginBottom: 'var(--sp-1)' }}>
+                Instrucción
+              </p>
+              <p style={{ fontSize: 'var(--text-body)', color: 'var(--ink2)', whiteSpace: 'pre-wrap' }}>
+                {task.instruction}
+              </p>
+            </div>
+          )}
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--sp-4)', marginTop: 'var(--sp-2)' }}>
+            <div>
+              <p style={{ fontSize: 'var(--text-label)', color: 'var(--ink4)', marginBottom: 2 }}>Agente</p>
+              <p style={{ fontSize: 'var(--text-body)', color: 'var(--ink2)' }}>{agentLabel(task)}</p>
+            </div>
+            {recurrence && (
+              <div>
+                <p style={{ fontSize: 'var(--text-label)', color: 'var(--ink4)', marginBottom: 2 }}>Recurrencia</p>
+                <p style={{ fontSize: 'var(--text-body)', color: 'var(--ink2)' }}>{recurrence}</p>
+              </div>
+            )}
+            {task.risk_ceiling && (
+              <div>
+                <p style={{ fontSize: 'var(--text-label)', color: 'var(--ink4)', marginBottom: 2 }}>Riesgo</p>
+                <p style={{ fontSize: 'var(--text-body)', color: 'var(--ink2)' }}>{riskLabel}</p>
+              </div>
+            )}
+            {nextRun && (
+              <div>
+                <p style={{ fontSize: 'var(--text-label)', color: 'var(--ink4)', marginBottom: 2 }}>Próxima ejecución</p>
+                <p style={{ fontSize: 'var(--text-body)', color: 'var(--ink2)' }}>{nextRun}</p>
+              </div>
+            )}
+          </div>
+
+          <div className="office-drawer-actions" style={{ marginTop: 'var(--sp-4)' }}>
+            <button
+              type="button"
+              className="office-btn office-btn--primary"
+              onClick={() => onEdit(task)}
+            >
+              Editar
+            </button>
+            <button
+              type="button"
+              className="office-btn office-btn--ghost"
+              onClick={onClose}
+            >
+              Cerrar
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Task creation / edit modal ────────────────────────────────────────────────
 
 interface TaskModalProps {
   agents: Agent[]
   presetDate: string | null
+  /** When set the modal runs in edit mode, prefilling all fields */
+  editTask?: ConfiguredTask
   onClose: () => void
   onCreate: (payload: CreateTaskPayload) => void
 }
 
-function TaskModal({ agents, presetDate, onClose, onCreate }: TaskModalProps) {
-  const [mode, setMode] = useState<'recurrent' | 'once'>(presetDate ? 'once' : 'recurrent')
-  const [selectedDays, setSelectedDays] = useState<Set<number>>(new Set())
+function TaskModal({ agents, presetDate, editTask, onClose, onCreate }: TaskModalProps) {
+  const isEdit = editTask !== undefined
+  const initialMode: 'recurrent' | 'once' = editTask?.one_shot ? 'once' : (presetDate ? 'once' : 'recurrent')
+
+  // Derive initial cron info from editTask for prefilling time/days
+  const editCronInfo = editTask ? parseCron(taskCron(editTask)) : null
+  const editTimeStr = editCronInfo?.valid ? editCronInfo.time : '09:00'
+  const editInitialDays = editCronInfo && !editCronInfo.daily ? editCronInfo.days : new Set<number>()
+
+  const [mode, setMode] = useState<'recurrent' | 'once'>(initialMode)
+  const [selectedDays, setSelectedDays] = useState<Set<number>>(editInitialDays)
   const [creating, setCreating] = useState(false)
   const [fieldErrors, setFieldErrors] = useState<{ name?: string; prompt?: string; date?: string; days?: string }>({})
   const nameRef = useRef<HTMLInputElement>(null)
@@ -563,7 +783,14 @@ function TaskModal({ agents, presetDate, onClose, onCreate }: TaskModalProps) {
 
   useEffect(() => {
     nameRef.current?.focus()
-  }, [])
+    // Prefill uncontrolled inputs when editing
+    if (editTask) {
+      if (nameRef.current) nameRef.current.value = editTask.label ?? editTask.title ?? editTask.name ?? ''
+      if (promptRef.current) promptRef.current.value = editTask.instruction ?? ''
+      if (agentRef.current) agentRef.current.value = editTask.target_agent_id ?? editTask.agent_id ?? ''
+      if (riskRef.current) riskRef.current.value = editTask.risk_ceiling ?? 'low'
+    }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   function toggleDay(day: number) {
     setSelectedDays(prev => {
@@ -644,7 +871,7 @@ function TaskModal({ agents, presetDate, onClose, onCreate }: TaskModalProps) {
         aria-label="Programar una tarea"
       >
         <div className="modal-card__head">
-          <h3 className="modal-card__title">Programar una tarea</h3>
+          <h3 className="modal-card__title">{isEdit ? 'Editar tarea' : 'Programar una tarea'}</h3>
           <button className="cv-icon-btn" onClick={onClose} aria-label="Cerrar">✕</button>
         </div>
 
@@ -656,6 +883,7 @@ function TaskModal({ agents, presetDate, onClose, onCreate }: TaskModalProps) {
               ref={nameRef}
               className="cv-input"
               type="text"
+              defaultValue={editTask?.label ?? editTask?.title ?? editTask?.name ?? ''}
               placeholder="Informe diario de ventas"
               autoComplete="off"
               aria-describedby={fieldErrors.name ? 'tm-name-err' : undefined}
@@ -671,6 +899,7 @@ function TaskModal({ agents, presetDate, onClose, onCreate }: TaskModalProps) {
               ref={promptRef}
               className="cv-textarea"
               rows={3}
+              defaultValue={editTask?.instruction ?? ''}
               placeholder="Qué debe hacer Lumen…"
               aria-describedby={fieldErrors.prompt ? 'tm-prompt-err' : undefined}
               aria-invalid={fieldErrors.prompt ? true : undefined}
@@ -744,7 +973,7 @@ function TaskModal({ agents, presetDate, onClose, onCreate }: TaskModalProps) {
             <div className="task-form-grid">
               <div>
                 <label className="cv-label" htmlFor="tm-time">¿A qué hora?</label>
-                <input id="tm-time" ref={timeRef} className="cv-input" type="time" defaultValue="09:00" />
+                <input id="tm-time" ref={timeRef} className="cv-input" type="time" defaultValue={editTimeStr || '09:00'} />
               </div>
               <div>
                 <label className="cv-label" htmlFor="tm-time-end">Hasta (opcional)</label>
@@ -761,7 +990,7 @@ function TaskModal({ agents, presetDate, onClose, onCreate }: TaskModalProps) {
               </div>
               <div>
                 <label className="cv-label" htmlFor="tm-risk">Riesgo</label>
-                <select id="tm-risk" ref={riskRef} className="cv-input" defaultValue="low">
+                <select id="tm-risk" ref={riskRef} className="cv-input" defaultValue={editTask?.risk_ceiling ?? 'low'}>
                   <option value="low">Bajo</option>
                   <option value="high">Alto</option>
                 </select>
@@ -777,7 +1006,7 @@ function TaskModal({ agents, presetDate, onClose, onCreate }: TaskModalProps) {
             onClick={handleCreate}
             disabled={creating}
           >
-            {creating ? 'Creando…' : 'Crear tarea'}
+            {creating ? (isEdit ? 'Guardando…' : 'Creando…') : (isEdit ? 'Guardar cambios' : 'Crear tarea')}
           </button>
         </div>
       </div>

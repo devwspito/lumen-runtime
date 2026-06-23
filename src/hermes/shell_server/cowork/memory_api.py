@@ -1,19 +1,19 @@
-"""Memory REST API — D-Bus surface for agent memory retrieval.
+"""Memory REST API — D-Bus surface for agent memory retrieval and deletion.
 
 Endpoints:
-  GET  /api/v1/memory         list recent memory entries
-  GET  /api/v1/memory/search  semantic search (?q=query)
+  GET    /api/v1/memory           list recent memory entries
+  GET    /api/v1/memory/search    semantic search (?q=query)
+  DELETE /api/v1/memory/{id}      forget one entry by id '{target}:{index}'
 
-Both endpoints are read-only and fail-soft (return [] on daemon unavailable).
-Memory entries are informational only — no write surface exposed here
-(writes go through the agent's own learning loop).
+DELETE is idempotent (200 even when already removed). 403 on authorization
+failure. 503 when daemon is unavailable.
 """
 
 from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from hermes.tasks.control_plane.domain.ports import AgentUnavailable
 
@@ -63,5 +63,34 @@ def create_memory_router() -> APIRouter:
                 extra={"query": q, "reason": str(exc)},
             )
             return []
+
+    @router.delete("/{entry_id}")
+    async def forget_memory_entry(request: Request, entry_id: str) -> dict:
+        """Forget (delete) one memory entry by its composite id '{target}:{index}'.
+
+        Idempotent: returns {ok: true} even when the entry was already removed.
+        403 on authorization failure; 503 when daemon is unavailable.
+        """
+        proxy = request.app.state.dbus_proxy
+        try:
+            result = await proxy.call_dict("ForgetMemoryEntry", entry_id)
+        except AgentUnavailable as exc:
+            logger.warning(
+                "hermes.memory.delete_unavailable",
+                extra={"entry_id": entry_id, "reason": str(exc)},
+            )
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "agent_unavailable",
+                    "message": "El agente no está disponible.",
+                },
+            ) from exc
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "delete_failed", "message": result.get("error", "unknown")},
+            )
+        return result
 
     return router

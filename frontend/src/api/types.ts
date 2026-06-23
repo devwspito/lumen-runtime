@@ -34,6 +34,26 @@ export interface CreateAgentPayload {
   department?: string
 }
 
+export interface UpdateAgentPayload {
+  name?: string
+  role?: string
+  primary_mission?: string
+  department?: string
+  instructions?: string
+  language?: string
+  autonomy_level?: string
+}
+
+export interface UpdateTaskPayload {
+  label?: string
+  cron?: string
+  instruction?: string
+  target_agent_id?: string
+  risk_ceiling?: string
+  one_shot?: boolean
+  enabled?: boolean
+}
+
 // ── Roster ────────────────────────────────────────────────────────────────────
 
 export interface RosterAgent {

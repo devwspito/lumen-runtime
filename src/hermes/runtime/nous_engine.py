@@ -1726,6 +1726,23 @@ class NousReasoningEngine:
             lines.append("Nunca uses estas frases: " + "; ".join(forbidden) + ".")
         return "\n".join(lines)
 
+    def _resolve_cycle_persona(self, agent_id: str | None) -> PersonaSpec:
+        """Resolve the PersonaSpec for this cycle from the agent_registry.
+
+        Priority: context.agent_id → active_agent_id() → engine's base persona.
+        Always returns a valid PersonaSpec (fail-soft by design — a broken
+        persona resolution must never crash the reasoning cycle).
+        """
+        if self._agent_registry is None:
+            return self._persona
+        try:
+            return self._agent_registry.persona_for(agent_id)
+        except Exception:  # noqa: BLE001 — fail-soft
+            logger.warning(
+                "hermes.nous_engine.cycle_persona_fallback agent_id=%s", agent_id
+            )
+            return self._persona
+
     async def run_cycle(self, context: DecisionContext) -> CycleOutput:
         """Ejecuta un ciclo de razonamiento delegando en AIAgent headless.
 
@@ -1755,12 +1772,20 @@ class NousReasoningEngine:
 
         model_config = self._resolve_model_config()
 
+        # Resolve per-cycle persona: use the agent bound to this task (from
+        # DecisionContext.agent_id) or the active agent. Falls back to the
+        # engine's persona (default agent) when agent_registry is absent.
+        # The registry's persona_for() is fail-soft by contract: never raises.
+        cycle_persona = self._resolve_cycle_persona(
+            context.agent_id if hasattr(context, "agent_id") else None
+        )
+
         tokenized_payload = self._tokenize_context(context)
         safe_context = _replace_context(context, tokenized_payload)
         mapping = tokenized_payload.mapping
 
         system_prompt, user_message = self._prompt_builder.build(
-            safe_context, self._persona
+            safe_context, cycle_persona
         )
 
         # GATE 0 — CHAT es CONVERSACIÓN, no tarea autónoma. El prompt builder por
@@ -1783,7 +1808,7 @@ class NousReasoningEngine:
             if _chat_text:
                 user_message = _chat_text
                 # FIX D — cache system prompt keyed by (engine_id, persona_id).
-                system_prompt = _cached_chat_system_prompt(id(self), self._persona)
+                system_prompt = _cached_chat_system_prompt(id(self), cycle_persona)
 
         loop = asyncio.get_event_loop()
         tenant_id = self._tenant_id or context.tenant_id

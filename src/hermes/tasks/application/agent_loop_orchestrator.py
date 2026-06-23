@@ -413,7 +413,16 @@ class AgentLoopOrchestrator:
         real_evidence_id = None
         real_evidence_hash: str | None = None
         effective_consent = consent if consent is not None else self._consent
-        autonomy_level = _resolve_active_autonomy_level(self._agent_registry)
+        # Prioritize the target agent's autonomy (the one the task was dispatched to),
+        # not the UI-active agent. Falls back to active_agent_id() when item has none.
+        _task_agent_id: str | None = None
+        try:
+            _task_agent_id = item.payload.get("agent_id") or None  # type: ignore[union-attr]
+        except Exception:  # noqa: BLE001
+            pass
+        autonomy_level = _resolve_active_autonomy_level(
+            self._agent_registry, agent_id=_task_agent_id
+        )
 
         # FR-015: recuperar proposal_id + token pre-aprobados para este work_item.
         # Presente solo cuando el item viene de re-enqueue_after_approval.
@@ -768,11 +777,15 @@ class AgentLoopOrchestrator:
 # ---------------------------------------------------------------------------
 
 
-def _resolve_active_autonomy_level(agent_registry: "Any") -> "Any":
-    """Lee el AutonomyLevel del agente activo desde el registro (fail-safe).
+def _resolve_active_autonomy_level(
+    agent_registry: "Any", *, agent_id: "str | None" = None
+) -> "Any":
+    """Lee el AutonomyLevel del agente DESTINO de la tarea (fail-safe).
 
-    Devuelve AutonomyLevel.BALANCED si el registro no está inyectado o si la
-    resolución falla. El broker interpreta None como BALANCED (invariante).
+    Prioridad: agent_id explícito (el agente al que va la tarea)
+    → active_agent_id() → AutonomyLevel.BALANCED.
+
+    El broker interpreta None como BALANCED (invariante).
     No lanza — la resolución del nivel de autonomía nunca debe tumbar el loop.
     """
     from hermes.agents.domain.agent import AutonomyLevel  # noqa: PLC0415
@@ -780,8 +793,8 @@ def _resolve_active_autonomy_level(agent_registry: "Any") -> "Any":
     if agent_registry is None:
         return AutonomyLevel.BALANCED
     try:
-        active_id = agent_registry.active_agent_id()
-        agent = agent_registry.get_agent(active_id)
+        resolved_id = agent_id or agent_registry.active_agent_id()
+        agent = agent_registry.get_agent(resolved_id)
         return agent.autonomy_level
     except Exception:  # noqa: BLE001 — fail-safe: el loop no debe caerse
         return AutonomyLevel.BALANCED

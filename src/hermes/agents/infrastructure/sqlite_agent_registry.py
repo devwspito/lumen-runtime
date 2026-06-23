@@ -23,6 +23,7 @@ from hermes.agents.domain.ports import (
     AgentNotFound,
     CannotDeleteDefaultAgent,
     CannotDeleteLastAgent,
+    CannotUpdateDefaultAgent,
 )
 from hermes.prompts.persona import PersonaSpec
 
@@ -228,28 +229,7 @@ class SqliteAgentRegistry:
     def update_agent(self, agent_id: str, draft: AgentDraft) -> Agent:
         existing = self.get_agent(agent_id)  # raises AgentNotFound
         if existing.is_default:
-            # El Cerebro (default) tiene un system prompt FIJO world-class: su
-            # role/misión/golden_rules/nombre/forbidden NO son editables (un prompt
-            # malo haría parecer roto el SO). Solo se aceptan el TONO (register), la
-            # PERSONALIDAD extra (instructions, que se SUMA al prompt) y el color.
-            # La autonomía del Cerebro queda fija (AUTONOMOUS, omnipotente).
-            base = default_agent()
-            updated = Agent(
-                agent_id=existing.agent_id,
-                name=base.name,
-                role=base.role,
-                register=draft.register.strip() or base.register,
-                primary_mission=base.primary_mission,
-                instructions=draft.instructions,
-                color=draft.color or base.color,
-                language=base.language,
-                golden_rules=base.golden_rules,
-                forbidden_phrases=base.forbidden_phrases,
-                is_default=True,
-                autonomy_level=base.autonomy_level,
-                created_at=existing.created_at,
-                updated_at=datetime.now(tz=UTC),
-            )
+            raise CannotUpdateDefaultAgent(agent_id)
         else:
             updated = Agent(
                 agent_id=existing.agent_id,

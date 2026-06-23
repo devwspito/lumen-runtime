@@ -2,11 +2,12 @@ import { useEffect, useReducer, useRef, useState } from 'react'
 import { sileo } from 'sileo'
 import {
   getComposioStatus, listComposioConnected, listComposioApps,
-  connectComposioApp, setComposioApiKey,
+  connectComposioApp, disconnectComposioApp, setComposioApiKey,
   getWebSearchStatus, setWebSearchKey,
   ApiError,
 } from '../api/client'
 import type { ComposioStatus, ComposioApp, WebSearchStatus } from '../api/types'
+import { useConfirmDialog } from '../components/ConfirmDialog'
 
 // Mirrors vanilla integrations.js load order: status first → prevents calling
 // connected/apps when Composio has no key (avoids hanging for minutes).
@@ -49,6 +50,7 @@ export default function IntegrationsView() {
   const [composioState, dispatch] = useReducer(composioReducer, { status: 'loading' })
   const [wsState, setWsState] = useState<WsState>({ status: 'loading' })
   const reloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [confirm, ConfirmDialogNode] = useConfirmDialog()
 
   // Clear the reload timer on unmount so it never fires on a dead component
   useEffect(() => {
@@ -111,8 +113,32 @@ export default function IntegrationsView() {
     ? new Set(composioState.connected.map(c => c.slug))
     : new Set<string>()
 
+  async function handleDisconnect(app: ComposioApp) {
+    const name = app.name ?? app.slug
+    const ok = await confirm({
+      title: `¿Desconectar ${name}?`,
+      description: 'Lumen perderá el acceso a esta aplicación. Podrás volver a conectarla cuando quieras.',
+      confirmLabel: 'Desconectar',
+      variant: 'danger',
+    })
+    if (!ok) return
+    try {
+      await disconnectComposioApp(app.slug)
+      show(`${name} desconectada`, 'ok')
+      loadComposio()
+    } catch (e) {
+      // 404/405: endpoint not yet deployed — degrade gracefully
+      if (e instanceof ApiError && (e.status === 404 || e.status === 405)) {
+        show('La desconexión aún no está disponible en el servidor.', 'warn')
+      } else {
+        show(e instanceof Error ? e.message : 'Error al desconectar', 'error')
+      }
+    }
+  }
+
   return (
     <>
+      {ConfirmDialogNode}
       <header className="view-header">
         <h1 className="view-title">Integraciones</h1>
         <p className="view-subtitle">Conecta Lumen a tus apps. Más de 250 conectores disponibles vía Composio.</p>
@@ -185,7 +211,11 @@ export default function IntegrationsView() {
                 <ul className="cv-list" role="list">
                   {composioState.connected.map(app => (
                     <li key={app.slug}>
-                      <AppRow app={app} isConnected />
+                      <AppRow
+                        app={app}
+                        isConnected
+                        onDisconnect={handleDisconnect}
+                      />
                     </li>
                   ))}
                 </ul>
@@ -241,9 +271,10 @@ interface AppRowProps {
   app: ComposioApp
   isConnected: boolean
   onConnect?: (app: ComposioApp) => void
+  onDisconnect?: (app: ComposioApp) => void
 }
 
-function AppRow({ app, isConnected, onConnect }: AppRowProps) {
+function AppRow({ app, isConnected, onConnect, onDisconnect }: AppRowProps) {
   return (
     <div className={`integration-row${isConnected ? ' integration-row--connected' : ''}`}>
       <div className="integration-row__icon" aria-hidden="true">
@@ -258,9 +289,22 @@ function AppRow({ app, isConnected, onConnect }: AppRowProps) {
           <div className="integration-row__desc">{app.description}</div>
         )}
       </div>
-      <div className="integration-row__status">
+      <div className="integration-row__status" style={{ display: 'flex', alignItems: 'center', gap: 'var(--sp-2)' }}>
         {isConnected
-          ? <span className="integration-connected-tag">✓ Conectado</span>
+          ? (
+            <>
+              <span className="integration-connected-tag">✓ Conectado</span>
+              {onDisconnect && (
+                <button
+                  className="cv-btn cv-btn--ghost cv-btn--sm cv-btn--danger"
+                  aria-label={`Desconectar ${app.name ?? app.slug}`}
+                  onClick={() => onDisconnect(app)}
+                >
+                  Desconectar
+                </button>
+              )}
+            </>
+          )
           : (
             <button
               className="cv-btn cv-btn--secondary cv-btn--sm"

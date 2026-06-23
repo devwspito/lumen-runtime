@@ -6,8 +6,9 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { sileo } from 'sileo'
-import { listMemory, searchMemory, ApiError } from '../api/client'
+import { listMemory, searchMemory, forgetMemoryItem, ApiError } from '../api/client'
 import type { MemoryItem } from '../api/types'
+import { useConfirmDialog } from '../components/ConfirmDialog'
 
 // ── State machine ─────────────────────────────────────────────────────────────
 
@@ -33,16 +34,28 @@ function formatDate(iso?: string): string {
 
 interface MemoryRowProps {
   item: MemoryItem
+  onForget: (item: MemoryItem) => void
 }
 
-function MemoryRow({ item }: MemoryRowProps) {
+function MemoryRow({ item, onForget }: MemoryRowProps) {
   const content = memoryContent(item)
   const time = formatDate(item.created_at)
 
   return (
-    <li className="memory-item">
-      <div className="memory-item__content">{content}</div>
-      {time && <div className="memory-item__time">{time}</div>}
+    <li className="memory-item" style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--sp-3)' }}>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div className="memory-item__content">{content}</div>
+        {time && <div className="memory-item__time">{time}</div>}
+      </div>
+      <button
+        type="button"
+        className="cv-btn cv-btn--ghost cv-btn--sm cv-btn--danger"
+        aria-label="Olvidar esta entrada de memoria"
+        style={{ flexShrink: 0, marginTop: 2 }}
+        onClick={() => onForget(item)}
+      >
+        Olvidar
+      </button>
     </li>
   )
 }
@@ -53,6 +66,7 @@ export default function MemoriaView() {
   const [state, setState] = useState<MemoryState>({ status: 'loading' })
   const [searchInput, setSearchInput] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
+  const [confirm, ConfirmDialogNode] = useConfirmDialog()
 
   const load = useCallback(async (query = '') => {
     setState({ status: 'loading' })
@@ -66,6 +80,36 @@ export default function MemoriaView() {
       sileo.error({ title: msg })
     }
   }, [])
+
+  const handleForget = useCallback(async (item: MemoryItem) => {
+    const id = item.id
+    if (!id) {
+      sileo.warning({ title: 'Esta entrada no tiene ID; no se puede olvidar.' })
+      return
+    }
+    const preview = memoryContent(item).slice(0, 60)
+    const ok = await confirm({
+      title: 'Olvidar esta entrada',
+      description: preview ? `"${preview}…"` : 'Esta entrada se eliminará de la memoria.',
+      confirmLabel: 'Olvidar',
+      variant: 'danger',
+    })
+    if (!ok) return
+    try {
+      await forgetMemoryItem(id)
+      sileo.success({ title: 'Entrada olvidada' })
+      // Reload with the current query
+      const currentQuery = state.status === 'success' ? state.query : ''
+      load(currentQuery)
+    } catch (e) {
+      // 404/405: endpoint not yet deployed — degrade gracefully
+      if (e instanceof ApiError && (e.status === 404 || e.status === 405)) {
+        sileo.warning({ title: 'Olvidar aún no está disponible en el servidor.' })
+      } else {
+        sileo.error({ title: e instanceof Error ? e.message : 'No se pudo olvidar la entrada.' })
+      }
+    }
+  }, [confirm, load, state])
 
   useEffect(() => { load() }, [load])
 
@@ -88,6 +132,7 @@ export default function MemoriaView() {
 
   return (
     <>
+      {ConfirmDialogNode}
       <header className="view-header">
         <h1 className="view-title">Memoria</h1>
         <p className="view-subtitle">Lo que Lumen recuerda entre conversaciones.</p>
@@ -157,7 +202,7 @@ export default function MemoriaView() {
           {isSuccess && state.items.length > 0 && (
             <ul className="cv-list memory-list" role="list">
               {state.items.map((item, i) => (
-                <MemoryRow key={item.id ?? i} item={item} />
+                <MemoryRow key={item.id ?? i} item={item} onForget={handleForget} />
               ))}
             </ul>
           )}

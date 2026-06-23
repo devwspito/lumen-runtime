@@ -361,6 +361,37 @@ class Runtime1ServiceInterface(ServiceInterface):
         rows = await self._wiring.list_recent_tasks(limit=int(limit))
         return json.dumps(rows)
 
+    @method()
+    async def GetScheduledTask(self, trigger_id: "s") -> "s":  # noqa: N802,F821,UP037
+        """Detalle de una tarea programada por su trigger_id (read-only, no authZ).
+
+        Devuelve JSON con todos los campos de _configured_task_to_dict, o '{}'
+        si no existe o no está habilitada.
+        """
+        result = await self._wiring.get_scheduled_task(trigger_id=trigger_id)
+        return json.dumps(result)
+
+    @method()
+    async def UpdateScheduledTask(self, trigger_id: "s", draft_json: "s") -> "s":  # noqa: N802,F821,UP037
+        """Actualiza campos editables de una tarea programada.
+
+        draft_json: {label, instruction, cron, target_agent_id?, risk_ceiling?}
+        Devuelve JSON con la tarea actualizada o lanza error D-Bus.
+        authZ: operador (sender_uid del bus, CWE-862).
+        """
+        try:
+            sender_uid = await self._resolve_current_sender_uid()
+            result = await self._wiring.update_scheduled_task(
+                trigger_id=trigger_id,
+                draft_json=draft_json,
+                sender_uid=sender_uid,
+            )
+            return json.dumps(result)
+        except PermissionError as exc:
+            raise DBusError("org.hermes.Error.Unauthorized", str(exc)) from exc
+        except ValueError as exc:
+            raise DBusError("org.hermes.Error.NotFound", str(exc)) from exc
+
     # ------------------------------------------------------------------
     # Gobernanza del roster multi-agente (JSON sobre D-Bus, autoría sender_uid)
     # ------------------------------------------------------------------
@@ -412,22 +443,40 @@ class Runtime1ServiceInterface(ServiceInterface):
 
     @method()
     async def UpdateAgent(self, agent_id: "s", draft_json: "s") -> "s":  # noqa: N802,F821,UP037
-        """Actualiza un agente. Devuelve el agente actualizado (JSON)."""
-        from hermes.agents.application.serialization import draft_from_dict  # noqa: PLC0415
+        """Actualiza un agente custom. El Cerebro (default) no es editable.
 
-        sender_uid = await self._resolve_current_sender_uid()
-        draft = draft_from_dict(json.loads(draft_json))
-        agent = await self._wiring.update_agent(
-            agent_id=agent_id, draft=draft, sender_uid=sender_uid
-        )
-        return json.dumps(agent)
+        Lanza org.hermes.Error.NotAllowed si agent_id es el agente default.
+        Lanza org.hermes.Error.InvalidInput si el draft es inválido.
+        """
+        from hermes.agents.application.serialization import draft_from_dict  # noqa: PLC0415
+        from hermes.agents.domain.ports import CannotUpdateDefaultAgent  # noqa: PLC0415
+
+        try:
+            sender_uid = await self._resolve_current_sender_uid()
+            draft = draft_from_dict(json.loads(draft_json))
+            agent = await self._wiring.update_agent(
+                agent_id=agent_id, draft=draft, sender_uid=sender_uid
+            )
+            return json.dumps(agent)
+        except CannotUpdateDefaultAgent as exc:
+            raise DBusError("org.hermes.Error.NotAllowed", str(exc)) from exc
+        except PermissionError as exc:
+            raise DBusError("org.hermes.Error.Unauthorized", str(exc)) from exc
 
     @method()
     async def DeleteAgent(self, agent_id: "s") -> "b":  # noqa: N802,F821,UP037
-        """Elimina un agente (no el 'default' ni el último). by = UID del bus."""
-        sender_uid = await self._resolve_current_sender_uid()
-        await self._wiring.delete_agent(agent_id=agent_id, sender_uid=sender_uid)
-        return True
+        """Elimina un agente custom (no el 'default' ni el último).
+
+        Lanza org.hermes.Error.NotAllowed si agent_id es el agente default.
+        """
+        from hermes.agents.domain.ports import CannotDeleteDefaultAgent  # noqa: PLC0415
+
+        try:
+            sender_uid = await self._resolve_current_sender_uid()
+            await self._wiring.delete_agent(agent_id=agent_id, sender_uid=sender_uid)
+            return True
+        except CannotDeleteDefaultAgent as exc:
+            raise DBusError("org.hermes.Error.NotAllowed", str(exc)) from exc
 
     # ------------------------------------------------------------------
     # Gobernanza de skills (JSON sobre D-Bus, autoría sender_uid / P0-1)
@@ -1228,6 +1277,23 @@ class Runtime1ServiceInterface(ServiceInterface):
         No authZ: read-only — el caller no muta nada (mismo patrón que list_*).
         """
         return self._wiring.search_memory(query=query, limit=int(limit) or 50)
+
+    @method()
+    async def ForgetMemoryEntry(self, entry_id: "s") -> "s":  # noqa: N802,F821,UP037
+        """Olvida (borra) una entrada de memoria por su id '{target}:{index}'.
+
+        Idempotente: devuelve {ok:true} aunque la entrada ya haya sido borrada.
+        authZ: operador (sender_uid del bus, CWE-862).
+        PII: el contenido NUNCA cruza el bus ni se loguea.
+        """
+        try:
+            sender_uid = await self._resolve_current_sender_uid()
+            result = self._wiring.delete_memory_entry(
+                entry_id=entry_id, sender_uid=sender_uid
+            )
+            return json.dumps(result)
+        except PermissionError as exc:
+            raise DBusError("org.hermes.Error.Unauthorized", str(exc)) from exc
 
     # ------------------------------------------------------------------
     # Acceso remoto (Settings → toggle) — espejo noVNC con URL individual.

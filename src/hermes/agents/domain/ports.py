@@ -16,6 +16,16 @@ class AgentNotFound(LookupError):
     """No existe un agente con ese agent_id."""
 
 
+class CannotUpdateDefaultAgent(ValueError):
+    """El agente 'default' (Cerebro) no se puede editar vía API.
+
+    El Cerebro tiene un system prompt world-class fijo; modificarlo
+    podría degradar el comportamiento del SO. Si necesitas personalizar
+    el Cerebro, usa el campo 'instructions' del agente default directamente
+    en el daemon (no expuesto al canal REST por diseño).
+    """
+
+
 class CannotDeleteDefaultAgent(ValueError):
     """El agente 'default' del SO no se puede eliminar."""
 

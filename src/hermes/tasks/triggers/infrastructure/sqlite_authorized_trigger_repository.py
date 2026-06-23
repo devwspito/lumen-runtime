@@ -296,6 +296,63 @@ class SqliteAuthorizedTriggerRepository:
         ).fetchall()
         return [_row_to_trigger(tuple(r)) for r in rows]
 
+    def get_by_id(self, trigger_id: str) -> AuthorizedTrigger | None:
+        """Return one enabled trigger by its instance_id, or None if not found."""
+        try:
+            row = self._conn.execute(
+                f"SELECT {_SELECT_INSTANCE} FROM authorized_trigger_instances "  # noqa: S608
+                "WHERE instance_id = ? AND enabled = 1",
+                (trigger_id,),
+            ).fetchone()
+        except sqlite3.Error:
+            return None
+        if row is None:
+            return None
+        return _row_to_trigger(tuple(row))
+
+    def update_task(
+        self,
+        *,
+        trigger_id: str,
+        label: str,
+        instruction: str,
+        cron: str,
+        target_agent_id: str | None,
+        risk_ceiling: str,
+    ) -> bool:
+        """Update mutable fields of a scheduled task trigger (fail-safe → False).
+
+        Returns True on success, False if the trigger was not found or not enabled.
+        Idempotent: re-applying the same values is a no-op with no side effect.
+        """
+        now = datetime.now(tz=UTC).isoformat()
+        try:
+            cur = self._conn.execute(
+                """
+                UPDATE authorized_trigger_instances
+                SET scope_value       = ?,
+                    task_instruction  = ?,
+                    title             = ?,
+                    target_agent_id   = ?,
+                    risk_ceiling      = ?,
+                    updated_at        = ?
+                WHERE instance_id = ? AND enabled = 1
+                """,
+                (
+                    cron,
+                    instruction,
+                    label,
+                    target_agent_id,
+                    risk_ceiling,
+                    now,
+                    trigger_id,
+                ),
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+        except sqlite3.Error:
+            return False
+
     def list_triggers_with_last_run(
         self,
         *,

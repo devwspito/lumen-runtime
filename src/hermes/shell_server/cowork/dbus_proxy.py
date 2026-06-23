@@ -204,6 +204,18 @@ def _translate_dbus_error(exc: Exception, member: str) -> None:
             detail={"code": "unauthorized", "message": str(exc)},
         ) from exc
 
+    if err_name == "org.hermes.Error.NotAllowed":
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "not_allowed", "message": str(exc)},
+        ) from exc
+
+    if err_name == "org.hermes.Error.NotFound":
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "not_found", "message": str(exc)},
+        ) from exc
+
     # Legacy string-match kept as a secondary guard for older daemon builds
     # that may not emit the structured error name.
     err_str = str(exc).lower()

@@ -9,6 +9,8 @@ import type {
   ConversationSummary,
   StreamFrame,
   CreateAgentPayload,
+  UpdateAgentPayload,
+  UpdateTaskPayload,
   Provider,
   Skill,
   HubSkillResult,
@@ -144,6 +146,17 @@ export function setActiveAgent(agentId: string): Promise<unknown> {
 
 export function createAgent(payload: CreateAgentPayload): Promise<Agent> {
   return request<Agent>('/agents', { method: 'POST', body: JSON.stringify(payload) })
+}
+
+export function updateAgent(agentId: string, payload: UpdateAgentPayload): Promise<Agent> {
+  return request<Agent>(`/agents/${encodeURIComponent(agentId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function deleteAgent(agentId: string): Promise<unknown> {
+  return request<unknown>(`/agents/${encodeURIComponent(agentId)}`, { method: 'DELETE' })
 }
 
 export function getAgentRoster(): Promise<AgentRoster> {
@@ -328,6 +341,12 @@ export function setComposioApiKey(apiKey: string): Promise<unknown> {
   })
 }
 
+export function disconnectComposioApp(slug: string): Promise<unknown> {
+  return request<unknown>(`/integrations/composio/connected/${encodeURIComponent(slug)}`, {
+    method: 'DELETE',
+  })
+}
+
 export function getWebSearchStatus(): Promise<WebSearchStatus> {
   return request<WebSearchStatus>('/web-search/status')
 }
@@ -384,6 +403,17 @@ export function listRecentTasks(limit = 20): Promise<RecentTasksResponse> {
 
 export function createTask(payload: CreateTaskPayload): Promise<ConfiguredTask> {
   return request<ConfiguredTask>('/tasks/scheduled', { method: 'POST', body: JSON.stringify(payload) })
+}
+
+export function getTask(taskId: string): Promise<ConfiguredTask> {
+  return request<ConfiguredTask>(`/tasks/${encodeURIComponent(taskId)}`)
+}
+
+export function updateTask(taskId: string, payload: UpdateTaskPayload): Promise<ConfiguredTask> {
+  return request<ConfiguredTask>(`/tasks/${encodeURIComponent(taskId)}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  })
 }
 
 export function deleteTask(taskId: string): Promise<unknown> {
@@ -550,6 +580,10 @@ export function listMemory(): Promise<MemoryItem[]> {
 
 export function searchMemory(query: string): Promise<MemoryItem[]> {
   return request<MemoryItem[]>(`/memory/search?q=${encodeURIComponent(query)}`)
+}
+
+export function forgetMemoryItem(id: string): Promise<unknown> {
+  return request<unknown>(`/memory/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }
 
 // ── Workspace files (re-export for context panel) ─────────────────────────────

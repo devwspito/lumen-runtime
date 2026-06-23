@@ -2619,6 +2619,79 @@ class DbusRuntimeServiceWiring:
             for r in rows
         ]
 
+    async def get_scheduled_task(self, *, trigger_id: str) -> dict:
+        """Return detail for one scheduled task trigger (read-only, no authZ).
+
+        Returns {} when not found or not enabled (idempotent, safe).
+        """
+        try:
+            repo = self._require_trigger_repo()
+        except Exception:  # noqa: BLE001
+            return {}
+        from datetime import UTC, datetime  # noqa: PLC0415
+        from hermes.tasks.control_plane.application.control_plane_service import (  # noqa: PLC0415
+            _build_configured_task_view,
+        )
+        trigger = repo.get_by_id(trigger_id)
+        if trigger is None:
+            return {}
+        view = _build_configured_task_view(trigger, None, None, datetime.now(tz=UTC))
+        return _configured_task_to_dict(view)
+
+    async def update_scheduled_task(
+        self,
+        *,
+        trigger_id: str,
+        draft_json: str,
+        sender_uid: int,
+    ) -> dict:
+        """Update mutable fields of a scheduled task trigger.
+
+        draft: {label, instruction, cron, target_agent_id?, risk_ceiling?}
+        Raises PermissionError if caller is not authorized.
+        Returns the updated task dict, or raises ValueError if not found.
+        """
+        import json as _json  # noqa: PLC0415
+
+        self._authorize(sender_uid, operation="update_scheduled_task")
+        try:
+            draft = _json.loads(draft_json)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"update_scheduled_task: invalid JSON draft: {exc}") from exc
+
+        label = str(draft.get("label") or "").strip()
+        instruction = str(draft.get("instruction") or "").strip()
+        cron = str(draft.get("cron") or "").strip()
+        target_agent_id = str(draft.get("target_agent_id") or "").strip() or None
+        ceiling_raw = str(draft.get("risk_ceiling") or "low").strip().lower()
+        risk_ceiling = ceiling_raw if ceiling_raw in ("low", "high") else "low"
+
+        if not label or not instruction or not cron:
+            raise ValueError("update_scheduled_task: label, instruction and cron are required")
+
+        try:
+            repo = self._require_trigger_repo()
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"update_scheduled_task: trigger_repo not available: {exc}") from exc
+
+        updated = repo.update_task(
+            trigger_id=trigger_id,
+            label=label,
+            instruction=instruction,
+            cron=cron,
+            target_agent_id=target_agent_id,
+            risk_ceiling=risk_ceiling,
+        )
+        if not updated:
+            raise ValueError(f"update_scheduled_task: trigger {trigger_id!r} not found or not enabled")
+
+        updated_task = await self.get_scheduled_task(trigger_id=trigger_id)
+        logger.info(
+            "hermes.dbus.scheduled_task_updated",
+            extra={"trigger_id": trigger_id, "by_uid": sender_uid},
+        )
+        return updated_task
+
     # ------------------------------------------------------------------
     # T007 — Trigger management (AuthorizeTrigger / RevokeTrigger / List)
     # ------------------------------------------------------------------
@@ -3305,6 +3378,63 @@ class DbusRuntimeServiceWiring:
                 if limit is not None and entry_idx >= limit:
                     return result
         return result
+
+    def delete_memory_entry(self, *, entry_id: str, sender_uid: int) -> dict:
+        """Olvida (borra) una entrada de memoria por su id compuesto '{target}:{index}'.
+
+        Operación idempotente: si la entrada ya no existe devuelve {ok: true}
+        (sin lanzar) para que el frontend pueda hacer DELETE seguro.
+        PII: el contenido NUNCA se loguea, sólo el target e índice (metadatos).
+        authZ: operador (sender_uid).
+        """
+        import json as _json  # noqa: PLC0415
+
+        self._authorize(sender_uid, operation="delete_memory_entry")
+
+        if not entry_id or ":" not in entry_id:
+            return {"ok": False, "error": f"id inválido: {entry_id!r}"}
+
+        parts = entry_id.rsplit(":", 1)
+        if len(parts) != 2:
+            return {"ok": False, "error": f"id inválido: {entry_id!r}"}
+        target, index_str = parts[0], parts[1]
+
+        try:
+            entry_index = int(index_str)
+        except ValueError:
+            return {"ok": False, "error": f"índice no numérico en id: {entry_id!r}"}
+
+        try:
+            from hermes.memory.infrastructure.tenant_memory_store import (  # noqa: PLC0415
+                TenantMemoryStore,
+            )
+            from hermes.memory.infrastructure.nous_memory_bridge import (  # noqa: PLC0415
+                _DEFAULT_MEMORY_ROOT,
+            )
+            from hermes.runtime.__main__ import _resolve_tenant_id  # noqa: PLC0415
+            tenant_id = _resolve_tenant_id()
+            store = TenantMemoryStore(root=_DEFAULT_MEMORY_ROOT, tenant_id=tenant_id)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"memory store unavailable: {exc}"}
+
+        try:
+            entries = store.read(target)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"cannot read target {target!r}: {exc}"}
+
+        if entry_index >= len(entries):
+            # Idempotent: already gone.
+            return {"ok": True, "deleted": False, "reason": "entry not found (already removed)"}
+
+        old_text = entries[entry_index]
+        result = store.remove(target, old_text)
+        if result.get("success"):
+            logger.info(
+                "hermes.dbus.memory_entry_deleted target=%s index=%d by_uid=%d",
+                target, entry_index, sender_uid,
+            )
+            return {"ok": True, "deleted": True}
+        return {"ok": False, "error": result.get("error", "unknown")}
 
     # ------------------------------------------------------------------
     # T017 — Desktop overlay methods (spec 014-agentic-desktop)
