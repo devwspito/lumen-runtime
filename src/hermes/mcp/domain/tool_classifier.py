@@ -52,15 +52,17 @@ def classify_mcp_tool(
     Advisory hints may only keep-safe, never elevate risk.
     USER_ADDED servers force auto_executable=False (always require HITL).
     """
+    # BUILTIN = MCP de fábrica horneado y vetado por NOSOTROS (local, sin egress, confinado
+    # a la jaula). TODAS sus operaciones fluyen sin HITL (LOW + auto), incluido guardar/
+    # sobre-escribir en el workspace: la JAULA es el control, no la aprobación. Solo
+    # nuestros slugs sembrados llegan como BUILTIN; lo que añada el usuario es USER_ADDED →
+    # gateado abajo. (Decisión del dueño: la jaula nunca debe ser un estorbo.)
+    if trust_level is TrustLevel.BUILTIN:
+        return McpToolClassification(risk=RiskLevel.LOW, auto_executable=True)
+
     forced_high = _is_forced_high(destructive_hint, trust_level)
     if forced_high:
         return McpToolClassification(risk=RiskLevel.HIGH, auto_executable=False)
-
-    # BUILTIN = MCP de fábrica horneado y vetado por nosotros (local, sin egress): sus
-    # operaciones reversibles fluyen sin HITL (LOW + auto). Lo marcado destructivo
-    # (destructive_hint) ya forzó HIGH arriba; los del usuario (USER_ADDED) también.
-    if trust_level is TrustLevel.BUILTIN:
-        return McpToolClassification(risk=RiskLevel.LOW, auto_executable=True)
 
     if read_only_hint is True and _name_looks_read_only(name):
         risk = RiskLevel.LOW
