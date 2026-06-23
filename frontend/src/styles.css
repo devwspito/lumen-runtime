@@ -2605,6 +2605,50 @@ details[open] .tool-summary-group__chevron { transform: rotate(90deg); }
   color: var(--ink2);
 }
 
+/* MFA enrollment: scannable QR + manual secret */
+.seg-mfa-enroll {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  align-items: flex-start;
+  margin-top: var(--sp-2);
+}
+
+.seg-mfa-enroll__step {
+  font-size: var(--text-label);
+  color: var(--ink2);
+  line-height: 1.5;
+  margin: 0;
+}
+
+/* White padded box so the QR is scannable even in dark theme. */
+.seg-mfa-enroll__qr {
+  background: #fff;
+  padding: var(--sp-3);
+  border-radius: var(--radius-md, 10px);
+  line-height: 0;
+}
+
+.seg-mfa-enroll__manual {
+  font-size: var(--text-label);
+  color: var(--ink3);
+  line-height: 1.6;
+  margin: 0;
+}
+
+.seg-mfa-enroll__secret {
+  display: inline-block;
+  margin-top: var(--sp-1);
+  padding: 2px 8px;
+  font-family: var(--font-mono);
+  font-size: var(--text-label);
+  letter-spacing: 0.12em;
+  color: var(--ink1);
+  background: var(--surface2, rgba(255, 255, 255, 0.06));
+  border-radius: 6px;
+  user-select: all;
+}
+
 /* MFA policy inputs row */
 .seg-pol-inputs {
   display: flex;

@@ -8,6 +8,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { QRCodeSVG } from 'qrcode.react'
 import { sileo } from 'sileo'
 import {
   listPendingApprovals,
@@ -335,6 +336,8 @@ function GovernanceSection() {
   if (!mfa || !pol) return null
 
   const toolNames = Object.keys(pol.tools ?? {}).sort()
+  // The bare base32 secret (for manual entry when the QR can't be scanned).
+  const mfaSecret = mfaUri ? (mfaUri.match(/[?&]secret=([^&]+)/)?.[1] ?? '') : ''
 
   return (
     <>
@@ -353,19 +356,36 @@ function GovernanceSection() {
 
           {!mfa.enrolled && (
             <>
-              <button
-                className="cv-btn cv-btn--primary"
-                onClick={handleEnroll}
-                type="button"
-              >
-                Activar MFA
-              </button>
+              {!mfaUri && (
+                <button
+                  className="cv-btn cv-btn--primary"
+                  onClick={handleEnroll}
+                  type="button"
+                >
+                  Activar MFA
+                </button>
+              )}
               {mfaUri && (
-                <p className="seg-card__uri">
-                  Escanéalo en tu app (Google Authenticator, Aegis…):
-                  <br />
-                  <code>{mfaUri}</code>
-                </p>
+                <div className="seg-mfa-enroll">
+                  <p className="seg-mfa-enroll__step">
+                    <strong>1.</strong> Escanea este código con tu app de autenticación
+                    (Google Authenticator, Authy, Aegis…):
+                  </p>
+                  <div className="seg-mfa-enroll__qr">
+                    <QRCodeSVG value={mfaUri} size={188} level="M" marginSize={2} />
+                  </div>
+                  {mfaSecret && (
+                    <p className="seg-mfa-enroll__manual">
+                      ¿No puedes escanear? Introduce esta clave a mano:
+                      <br />
+                      <code className="seg-mfa-enroll__secret">{mfaSecret}</code>
+                    </p>
+                  )}
+                  <p className="seg-mfa-enroll__step">
+                    <strong>2.</strong> La app mostrará un código de 6 dígitos que cambia
+                    cada 30 s — eso es lo que pedirá Lumen al aprobar acciones. Ya está.
+                  </p>
+                </div>
               )}
             </>
           )}
