@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # install.sh — instalador simple de Lumen: limpia, construye y arranca en un comando.
 #
-# Filosofía: el instalador SOLO levanta Lumen. Todo lo "custom" (agentes, MCP,
-# skills, integraciones) se configura en la UI. El modelo también — PERO si existe
-# un fichero local .lumen-seed.env (git-ignored, con SEED_URL/SEED_KEY/SEED_MODEL),
-# el instalador auto-configura y activa ese proveedor para que el chat funcione
-# nada más instalar. La API key vive en ese fichero local, NUNCA en el repo.
+# Filosofía: el instalador SOLO levanta Lumen. Todo lo "custom" (modelo/proveedor,
+# agentes, MCP, skills, integraciones) se configura en la UI.
+# Para la instalación de usuario final, usa el CLI: `npx @devwspito/lumen`.
+# Este script es el camino DESDE FUENTE (construye la imagen localmente).
 #
 #   ./ops/container/install.sh [PUERTO]      (puerto por defecto: 17517)
 #
@@ -53,27 +52,6 @@ done
 echo "  daemon: ${s:-sin respuesta}"
 
 secret="$("$RUNTIME" exec "$NAME" cat /var/lib/hermes-bootstrap/bootstrap/webui-bootstrap 2>/dev/null | tr -d '\r\n' || true)"
-
-# Optional: auto-configure the model provider on a fresh install from a LOCAL,
-# git-ignored file (so the API key never enters source control). Create
-# .lumen-seed.env at the repo root with: SEED_URL, SEED_KEY, SEED_MODEL, SEED_ALIAS.
-SEED_FILE="$HERE/.lumen-seed.env"
-if [ "$s" = active ] && [ -n "$secret" ] && [ -f "$SEED_FILE" ]; then
-  # shellcheck disable=SC1090
-  . "$SEED_FILE"
-  if [ -n "${SEED_URL:-}" ] && [ -n "${SEED_MODEL:-}" ]; then
-    tok="$(curl -s "http://localhost:${PORT}/app/?k=${secret}" \
-      | grep -oE 'window.__LUMEN_TOKEN__="[^"]+"' | sed 's/.*="//;s/"//')"
-    if [ -n "$tok" ]; then
-      code="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
-        -H "Authorization: Bearer $tok" -H "Content-Type: application/json" \
-        -d "{\"kind\":\"vllm\",\"alias\":\"${SEED_ALIAS:-vLLM}\",\"default_model\":\"${SEED_MODEL}\",\"base_url\":\"${SEED_URL}\",\"api_key\":\"${SEED_KEY:-}\",\"set_active\":true}" \
-        "http://localhost:${PORT}/api/v1/providers")"
-      echo "  ▸ proveedor de modelo auto-configurado (${SEED_ALIAS:-vLLM}) → HTTP $code"
-    fi
-  fi
-fi
-
 echo
 if [ "$s" = active ] && [ -n "$secret" ]; then
   echo "  ✅ Lumen está arriba. Abre:"
