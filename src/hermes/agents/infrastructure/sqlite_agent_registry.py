@@ -25,9 +25,11 @@ from hermes.agents.domain.ports import (
     CannotDeleteLastAgent,
     CannotUpdateDefaultAgent,
 )
+from hermes.agents.domain.default_roster import default_roster
 from hermes.prompts.persona import PersonaSpec
 
 _ACTIVE_KEY = "active_agent_id"
+_ROSTER_SEEDED_KEY = "roster_seeded"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS agents (
@@ -80,6 +82,7 @@ class SqliteAgentRegistry:
             self._migrate_autonomy_level(conn)
             self._migrate_department(conn)
         self._ensure_default()
+        self._seed_roster()
 
     @staticmethod
     def _migrate_autonomy_level(conn: sqlite3.Connection) -> None:
@@ -117,6 +120,26 @@ class SqliteAgentRegistry:
             conn.execute(
                 "INSERT OR REPLACE INTO agent_settings (key, value) VALUES (?, ?)",
                 (_ACTIVE_KEY, DEFAULT_AGENT_ID),
+            )
+
+    def _seed_roster(self) -> None:
+        """Siembra el equipo de fábrica UNA sola vez (flag en agent_settings).
+
+        Gated por flag (no por COUNT): si el dueño borra un especialista, NO reaparece
+        en el siguiente arranque. INSERT OR IGNORE por PK fija = race-safe entre daemon
+        y shell-server.
+        """
+        with self._connect() as conn:
+            seeded = conn.execute(
+                "SELECT value FROM agent_settings WHERE key = ?", (_ROSTER_SEEDED_KEY,)
+            ).fetchone()
+            if seeded is not None:
+                return
+            for agent in default_roster():
+                self._insert(conn, agent)
+            conn.execute(
+                "INSERT OR REPLACE INTO agent_settings (key, value) VALUES (?, ?)",
+                (_ROSTER_SEEDED_KEY, _now_iso()),
             )
 
     # ------------------------------------------------------------------

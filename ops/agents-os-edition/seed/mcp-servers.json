@@ -1,11 +1,1 @@
-[
-  {
-    "server_id": "ruflo",
-    "label": "Ruflo · enjambre multi-agente (98+ agentes, MIT). Configura tu LLM OpenAI-compatible en Editar",
-    "argv": ["npx", "-y", "ruflo@latest", "mcp", "start"],
-    "env": {
-      "OPENAI_BASE_URL": "",
-      "OPENAI_API_KEY": ""
-    }
-  }
-]
+[]
