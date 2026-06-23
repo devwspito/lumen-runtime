@@ -42,8 +42,17 @@ _MOST_DELICATE: frozenset[str] = frozenset({
     "set_agent_permission_rule", "clear_agent_permission_rule", "set_policy",
     "set_security_policy", "disable_mfa", "update_system_setting", "change_system_setting",
     "install_app", "install_mcp", "install_skill", "skill_manage",
-    "cronjob", "delegate_task", "mixture_of_agents",
+    "cronjob",
 })
+
+# Orquestación INTERNA: delegar / repartir trabajo entre agentes del roster NO es un peligro
+# en sí mismo — el peligro es lo que el sub-agente LUEGO hace, y ESO lo gatea la jaula (kernel:
+# Landlock/netns/seccomp) + el broker en CADA tool del sub-agente. Por eso la delegación es
+# NORMAL (fluida, sin pedir aprobación): el control real es la jaula, y nunca un estorbo.
+# El sub-agente corre bajo el mismo daemon, misma jaula y mismo broker que el Cerebro.
+# (Decisión del dueño 2026-06-23: "tú no controlas la delegación; controlas a nivel de kernel
+# si un agente intenta un comando peligroso".)
+_ORCHESTRATION: frozenset[str] = frozenset({"delegate_task", "mixture_of_agents"})
 
 
 def delicacy(tool: str) -> Delicacy:
@@ -54,6 +63,8 @@ def delicacy(tool: str) -> Delicacy:
     truth. The only hand-list is the _MOST_DELICATE governance overlay (non-native
     capability/conceptual actions). Unknown tools → NORMAL (the cage confines them
     regardless of this tier)."""
+    if tool in _ORCHESTRATION:
+        return Delicacy.NORMAL  # delegación fluida; la jaula gatea lo que el sub-agente HACE
     if tool in _MOST_DELICATE:
         return Delicacy.MOST_DELICATE
     if classify_nous_tool(tool) is NousRisk.WRITE:
