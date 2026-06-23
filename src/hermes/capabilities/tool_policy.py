@@ -90,6 +90,29 @@ class ToolPolicyStore:
             return bool(overrides[tool])
         return _preset_default(self._preset(), tool)
 
+    def is_owner_disabled(self, tool: str) -> bool:
+        """True ONLY if the owner has CONSCIOUSLY disabled this tool.
+
+        Distinguishes a deliberate owner decision from a preset default:
+          - explicit override=False in the overrides map → True (owner toggled it off)
+          - BLOQUEADO preset (owner chose full lockdown) → True
+          - Equilibrado default-off (e.g. MOST_DELICATE tools) → False
+            These tools have an approval path (HITL); Step 1.5 must not dead-end them
+            before Step 1.6 can surface the approval card to the owner.
+          - PERMISIVO preset → False (everything is on)
+
+        Fail-safe: any read error → False (do not block; let the HITL gate decide).
+        """
+        try:
+            d = self._load()
+            overrides = d.get("overrides", {})
+            if tool in overrides:
+                return not bool(overrides[tool])
+            preset = self._preset()
+            return preset is Preset.BLOQUEADO
+        except Exception:  # noqa: BLE001 — policy is usability layer; fail-open here
+            return False
+
     def mfa_on_dangers(self) -> bool:
         """Whether DANGEROUS commands require owner MFA per execution (default ON).
 

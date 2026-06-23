@@ -4,6 +4,7 @@ import { listConversations } from '../api/client'
 import { useChat } from '../hooks/useChat'
 import type { ConversationSummary } from '../api/types'
 
+
 interface NavItem {
   to: string
   label: string
@@ -150,6 +151,8 @@ export interface ChatOutletContext {
   messages: ReturnType<typeof useChat>['messages']
   status: ReturnType<typeof useChat>['status']
   stopStream(): void
+  /** Incremented each time the user sends a message — signals PendingApprovalsInChat to poll immediately. */
+  approvalRefreshTick: number
 }
 
 interface RecentsSectionProps {
@@ -272,6 +275,15 @@ export default function Layout() {
   // the main content area (ChatView). ChatView receives it via outlet context.
   const chat = useChat()
 
+  // Bumped each time the user sends a message so PendingApprovalsInChat can
+  // fire an immediate poll without waiting for the 3 s interval.
+  const [approvalRefreshTick, setApprovalRefreshTick] = useState(0)
+
+  async function handleSendMessage(text: string) {
+    await chat.sendMessage(text)
+    setApprovalRefreshTick(t => t + 1)
+  }
+
   function handleNewChat() {
     chat.startNew()
     navigate('/chat')
@@ -342,10 +354,11 @@ export default function Layout() {
           convId: chat.convId,
           loadConversation: chat.loadConversation,
           startNew: chat.startNew,
-          sendMessage: chat.sendMessage,
+          sendMessage: handleSendMessage,
           messages: chat.messages,
           status: chat.status,
           stopStream: chat.stopStream,
+          approvalRefreshTick,
         } satisfies ChatOutletContext} />
       </main>
     </div>

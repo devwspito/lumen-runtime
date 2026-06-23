@@ -19,7 +19,9 @@ type MemoryState =
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function memoryContent(item: MemoryItem): string {
-  return String(item.content ?? item.text ?? JSON.stringify(item))
+  // Prefer the backend's pre-truncated field; fall back to full content or plain text.
+  // Never JSON.stringify — that leaks raw object noise to the user.
+  return String(item.content_truncated ?? item.content ?? item.text ?? '').trim()
 }
 
 function formatDate(iso?: string): string {
@@ -148,7 +150,7 @@ export default function MemoriaView() {
             <p className="cv-empty">
               {activeQuery
                 ? `Sin resultados para "${activeQuery}"`
-                : 'Sin entradas en memoria.'}
+                : 'Aún no hay recuerdos. Lumen irá guardando lo importante de tus conversaciones automáticamente.'}
             </p>
           )}
 

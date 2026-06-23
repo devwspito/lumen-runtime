@@ -2395,9 +2395,11 @@ class DbusRuntimeServiceWiring:
             conn.execute("PRAGMA busy_timeout=3000")
             rows = conn.execute(
                 """
-                SELECT proposal_id, risk, tool_name, justification, created_at
+                SELECT proposal_id, risk, tool_name, justification,
+                       created_at, conversation_id
                 FROM pending_approvals
                 WHERE status = 'pending'
+                  AND created_at > datetime('now', '-30 minutes')
                 ORDER BY created_at ASC
                 LIMIT ?
                 """,
@@ -2417,6 +2419,9 @@ class DbusRuntimeServiceWiring:
                 "justification": row["justification"] or "",
                 "risk": row["risk"],
                 "created_at": row["created_at"] or "",
+                # task_id from the pre_tool_call hook; None for rows written before
+                # the conversation_id column existed (2026-06-23 migration).
+                "conversation_id": row["conversation_id"] or None,
             }
             for row in rows
         ]

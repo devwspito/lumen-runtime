@@ -303,6 +303,14 @@ export interface PendingApproval {
   summary: string
   target?: string
   parameters?: Record<string, unknown>
+  /** task_id from the pre_tool_call hook; null for rows written before migration */
+  conversation_id?: string | null
+  /** MFA tier required to approve: 'mfa' | 'mfa_humanity' | 'mfa_riddle' */
+  required_level?: string
+  /** Whether the owner has enrolled a TOTP secret */
+  mfa_enrolled?: boolean
+  /** Whether the owner has configured a personal riddle */
+  riddle_set?: boolean
 }
 
 export interface MfaStatus {
@@ -332,8 +340,12 @@ export interface InstallDecisionPayload {
 
 export interface MemoryItem {
   id?: string
+  /** Primary display field returned by the backend. */
+  content_truncated?: string
   content?: string
   text?: string
+  target?: string
+  entry_index?: number
   created_at?: string
   [key: string]: unknown
 }

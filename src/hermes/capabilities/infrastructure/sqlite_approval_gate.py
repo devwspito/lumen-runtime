@@ -61,7 +61,16 @@ _MAX_VALUE_LEN: int = 64
 
 
 class ApprovalGateError(RuntimeError):
-    """Error irrecuperable del ApprovalGate — no degradar."""
+    """Error irrecuperable del ApprovalGate — no degradar.
+
+    `reason` carries the machine-readable code (e.g. 'mfa_not_enrolled',
+    'invalid_totp', 'invalid_riddle') so the presentation layer can route
+    to the correct user-facing message without string-parsing the message.
+    """
+
+    def __init__(self, message: str, reason: str = "mfa_denied") -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 class SqliteApprovalGate:
@@ -114,6 +123,7 @@ class SqliteApprovalGate:
         parameters_redacted: dict[str, Any],
         tool_name: str = "",
         action_digest: str = "",
+        conversation_id: str = "",
     ) -> None:
         """Registra la propuesta HIGH como pendiente de aprobación.
 
@@ -121,19 +131,35 @@ class SqliteApprovalGate:
         Los parámetros se redactan defensivamente (CTRL-14). `tool_name` se persiste
         para que la capa MFA clasifique la delicadeza por tool (no por el risk genérico).
         `action_digest` liga la aprobación a la acción exacta (chokepoint nativo).
+        `conversation_id` (task_id del hook) ancla la tarjeta al hilo del chat.
         """
         operator_id = str(consent_context.operator_id) if consent_context.operator_id else ""
         now = datetime.now(tz=UTC).isoformat()
         safe_params = _redact_parameters(parameters_redacted)
 
         with self._connect() as conn:
+            # Re-armado: como `proposal_id` es determinista (uuid5 del digest), una fila
+            # terminal o pendiente-caduca con ese id haría que el INSERT OR IGNORE fuese
+            # un no-op para SIEMPRE (la tarjeta nunca reaparecería tras consumirse o
+            # caducar). Borramos esa fila ANTES de insertar la fresca. Nunca tocamos una
+            # aprobación VIVA sin consumir (status='approved' AND consumed_at IS NULL) — esa
+            # ruta ni siquiera llega aquí (el caller la resuelve en approved_proposal_for_digest).
+            conn.execute(
+                """
+                DELETE FROM pending_approvals
+                 WHERE proposal_id = ?
+                   AND NOT (status = 'approved' AND consumed_at IS NULL)
+                   AND (status != 'pending' OR created_at <= datetime('now', '-30 minutes'))
+                """,
+                (str(proposal_id),),
+            )
             conn.execute(
                 """
                 INSERT OR IGNORE INTO pending_approvals (
                     proposal_id, work_item_id, tenant_id, operator_id,
                     risk, tool_name, action_digest, justification, parameters_redacted,
-                    status, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                    status, created_at, conversation_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
                 """,
                 (
                     str(proposal_id),
@@ -146,6 +172,7 @@ class SqliteApprovalGate:
                     justification,
                     json.dumps(safe_params),
                     now,
+                    conversation_id or None,
                 ),
             )
 
@@ -190,7 +217,9 @@ class SqliteApprovalGate:
             logger.warning(
                 "hermes.approval_gate.mfa_denied proposal=%s reason=%s", proposal_id, reason
             )
-            raise ApprovalGateError(f"MFA inválida para aprobar (motivo={reason}).")
+            raise ApprovalGateError(
+                f"MFA inválida para aprobar (motivo={reason}).", reason=reason
+            )
 
         capability = row["risk"]  # usamos el risk como capability label
         token = self._minter.mint(

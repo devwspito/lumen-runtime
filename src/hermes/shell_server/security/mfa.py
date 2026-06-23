@@ -136,13 +136,17 @@ class MfaStore:
         d = self._load()
         return MfaState(enrolled=bool(d.get("totp_secret")), riddle_question=d.get("riddle_q"))
 
-    def enroll(self) -> str:
-        """Generate + persist a fresh TOTP secret. Returns the otpauth URI to scan."""
+    def enroll(self) -> tuple[str, str]:
+        """Generate + persist a fresh TOTP secret.
+
+        Returns (otpauth_uri, secret_b32) so callers can expose the raw secret
+        for manual entry without regex-parsing the URI.
+        """
         secret = generate_secret()
         d = self._load()
         d["totp_secret"] = secret
         self._save(d)
-        return otpauth_uri(secret)
+        return otpauth_uri(secret), secret
 
     def set_riddle(self, question: str, answer: str) -> None:
         d = self._load()

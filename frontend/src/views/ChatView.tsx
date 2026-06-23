@@ -22,6 +22,7 @@ import { listProviders, uploadWorkspaceFile, ApiError } from '../api/client'
 import type { Provider } from '../api/types'
 import type { ChatOutletContext } from '../components/Layout'
 import ContextPanel from '../components/ContextPanel'
+import PendingApprovalsInChat from '../components/PendingApprovalsInChat'
 
 // ── i18n strings (ES, matching vanilla i18n.js) ───────────────────────────────
 
@@ -618,7 +619,7 @@ function SpinnerIcon() {
 
 export default function ChatView() {
   // All chat state comes from Layout via outlet context — no duplicate useChat instance.
-  const { messages, status, sendMessage, stopStream } = useOutletContext<ChatOutletContext>()
+  const { convId, messages, status, sendMessage, stopStream, approvalRefreshTick } = useOutletContext<ChatOutletContext>()
   const [composerText, setComposerText] = useState('')
   const [panelOpen, setPanelOpen] = useState(false)
   const [showNoModel, setShowNoModel] = useState(false)
@@ -718,6 +719,11 @@ export default function ChatView() {
                 ),
               )
             )}
+            {/* Approval cards inline — visible where the user is looking */}
+            <PendingApprovalsInChat
+              currentThreadId={convId}
+              refreshTick={approvalRefreshTick}
+            />
           </div>
 
           {/* No-model CTA replaces the dead error bar */}
@@ -727,9 +733,9 @@ export default function ChatView() {
             <StatusBar phase={status.phase} text={statusText} />
           )}
 
-          {/* Composer */}
+          {/* Composer — disabled during both sending and streaming phases to prevent double-submit */}
           <Composer
-            disabled={status.phase === 'sending'}
+            disabled={status.phase === 'sending' || status.phase === 'streaming'}
             isStreaming={isStreaming}
             onSend={handleSend}
             onStop={stopStream}

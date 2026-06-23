@@ -742,6 +742,7 @@ function TarjetasView({ roster, runtimeStatus, hasRuflo, onRosterRefetch }: Tarj
 export default function OfficeView() {
   const [tab, setTab] = useState<Tab>('live')
   const [state, dispatch] = useReducer(dataReducer, { status: 'loading' })
+  const [showCreateFromHeader, setShowCreateFromHeader] = useState(false)
   const navigate = useNavigate()
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -853,23 +854,37 @@ export default function OfficeView() {
             </p>
           </div>
 
-          <div className="office-seg-toggle" role="group" aria-label="Vista de la oficina">
-            <button
-              type="button"
-              className={`office-seg-btn${tab === 'tarjetas' ? ' office-seg-btn--active' : ''}`}
-              onClick={() => setTab('tarjetas')}
-              aria-pressed={tab === 'tarjetas'}
-            >
-              Tarjetas
-            </button>
-            <button
-              type="button"
-              className={`office-seg-btn${tab === 'live' ? ' office-seg-btn--active' : ''}`}
-              onClick={() => setTab('live')}
-              aria-pressed={tab === 'live'}
-            >
-              En vivo
-            </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--sp-3)' }}>
+            {state.status === 'ready' && (
+              <button
+                type="button"
+                className="office-btn office-btn--primary"
+                style={{ fontSize: 'var(--text-label)', padding: '0 var(--sp-4)', height: 36 }}
+                onClick={() => setShowCreateFromHeader(true)}
+                aria-label="Crear nuevo agente"
+              >
+                + Crear agente
+              </button>
+            )}
+
+            <div className="office-seg-toggle" role="group" aria-label="Vista de la oficina">
+              <button
+                type="button"
+                className={`office-seg-btn${tab === 'tarjetas' ? ' office-seg-btn--active' : ''}`}
+                onClick={() => setTab('tarjetas')}
+                aria-pressed={tab === 'tarjetas'}
+              >
+                Tarjetas
+              </button>
+              <button
+                type="button"
+                className={`office-seg-btn${tab === 'live' ? ' office-seg-btn--active' : ''}`}
+                onClick={() => setTab('live')}
+                aria-pressed={tab === 'live'}
+              >
+                En vivo
+              </button>
+            </div>
           </div>
         </div>
       </header>
@@ -888,7 +903,22 @@ export default function OfficeView() {
           </div>
         )}
 
-        {state.status === 'ready' && (
+        {state.status === 'ready' && totalAgentCount === 0 && (
+          <div className="state-container" style={{ textAlign: 'center' }}>
+            <p className="state-label" style={{ marginBottom: 'var(--sp-4)' }}>
+              Aún no tienes agentes.
+            </p>
+            <button
+              type="button"
+              className="office-btn office-btn--primary"
+              onClick={() => setShowCreateFromHeader(true)}
+            >
+              Crear tu primer agente
+            </button>
+          </div>
+        )}
+
+        {state.status === 'ready' && totalAgentCount > 0 && (
           <>
             {tab === 'tarjetas' && (
               <TarjetasView
@@ -930,6 +960,18 @@ export default function OfficeView() {
               </div>
             )}
           </>
+        )}
+
+        {/* Header-triggered create modal — independent of TarjetasView's own modal */}
+        {showCreateFromHeader && state.status === 'ready' && (
+          <CreateAgentModal
+            departments={state.roster.departments}
+            onClose={() => setShowCreateFromHeader(false)}
+            onCreated={() => {
+              setShowCreateFromHeader(false)
+              void load()
+            }}
+          />
         )}
       </div>
     </div>

@@ -503,8 +503,8 @@ export function mfaStatus(): Promise<MfaStatus> {
   return request<MfaStatus>('/mfa/status').catch(() => ({ enrolled: false, riddle_set: false }))
 }
 
-export function mfaEnroll(totp: string | null = null): Promise<{ otpauth_uri?: string }> {
-  return request<{ otpauth_uri?: string }>('/mfa/enroll', {
+export function mfaEnroll(totp: string | null = null): Promise<{ otpauth_uri?: string; secret?: string }> {
+  return request<{ otpauth_uri?: string; secret?: string }>('/mfa/enroll', {
     method: 'POST',
     body: JSON.stringify({ totp }),
   })
@@ -549,11 +549,11 @@ export function setMfaOnDangers(enabled: boolean, totp: string, riddle_answer: s
 // ── Memory ────────────────────────────────────────────────────────────────────
 
 export function listMemory(): Promise<MemoryItem[]> {
-  return request<MemoryItem[]>('/memory').catch(() => [])
+  return request<MemoryItem[]>('/memory')
 }
 
 export function searchMemory(query: string): Promise<MemoryItem[]> {
-  return request<MemoryItem[]>(`/memory/search?q=${encodeURIComponent(query)}`).catch(() => [])
+  return request<MemoryItem[]>(`/memory/search?q=${encodeURIComponent(query)}`)
 }
 
 // ── Workspace files (re-export for context panel) ─────────────────────────────

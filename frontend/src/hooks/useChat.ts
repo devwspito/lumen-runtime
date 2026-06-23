@@ -209,7 +209,15 @@ export function useChat(): UseChatReturn {
   const stopStream = useCallback(() => {
     streamRef.current?.close()
     streamRef.current = null
-    dispatch({ type: 'STATUS_IDLE' })
+    // Freeze any in-flight assistant message so partial text is preserved and
+    // the spinner does not hang. STATUS_IDLE is included in STREAM_DONE's reducer.
+    const activeId = activeAssistantIdRef.current
+    if (activeId) {
+      dispatch({ type: 'STREAM_DONE', id: activeId })
+      activeAssistantIdRef.current = null
+    } else {
+      dispatch({ type: 'STATUS_IDLE' })
+    }
   }, [])
 
   const startNew = useCallback(() => {

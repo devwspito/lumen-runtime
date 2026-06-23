@@ -230,9 +230,21 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast }: ProviderRow
         api_key: apiKeyInput.trim(),
         kind: provider.kind ?? provider.category,
       })
-      onToast('Proveedor añadido', 'ok')
+      // Activate immediately so the user can chat right away
+      await setActiveProvider(id)
       setShowKeyForm(false)
       setApiKeyInput('')
+      // Test the connection so the user gets clear feedback on key validity
+      try {
+        const r = await testProvider(id)
+        if (r?.ok) {
+          onToast(`${name} añadido, verificado y activado — ya puedes chatear`, 'ok')
+        } else {
+          onToast(`${name} añadido y activado, pero la conexión falló: revisa la API key`, 'warn')
+        }
+      } catch {
+        onToast(`${name} añadido y activado, pero la conexión falló: revisa la API key`, 'warn')
+      }
       onRefresh()
     } catch (e) {
       onToast(e instanceof Error ? e.message : 'Error', 'error')

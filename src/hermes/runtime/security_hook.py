@@ -1147,6 +1147,7 @@ def make_pre_tool_call_hook(
     def _pre_tool_call_hook(
         tool_name: str = "",
         args: dict[str, Any] | None = None,
+        task_id: str = "",
         **kwargs: Any,
     ) -> dict[str, str] | None:
         """Gate every tool call. Returns block directive or None to allow."""
@@ -1160,13 +1161,15 @@ def make_pre_tool_call_hook(
                 )
                 return _block("agent paused — kill-switch active (CTRL-12)")
 
-            # Step 1.5: Per-command policy (Security/Policies UI, P4.B). A command
-            # the owner disabled is denied here — deterministic, the LLM may propose
-            # it but the gate refuses. Default "Equilibrado" = on except high-risk.
-            # Fail-open ONLY on store error (the cage/denylist/MFA gates are the real
-            # security floor and always apply regardless).
+            # Step 1.5: Per-command policy (Security/Policies UI, P4.B). Block ONLY
+            # when the owner has CONSCIOUSLY disabled the tool (explicit override=False
+            # or BLOQUEADO preset). Tools that are merely off-by-default in Equilibrado
+            # (e.g. MOST_DELICATE: delegate_task, install_app …) are NOT blocked here —
+            # they fall to Step 1.6 so the HITL approval card surfaces. Blocking them
+            # here dead-ends the approval flow and makes the model report "no puedo".
+            # Fail-open ONLY on store error (cage/denylist/MFA gates are the real floor).
             try:
-                if tool_name and not _tool_policy.is_enabled(tool_name):
+                if tool_name and _tool_policy.is_owner_disabled(tool_name):
                     logger.info(
                         "hermes.security_hook.pre.policy_disabled tool=%s", tool_name
                     )
@@ -1197,7 +1200,8 @@ def make_pre_tool_call_hook(
                 # sequential paths. FAIL-CLOSED: any error → block (never raise, which
                 # invoke_hook would swallow into ALLOW — red-team finding 2).
                 block_msg = _resolve_native_danger_approval(
-                    tool_name, safe_args, broker, engine_loop
+                    tool_name, safe_args, broker, engine_loop,
+                    conversation_id=task_id,
                 )
                 if block_msg is not None:
                     logger.info(
@@ -1278,7 +1282,8 @@ _NATIVE_DANGER_GATE_TIMEOUT_S: float = 30.0
 
 
 def _resolve_native_danger_approval(
-    tool_name: str, args: dict[str, Any], broker: Any, engine_loop: Any
+    tool_name: str, args: dict[str, Any], broker: Any, engine_loop: Any,
+    conversation_id: str = "",
 ) -> str | None:
     """Per-action owner approval for a cage-escaping NATIVE danger.
 
@@ -1295,7 +1300,7 @@ def _resolve_native_danger_approval(
     import asyncio  # noqa: PLC0415
     import hashlib  # noqa: PLC0415
     import json as _json  # noqa: PLC0415
-    from uuid import UUID, uuid4  # noqa: PLC0415
+    from uuid import UUID, uuid5, NAMESPACE_URL  # noqa: PLC0415
 
     gate = getattr(broker, "_approval_gate", None) if broker is not None else None
     if gate is None or engine_loop is None:
@@ -1326,7 +1331,7 @@ def _resolve_native_danger_approval(
         from hermes.capabilities.domain.ports import ConsentContext, RiskLevel  # noqa: PLC0415
 
         _await(gate.register_pending(
-            proposal_id=uuid4(),
+            proposal_id=uuid5(NAMESPACE_URL, digest),
             work_item_id=UUID(int=0),
             consent_context=ConsentContext(operator_id=None, tenant_id=UUID(int=0)),
             risk=RiskLevel.HIGH,
@@ -1334,9 +1339,14 @@ def _resolve_native_danger_approval(
             parameters_redacted=safe,
             tool_name=tool_name,
             action_digest=digest,
+            conversation_id=conversation_id,
         ))
-        return ("requiere aprobación del dueño con MFA. Apruébala en el panel de "
-                "aprobaciones; al reintentar la misma acción tras aprobar, se ejecutará.")
+        return (
+            "Acción ENCOLADA para el visto bueno del dueño. La tarjeta de aprobación "
+            "ya está pendiente en el panel. Informa al usuario de que queda pendiente "
+            "de su confirmación y que la ejecutarás en cuanto la apruebe. "
+            "No propongas rodeos."
+        )
     except Exception as exc:  # noqa: BLE001 — security gate: never raise (would ALLOW)
         logger.error(
             "hermes.security_hook.native_danger_gate_error tool=%s err=%r — block (fail-closed)",

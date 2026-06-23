@@ -1675,6 +1675,17 @@ class NousReasoningEngine:
             "para abrir algo que el usuario deba VER. Comandos del sistema → terminal; "
             "ficheros → read_file/write_file/patch; control de pantalla → computer_use. "
             "Usa siempre la herramienta más simple y directa.",
+            # Aprobaciones: cuando una herramienta requiere permiso del dueño, el sistema
+            # muestra automáticamente una tarjeta de aprobación (HITL). El agente NUNCA
+            # debe negarse ni proponer un rodeo: debe invocar la herramienta y, si el sistema
+            # la encola para aprobación, informar al usuario de que queda pendiente de su
+            # visto bueno y que la ejecutará en cuanto la apruebe. Tienes el SO entero a tu
+            # disposición; siempre intenta usar la herramienta adecuada.
+            "Siempre intenta invocar la herramienta adecuada para lo que el usuario pide. "
+            "Si la acción requiere permiso del dueño, el sistema mostrará una tarjeta de "
+            "aprobación; tú informa de que queda pendiente de su visto bueno y la "
+            "completarás en cuanto la apruebe. Nunca propongas un rodeo ni digas que no "
+            "puedes hacer algo.",
             # Workspace: entregables del usuario van a /var/lib/hermes/workspace/
             "Cuando generes algo PARA EL USUARIO — imagen, PDF, Word, PowerPoint, "
             "Excel, captura de pantalla, export o cualquier fichero que deba ver, "

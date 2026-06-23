@@ -31,7 +31,7 @@ from pydantic import BaseModel
 
 from hermes.capabilities.infrastructure.sqlite_approval_gate import ApprovalGateError
 from hermes.shell_server.security.mfa import MfaStore, ProtectionLevel
-from hermes.shell_server.security.mfa_tool_tier import MfaFactors
+from hermes.shell_server.security.mfa_tool_tier import MfaFactors, classify_level
 from hermes.tasks.control_plane.domain.ports import AgentUnavailable, AuthenticatedChannel
 
 logger = logging.getLogger("hermes.shell_server.cowork.approvals_api")
@@ -70,7 +70,7 @@ def create_approvals_router(mfa: MfaStore | None = None) -> APIRouter:
         except (AgentUnavailable, Exception):  # noqa: BLE001
             logger.warning("hermes.cowork.approvals.list_unavailable")
             return []
-        return [_to_frontend(r) for r in rows]
+        return [_to_frontend(r, store) for r in rows]
 
     @router.get("/api/v1/mfa/status")
     async def mfa_status() -> dict:
@@ -87,9 +87,9 @@ def create_approvals_router(mfa: MfaStore | None = None) -> APIRouter:
             if not ok:
                 raise HTTPException(status_code=401, detail={"code": reason,
                     "message": "Para rotar el MFA, introduce el código actual."})
-        uri = store.enroll()
+        uri, secret = store.enroll()
         logger.info("hermes.cowork.mfa.enrolled rotated=%s", store.is_enrolled())
-        return {"otpauth_uri": uri}
+        return {"otpauth_uri": uri, "secret": secret}
 
     @router.post("/api/v1/mfa/riddle")
     async def mfa_set_riddle(body: RiddleBody) -> dict:
@@ -129,11 +129,11 @@ def create_approvals_router(mfa: MfaStore | None = None) -> APIRouter:
             logger.info("hermes.cowork.approvals.approved proposal=%s", proposal_id)
             return {"ok": True, "decision": body.decision}
         except ApprovalGateError as exc:
-            logger.warning("hermes.cowork.approvals.mfa_denied proposal=%s err=%s",
-                           proposal_id, exc)
-            raise HTTPException(status_code=401, detail={"code": "mfa_denied",
-                "message": "Verificación MFA fallida: código o respuesta del acertijo "
-                "incorrectos, o falta un factor para esta acción."}) from exc
+            reason = getattr(exc, "reason", "mfa_denied")
+            logger.warning("hermes.cowork.approvals.mfa_denied proposal=%s reason=%s err=%s",
+                           proposal_id, reason, exc)
+            raise HTTPException(status_code=401, detail={"code": reason,
+                "message": _mfa_reason_message(reason)}) from exc
         except AgentUnavailable as exc:
             raise _unavailable(proposal_id, exc) from exc
 
@@ -143,6 +143,24 @@ def create_approvals_router(mfa: MfaStore | None = None) -> APIRouter:
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
+
+_MFA_REASON_MESSAGES: dict[str, str] = {
+    "mfa_not_enrolled": "No hay MFA configurado. Configúralo antes de aprobar acciones.",
+    "invalid_totp": "Código TOTP incorrecto o expirado.",
+    "humanity_required": "Esta acción requiere prueba de humanidad (math challenge).",
+    "riddle_not_enrolled": "Esta acción requiere un acertijo personalizado. Configúralo en Seguridad.",
+    "invalid_riddle": "Respuesta del acertijo incorrecta.",
+    "mfa_required": "Se requiere MFA para aprobar esta acción.",
+}
+
+
+def _mfa_reason_message(reason: str) -> str:
+    return _MFA_REASON_MESSAGES.get(
+        reason,
+        "Verificación MFA fallida: código o respuesta del acertijo incorrectos, "
+        "o falta un factor para esta acción.",
+    )
+
 
 def _unavailable(proposal_id: str, exc: Exception) -> HTTPException:
     logger.warning("hermes.cowork.approvals.resolve_unavailable proposal=%s err=%s",
@@ -159,13 +177,22 @@ def _parse_proposal_id(raw: str) -> UUID:
             "message": f"Not a valid UUID: {raw!r}"}) from exc
 
 
-def _to_frontend(row: dict) -> dict:
+def _to_frontend(row: dict, store: MfaStore) -> dict:
+    tool_name = row.get("tool_name", "")
+    risk = row.get("risk", "")
+    mfa_state = store.state()
     return {
         "proposal_id": row.get("proposal_id", ""),
-        "kind": row.get("risk", ""),
+        "kind": risk,
         "summary": row.get("justification", ""),
-        "target": row.get("tool_name", ""),
+        "target": tool_name,
         # Show WHAT is being approved (redacted), not just the tool name (red-team
         # finding 5 transparency: the owner approves a specific action).
         "parameters": row.get("parameters_redacted", {}),
+        # C — chat anchor: task_id from the hook (None for pre-migration rows).
+        "conversation_id": row.get("conversation_id") or None,
+        # D — tier + enrollment state so the card can ask only what's required.
+        "required_level": classify_level(risk, tool_name).value,
+        "mfa_enrolled": mfa_state.enrolled,
+        "riddle_set": mfa_state.riddle_question is not None,
     }

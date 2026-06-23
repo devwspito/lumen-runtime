@@ -108,3 +108,21 @@ def ensure_capabilities_schema(conn: sqlite3.Connection) -> None:
         )
     except sqlite3.OperationalError:
         pass
+    # Índice UNIQUE parcial: garantiza que solo puede existir UNA fila 'pending' por
+    # action_digest. Segunda red de seguridad para deduplicar tarjetas de aprobación:
+    # aunque proposal_id sea determinista (uuid5), una DB antigua con filas ya pendientes
+    # queda también protegida. WHERE status='pending' limita la unicidad a pendientes.
+    try:
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS pending_approvals_digest_pending_uidx "
+            "ON pending_approvals(action_digest) WHERE status='pending'"
+        )
+    except sqlite3.OperationalError:
+        pass
+    # Migración conversation_id (C — anclar tarjeta al hilo del chat, 2026-06-23).
+    # task_id del hook hermes-agent se almacena aquí para que el FE pueda anclar
+    # la tarjeta de aprobación al hilo de conversación correcto.
+    try:
+        conn.execute("ALTER TABLE pending_approvals ADD COLUMN conversation_id TEXT")
+    except sqlite3.OperationalError:
+        pass

@@ -7,14 +7,11 @@
  *   (c) Security center — egress permissions, audit chain, recent scans, policy JSON.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { QRCodeSVG } from 'qrcode.react'
+import { useCallback, useEffect, useState } from 'react'
 import { sileo } from 'sileo'
 import {
   listPendingApprovals,
-  resolveApproval,
   mfaStatus,
-  mfaEnroll,
   mfaSetRiddle,
   getPolicies,
   setPolicyPreset,
@@ -35,169 +32,8 @@ import type {
   SecurityScan,
   AuditHead,
 } from '../api/types'
-
-// ── Approval cards ────────────────────────────────────────────────────────────
-
-interface ApprovalCardProps {
-  approval: PendingApproval
-  onResolved(): void
-}
-
-function ApprovalCard({ approval, onResolved }: ApprovalCardProps) {
-  const [showMfa, setShowMfa] = useState(false)
-  const [totp, setTotp] = useState('')
-  const [riddle, setRiddle] = useState('')
-  const [humanity, setHumanity] = useState(false)
-  const [busy, setBusy] = useState(false)
-  const [mfaError, setMfaError] = useState('')
-  const totpRef = useRef<HTMLInputElement>(null)
-
-  const params = approval.parameters
-  const paramEntries = params && typeof params === 'object' && !Array.isArray(params)
-    ? Object.entries(params).slice(0, 8)
-    : []
-
-  async function handleDeny() {
-    setBusy(true)
-    try {
-      await resolveApproval(approval.proposal_id, 'deny')
-      sileo.success({ title: 'Denegado' })
-      onResolved()
-    } catch (err) {
-      sileo.error({ title: `No se pudo denegar: ${err instanceof Error ? err.message : err}` })
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  function openMfa() {
-    setShowMfa(true)
-    setTimeout(() => totpRef.current?.focus(), 50)
-  }
-
-  async function handleApprove(e: React.FormEvent) {
-    e.preventDefault()
-    setBusy(true)
-    setMfaError('')
-    try {
-      await resolveApproval(approval.proposal_id, 'once', {
-        totp: totp.trim() || null,
-        riddle_answer: riddle.trim() || null,
-        humanity: humanity ? 'confirmado' : null,
-      })
-      sileo.success({ title: 'Aprobado' })
-      onResolved()
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      setMfaError(msg)
-      sileo.error({ title: `No se pudo aprobar: ${msg}` })
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  return (
-    <div
-      className="seg-approval-card"
-      role="alertdialog"
-      aria-label={`Aprobación requerida: ${approval.summary}`}
-    >
-      <div className="seg-approval-card__body">
-        <p className="seg-approval-card__question">{approval.summary}</p>
-        {approval.target && (
-          <p className="seg-approval-card__target">{approval.target}</p>
-        )}
-        {paramEntries.length > 0 && (
-          <dl className="seg-approval-card__params">
-            {paramEntries.map(([k, v]) => (
-              <div key={k} className="seg-approval-card__param-row">
-                <dt>{k}</dt>
-                <dd>{typeof v === 'object' ? JSON.stringify(v) : String(v)}</dd>
-              </div>
-            ))}
-          </dl>
-        )}
-      </div>
-
-      <div className="seg-approval-card__actions" role="group" aria-label="Acciones de aprobación">
-        <button
-          className="cv-btn cv-btn--primary cv-btn--sm"
-          onClick={openMfa}
-          disabled={busy}
-          type="button"
-          aria-label="Permitir esta acción (requiere tu MFA)"
-        >
-          Permitir…
-        </button>
-        <button
-          className="cv-btn cv-btn--ghost cv-btn--sm"
-          onClick={handleDeny}
-          disabled={busy}
-          type="button"
-          aria-label="Denegar esta acción"
-        >
-          Denegar
-        </button>
-      </div>
-
-      {showMfa && (
-        <form
-          className="seg-approval-card__mfa"
-          onSubmit={handleApprove}
-          aria-label="Verificación del dueño"
-        >
-          <input
-            ref={totpRef}
-            className="cv-input"
-            inputMode="numeric"
-            autoComplete="one-time-code"
-            maxLength={8}
-            placeholder="Código MFA (6 dígitos)"
-            aria-label="Código MFA"
-            value={totp}
-            onChange={e => setTotp(e.target.value)}
-          />
-          <input
-            className="cv-input"
-            type="text"
-            placeholder="Respuesta del acertijo (si se pide)"
-            aria-label="Respuesta del acertijo"
-            value={riddle}
-            onChange={e => setRiddle(e.target.value)}
-          />
-          <label className="seg-approval-card__humanity">
-            <input
-              type="checkbox"
-              checked={humanity}
-              onChange={e => setHumanity(e.target.checked)}
-            />
-            Confirmo que soy yo
-          </label>
-          {mfaError && (
-            <p className="seg-approval-card__mfa-error" role="alert">{mfaError}</p>
-          )}
-          <div className="seg-approval-card__mfa-actions">
-            <button
-              type="submit"
-              className="cv-btn cv-btn--primary cv-btn--sm"
-              disabled={busy}
-            >
-              Confirmar
-            </button>
-            <button
-              type="button"
-              className="cv-btn cv-btn--ghost cv-btn--sm"
-              onClick={() => setShowMfa(false)}
-              disabled={busy}
-            >
-              Cancelar
-            </button>
-          </div>
-        </form>
-      )}
-    </div>
-  )
-}
+import ApprovalCard from '../components/ApprovalCard'
+import MfaEnroll from '../components/MfaEnroll'
 
 // ── Approvals section ─────────────────────────────────────────────────────────
 
@@ -253,7 +89,6 @@ function GovernanceSection() {
   const [mfa, setMfa] = useState<MfaStatus | null>(null)
   const [pol, setPol] = useState<PoliciesResponse | null>(null)
   const [loading, setLoading] = useState(true)
-  const [mfaUri, setMfaUri] = useState('')
   const [riddleQ, setRiddleQ] = useState('')
   const [riddleA, setRiddleA] = useState('')
   const [riddleTotp, setRiddleTotp] = useState('')
@@ -268,17 +103,6 @@ function GovernanceSection() {
   }, [])
 
   useEffect(() => { load() }, [load])
-
-  async function handleEnroll() {
-    try {
-      const r = await mfaEnroll(null)
-      setMfaUri(r.otpauth_uri ?? '')
-      sileo.success({ title: 'MFA activado — escanea el código' })
-      await load()
-    } catch (err) {
-      sileo.error({ title: `No se pudo activar MFA: ${err instanceof Error ? err.message : err}` })
-    }
-  }
 
   async function handleRiddleSave() {
     if (!riddleQ.trim() || !riddleA.trim() || !riddleTotp.trim()) {
@@ -336,8 +160,6 @@ function GovernanceSection() {
   if (!mfa || !pol) return null
 
   const toolNames = Object.keys(pol.tools ?? {}).sort()
-  // The bare base32 secret (for manual entry when the QR can't be scanned).
-  const mfaSecret = mfaUri ? (mfaUri.match(/[?&]secret=([^&]+)/)?.[1] ?? '') : ''
 
   return (
     <>
@@ -354,41 +176,7 @@ function GovernanceSection() {
               : ' Falta tu acertijo (necesario para lo más delicado).')}
           </p>
 
-          {!mfa.enrolled && (
-            <>
-              {!mfaUri && (
-                <button
-                  className="cv-btn cv-btn--primary"
-                  onClick={handleEnroll}
-                  type="button"
-                >
-                  Activar MFA
-                </button>
-              )}
-              {mfaUri && (
-                <div className="seg-mfa-enroll">
-                  <p className="seg-mfa-enroll__step">
-                    <strong>1.</strong> Escanea este código con tu app de autenticación
-                    (Google Authenticator, Authy, Aegis…):
-                  </p>
-                  <div className="seg-mfa-enroll__qr">
-                    <QRCodeSVG value={mfaUri} size={188} level="M" marginSize={2} />
-                  </div>
-                  {mfaSecret && (
-                    <p className="seg-mfa-enroll__manual">
-                      ¿No puedes escanear? Introduce esta clave a mano:
-                      <br />
-                      <code className="seg-mfa-enroll__secret">{mfaSecret}</code>
-                    </p>
-                  )}
-                  <p className="seg-mfa-enroll__step">
-                    <strong>2.</strong> La app mostrará un código de 6 dígitos que cambia
-                    cada 30 s — eso es lo que pedirá Lumen al aprobar acciones. Ya está.
-                  </p>
-                </div>
-              )}
-            </>
-          )}
+          {!mfa.enrolled && <MfaEnroll onEnrolled={load} />}
 
           {mfa.enrolled && (
             <details className="seg-details">

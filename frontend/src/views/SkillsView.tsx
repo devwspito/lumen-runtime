@@ -84,6 +84,7 @@ export default function SkillsView() {
   const [hubResults, setHubResults] = useState<HubSkillResult[]>([])
   const [hubQuery, setHubQuery] = useState('')
   const [hubSearching, setHubSearching] = useState(false)
+  const hubInputRef = useRef<HTMLInputElement>(null)
   const [teachPhase, setTeachPhase] = useState<TeachPhase>('idle')
   const teachSessionRef = useRef<string | null>(null)
   const teachNameRef = useRef<HTMLInputElement>(null)
@@ -125,9 +126,21 @@ export default function SkillsView() {
 
   // ── Hub search ────────────────────────────────────────────────────────────
 
+  const HUB_SUGGESTIONS = ['web search', 'email', 'calendar', 'github', 'spreadsheet']
+
   async function runSearch() {
     const q = hubQuery.trim()
     if (!q) return
+    setHubSearching(true)
+    try {
+      const results = await searchSkillsHub(q)
+      const arr = Array.isArray(results) ? results : ((results as { results?: HubSkillResult[] })?.results ?? [])
+      setHubResults(arr)
+    } finally { setHubSearching(false) }
+  }
+
+  async function runSearchFor(q: string) {
+    setHubQuery(q)
     setHubSearching(true)
     try {
       const results = await searchSkillsHub(q)
@@ -254,66 +267,66 @@ export default function SkillsView() {
       </header>
 
       <div className="view-body cv-view-body">
-        {/* ── Teach a skill ─────────────────────────────────────────────── */}
-        <section className="cv-section" aria-label="Enseñar una skill">
-          <h2 className="cv-section-label">Enseñar una skill</h2>
-          <div className="cv-teach-card">
-            <p className="cv-teach-intro">
-              Enséñale a Lumen a operar en el navegador grabando una demostración. Aprende a usar plataformas y a operar por ti.
-            </p>
-            <p className="cv-hint" style={{ marginBottom: 8 }}>
-              La demostración ocurre en un navegador aislado dentro de Lumen. No interrumpe otras tareas.
-            </p>
+        {/* ── Hub search (first — easiest path to value) ────────────────── */}
+        <section className="cv-section" aria-label="Hub de habilidades">
+          <h2 className="cv-section-label">Hub de habilidades</h2>
 
-            {teachPhase === 'idle' && (
-              <button className="cv-btn cv-btn--primary cv-btn--sm" onClick={() => setTeachPhase('form')}>
-                + Enseñar skill
-              </button>
-            )}
-
-            {teachPhase === 'form' && (
-              <div className="cv-form-stack">
-                <label className="sr-only" htmlFor="teach-name">Nombre de la skill</label>
-                <input
-                  id="teach-name"
-                  ref={teachNameRef}
-                  className="cv-input"
-                  type="text"
-                  placeholder='Nombre de la skill (p. ej. "Publicar en LinkedIn")'
-                  autoComplete="off"
-                />
-                <label className="sr-only" htmlFor="teach-desc">Descripción de la skill</label>
-                <textarea
-                  id="teach-desc"
-                  ref={teachDescRef}
-                  className="cv-textarea"
-                  rows={4}
-                  placeholder="Describe qué hace y los pasos — el agente aprende la skill de aquí"
-                />
-                <div className="cv-form-actions">
-                  <button className="cv-btn cv-btn--primary cv-btn--sm" onClick={handleTeachStart}>Empezar</button>
-                  <button className="cv-btn cv-btn--ghost cv-btn--sm" onClick={handleTeachCancel}>Cancelar</button>
-                </div>
-              </div>
-            )}
-
-            {teachPhase === 'recording' && (
-              <div className="cv-form-stack">
-                <p className="teach-recording-label" role="status">
-                  ● Grabando la demostración. Cuando termines, pulsa "Crear skill" y el agente la sintetiza.
-                </p>
-                <button className="cv-btn cv-btn--secondary cv-btn--sm" onClick={handleTeachStop}>
-                  Crear skill
+          {/* Suggestion chips — visible before any search so the hub is useful immediately */}
+          {!hubSearching && hubResults.length === 0 && (
+            <div
+              style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--sp-2)', marginBottom: 'var(--sp-3)' }}
+              aria-label="Búsquedas sugeridas"
+            >
+              {HUB_SUGGESTIONS.map((chip) => (
+                <button
+                  key={chip}
+                  type="button"
+                  className="suggestion-pill"
+                  onClick={() => runSearchFor(chip)}
+                >
+                  {chip}
                 </button>
-              </div>
-            )}
+              ))}
+            </div>
+          )}
 
-            {teachPhase === 'synth' && (
-              <p className="state-label" aria-live="polite" aria-busy="true">
-                Creando la skill con IA…
-              </p>
-            )}
+          <div className="cv-search-row">
+            <label className="sr-only" htmlFor="hub-search">Buscar en el hub de skills</label>
+            <input
+              id="hub-search"
+              ref={hubInputRef}
+              className="cv-input"
+              type="search"
+              placeholder="Buscar skills…"
+              autoComplete="off"
+              value={hubQuery}
+              onChange={e => setHubQuery(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') runSearch() }}
+            />
+            <button
+              className="cv-btn cv-btn--secondary cv-btn--sm"
+              onClick={runSearch}
+              disabled={hubSearching}
+            >
+              {hubSearching ? 'Buscando…' : 'Buscar'}
+            </button>
           </div>
+          {!hubSearching && hubQuery && hubResults.length === 0 && (
+            <p className="cv-empty">Sin resultados para "{hubQuery}"</p>
+          )}
+          {hubResults.length > 0 && (
+            <ul className="cv-list" role="list">
+              {hubResults.map((item, i) => (
+                <li key={item.identifier ?? item.slug ?? item.name ?? i}>
+                  <HubResultRow
+                    item={item}
+                    installedNames={installedHubNames}
+                    onInstall={handleInstall}
+                  />
+                </li>
+              ))}
+            </ul>
+          )}
         </section>
 
         {/* ── Installed skills ──────────────────────────────────────────── */}
@@ -328,7 +341,21 @@ export default function SkillsView() {
           )}
           {state.status === 'success' && (
             state.skills.length === 0
-              ? <p className="cv-empty">Sin skills instaladas. Busca en el hub.</p>
+              ? (
+                <div className="cv-empty" style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 'var(--sp-3)' }}>
+                  <span>Sin skills instaladas.</span>
+                  <button
+                    type="button"
+                    className="cv-btn cv-btn--secondary cv-btn--sm"
+                    onClick={() => {
+                      hubInputRef.current?.focus()
+                      hubInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+                    }}
+                  >
+                    Buscar en el hub
+                  </button>
+                </div>
+              )
               : (
                 <ul className="cv-list" role="list">
                   {state.skills.map((s, i) => (
@@ -363,45 +390,85 @@ export default function SkillsView() {
           )}
         </section>
 
-        {/* ── Hub search ────────────────────────────────────────────────── */}
-        <section className="cv-section" aria-label="Hub de habilidades">
-          <h2 className="cv-section-label">Hub de habilidades</h2>
-          <div className="cv-search-row">
-            <label className="sr-only" htmlFor="hub-search">Buscar en el hub de skills</label>
-            <input
-              id="hub-search"
-              className="cv-input"
-              type="search"
-              placeholder="Buscar skills…"
-              autoComplete="off"
-              value={hubQuery}
-              onChange={e => setHubQuery(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') runSearch() }}
-            />
-            <button
-              className="cv-btn cv-btn--secondary cv-btn--sm"
-              onClick={runSearch}
-              disabled={hubSearching}
+        {/* ── Teach a skill (advanced — collapsable at the bottom) ──────── */}
+        <section className="cv-section" aria-label="Enseñar una skill">
+          <details>
+            <summary
+              style={{
+                cursor: 'pointer',
+                fontSize: 'var(--text-label)',
+                fontWeight: 600,
+                color: 'var(--ink2)',
+                listStyle: 'none',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 'var(--sp-2)',
+                userSelect: 'none',
+                paddingBottom: 'var(--sp-2)',
+              }}
             >
-              {hubSearching ? 'Buscando…' : 'Buscar'}
-            </button>
-          </div>
-          {!hubSearching && hubQuery && hubResults.length === 0 && (
-            <p className="cv-empty">Sin resultados para "{hubQuery}"</p>
-          )}
-          {hubResults.length > 0 && (
-            <ul className="cv-list" role="list">
-              {hubResults.map((item, i) => (
-                <li key={item.identifier ?? item.slug ?? item.name ?? i}>
-                  <HubResultRow
-                    item={item}
-                    installedNames={installedHubNames}
-                    onInstall={handleInstall}
+              <span aria-hidden="true" style={{ fontSize: 10 }}>▶</span>
+              Enseñar una skill (avanzado)
+            </summary>
+
+            <div className="cv-teach-card" style={{ marginTop: 'var(--sp-3)' }}>
+              <p className="cv-teach-intro">
+                Enséñale a Lumen a operar en el navegador grabando una demostración. Aprende a usar plataformas y a operar por ti.
+              </p>
+              <p className="cv-hint" style={{ marginBottom: 8 }}>
+                La demostración ocurre en un navegador aislado dentro de Lumen. No interrumpe otras tareas.
+              </p>
+
+              {teachPhase === 'idle' && (
+                <button className="cv-btn cv-btn--primary cv-btn--sm" onClick={() => setTeachPhase('form')}>
+                  + Enseñar skill
+                </button>
+              )}
+
+              {teachPhase === 'form' && (
+                <div className="cv-form-stack">
+                  <label className="sr-only" htmlFor="teach-name">Nombre de la skill</label>
+                  <input
+                    id="teach-name"
+                    ref={teachNameRef}
+                    className="cv-input"
+                    type="text"
+                    placeholder='Nombre de la skill (p. ej. "Publicar en LinkedIn")'
+                    autoComplete="off"
                   />
-                </li>
-              ))}
-            </ul>
-          )}
+                  <label className="sr-only" htmlFor="teach-desc">Descripción de la skill</label>
+                  <textarea
+                    id="teach-desc"
+                    ref={teachDescRef}
+                    className="cv-textarea"
+                    rows={4}
+                    placeholder="Describe qué hace y los pasos — el agente aprende la skill de aquí"
+                  />
+                  <div className="cv-form-actions">
+                    <button className="cv-btn cv-btn--primary cv-btn--sm" onClick={handleTeachStart}>Empezar</button>
+                    <button className="cv-btn cv-btn--ghost cv-btn--sm" onClick={handleTeachCancel}>Cancelar</button>
+                  </div>
+                </div>
+              )}
+
+              {teachPhase === 'recording' && (
+                <div className="cv-form-stack">
+                  <p className="teach-recording-label" role="status">
+                    ● Grabando la demostración. Cuando termines, pulsa "Crear skill" y el agente la sintetiza.
+                  </p>
+                  <button className="cv-btn cv-btn--secondary cv-btn--sm" onClick={handleTeachStop}>
+                    Crear skill
+                  </button>
+                </div>
+              )}
+
+              {teachPhase === 'synth' && (
+                <p className="state-label" aria-live="polite" aria-busy="true">
+                  Creando la skill con IA…
+                </p>
+              )}
+            </div>
+          </details>
         </section>
       </div>
     </>
