@@ -171,6 +171,7 @@ interface CategoryGroupProps {
   busy: boolean
   onToggleTool: (name: string, enabled: boolean) => Promise<void>
   onToggleAll: (category: string, enabled: boolean, entries: PolicyCatalogEntry[]) => Promise<void>
+  mode?: 'simple' | 'advanced'
 }
 
 function CategoryGroup({
@@ -181,8 +182,10 @@ function CategoryGroup({
   busy,
   onToggleTool,
   onToggleAll,
+  mode = 'advanced',
 }: CategoryGroupProps) {
   const [expanded, setExpanded] = useState(false)
+  const isSimple = mode === 'simple'
 
   const allOn = entries.every(e => e.enabled)
   const allOff = entries.every(e => !e.enabled)
@@ -194,16 +197,20 @@ function CategoryGroup({
   return (
     <div className="seg-pol-group">
       <div className="seg-pol-group__header">
-        <button
-          type="button"
-          className="seg-pol-group__expand"
-          aria-expanded={expanded}
-          aria-controls={bodyId}
-          onClick={() => setExpanded(v => !v)}
-          title={expanded ? 'Contraer' : 'Expandir herramientas'}
-        >
-          <span className={`seg-pol-chevron ${expanded ? 'seg-pol-chevron--open' : ''}`} aria-hidden="true">▸</span>
-        </button>
+        {isSimple ? (
+          <span className="seg-pol-group__expand" aria-hidden="true" />
+        ) : (
+          <button
+            type="button"
+            className="seg-pol-group__expand"
+            aria-expanded={expanded}
+            aria-controls={bodyId}
+            onClick={() => setExpanded(v => !v)}
+            title={expanded ? 'Contraer' : 'Expandir herramientas'}
+          >
+            <span className={`seg-pol-chevron ${expanded ? 'seg-pol-chevron--open' : ''}`} aria-hidden="true">▸</span>
+          </button>
+        )}
 
         <span className="seg-pol-group__name">{categoryLabel(category)}</span>
         <span className="seg-pol-group__count" aria-label={`${entries.length} herramientas`}>{entries.length}</span>
@@ -225,7 +232,7 @@ function CategoryGroup({
         />
       </div>
 
-      {expanded && (
+      {!isSimple && expanded && (
         <ul
           id={bodyId}
           className="seg-pol-tool-list"
@@ -635,7 +642,7 @@ function GovernanceSection() {
             </div>
           </div>
 
-          {/* Catalog-based grouped view */}
+          {/* Vista simple por defecto: capacidades por grupo (master-toggle, sin comandos) */}
           {hasCatalog && capabilityGroups.size > 0 && (
             <div>
               <div className="seg-pol-sub-label">Capacidades del agente</div>
@@ -643,6 +650,7 @@ function GovernanceSection() {
                 {[...capabilityGroups.entries()].map(([cat, entries]) => (
                   <CategoryGroup
                     key={cat}
+                    mode="simple"
                     category={cat}
                     entries={entries}
                     polTotp={polTotp}
@@ -656,28 +664,53 @@ function GovernanceSection() {
             </div>
           )}
 
-          {/* System defenses — separated from agent capabilities */}
-          {hasCatalog && defenseGroups.size > 0 && (
-            <div>
-              <div className="seg-pol-sub-label">Defensas del sistema</div>
-              <p className="seg-card__intro" style={{ marginTop: 0, marginBottom: 8 }}>
-                Estas herramientas protegen el sistema. No son capacidades del LLM — el agente no las invoca directamente.
-              </p>
-              <div className="seg-pol-catalog">
-                {[...defenseGroups.entries()].map(([cat, entries]) => (
-                  <CategoryGroup
-                    key={cat}
-                    category={cat}
-                    entries={entries}
-                    polTotp={polTotp}
-                    polRiddle={polRiddle}
-                    busy={busy}
-                    onToggleTool={handleToolToggle}
-                    onToggleAll={handleToggleAll}
-                  />
-                ))}
+          {/* Configuración avanzada: comandos uno a uno + defensas del sistema */}
+          {hasCatalog && (capabilityGroups.size > 0 || defenseGroups.size > 0) && (
+            <details className="seg-details seg-pol-advanced" style={{ marginTop: 12 }}>
+              <summary>⚙ Configuración avanzada — activar o desactivar comandos uno a uno</summary>
+              <div className="seg-details__body">
+                {capabilityGroups.size > 0 && (
+                  <div className="seg-pol-catalog">
+                    {[...capabilityGroups.entries()].map(([cat, entries]) => (
+                      <CategoryGroup
+                        key={cat}
+                        mode="advanced"
+                        category={cat}
+                        entries={entries}
+                        polTotp={polTotp}
+                        polRiddle={polRiddle}
+                        busy={busy}
+                        onToggleTool={handleToolToggle}
+                        onToggleAll={handleToggleAll}
+                      />
+                    ))}
+                  </div>
+                )}
+                {defenseGroups.size > 0 && (
+                  <div style={{ marginTop: 12 }}>
+                    <div className="seg-pol-sub-label">Defensas del sistema</div>
+                    <p className="seg-card__intro" style={{ marginTop: 0, marginBottom: 8 }}>
+                      Estas herramientas protegen el sistema. No son capacidades del agente — no las invoca directamente.
+                    </p>
+                    <div className="seg-pol-catalog">
+                      {[...defenseGroups.entries()].map(([cat, entries]) => (
+                        <CategoryGroup
+                          key={cat}
+                          mode="advanced"
+                          category={cat}
+                          entries={entries}
+                          polTotp={polTotp}
+                          polRiddle={polRiddle}
+                          busy={busy}
+                          onToggleTool={handleToolToggle}
+                          onToggleAll={handleToggleAll}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
-            </div>
+            </details>
           )}
 
           {/* Legacy flat list — shown only when catalog is absent */}
