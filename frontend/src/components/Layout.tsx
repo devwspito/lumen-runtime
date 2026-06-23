@@ -4,6 +4,13 @@ import { listConversations } from '../api/client'
 import { useChat } from '../hooks/useChat'
 import type { ConversationSummary } from '../api/types'
 
+// Layout now receives the provider-check state from the gate in App.tsx
+// so it can show the "Falta conectar un modelo" badge without a second fetch.
+export interface LayoutProps {
+  hasActiveProvider: boolean
+  activeProviderReload(): void
+}
+
 
 interface NavItem {
   to: string
@@ -268,8 +275,11 @@ function RecentsSection({ activeConvId, loadConversation }: RecentsSectionProps)
   )
 }
 
-export default function Layout() {
+export default function Layout({ hasActiveProvider, activeProviderReload }: LayoutProps) {
   const navigate = useNavigate()
+  // Silence the unused-var lint for activeProviderReload until a future
+  // feature (auto-reconnect after provider change) uses it.
+  void activeProviderReload
 
   // Chat state lives here, above both the sidebar nav (RecentsSection) and
   // the main content area (ChatView). ChatView receives it via outlet context.
@@ -340,6 +350,19 @@ export default function Layout() {
             </ul>
           </div>
         </div>
+
+        {/* "Connect a model" nudge badge — visible only when no provider is active */}
+        {!hasActiveProvider && (
+          <NavLink
+            to="/bienvenida"
+            className="sidebar-setup-badge"
+            aria-label="Conecta un modelo para usar el chat"
+          >
+            <span className="sidebar-setup-badge__dot" aria-hidden="true" />
+            <span className="sidebar-setup-badge__text">Falta conectar un modelo</span>
+            <span className="sidebar-setup-badge__arrow" aria-hidden="true">→</span>
+          </NavLink>
+        )}
 
         {/* User chip */}
         <div className="sidebar-user">
