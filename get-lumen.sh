@@ -21,17 +21,25 @@ OS="$(uname -s 2>/dev/null || echo unknown)"
 # macOS: la jaula (Landlock/netns) corre dentro de una podman machine, que DEBE
 # ser rootful. En Linux nativo no hay machine (podman corre directo) → se omite.
 if [ "$RTN" = podman ] && [ "$OS" = Darwin ]; then
-  rf="$(podman machine inspect --format '{{.Rootful}}' 2>/dev/null || echo nomachine)"
-  if [ "$rf" = nomachine ]; then
-    echo "✗ No hay una podman machine. Crea una (rootful):"
-    echo "    podman machine init --rootful --cpus 4 --memory 8192 --disk-size 60"
-    echo "    podman machine start"
-    exit 1
-  elif [ "$rf" = false ]; then
-    echo "✗ La podman machine es rootless; la jaula necesita rootful:"
-    echo "    podman machine stop && podman machine set --rootful && podman machine start"
+  # Detectar la machine POR NOMBRE: `podman machine inspect` SIN nombre asume
+  # 'podman-machine-default' y falla con "VM does not exist" si la tuya se llama
+  # distinto → falso "no hay machine". `list -q` da el nombre real.
+  name="$(podman machine list -q 2>/dev/null | head -1)"
+  if [ -z "$name" ]; then
+    echo "▸ No hay podman machine — creando una rootful (solo la 1ª vez, tarda un poco)…"
+    podman machine init --rootful --cpus 4 --memory 8192 --disk-size 60 \
+      && podman machine start \
+      || { echo "✗ No se pudo crear/arrancar la podman machine."; exit 1; }
+    name="$(podman machine list -q 2>/dev/null | head -1)"
+  fi
+  rootful="$(podman machine inspect "$name" --format '{{.Rootful}}' 2>/dev/null | head -1)"
+  if [ "$rootful" != "true" ]; then
+    echo "✗ La podman machine '$name' es rootless; la jaula necesita rootful. Conviértela:"
+    echo "    podman machine stop '$name' && podman machine set --rootful '$name' && podman machine start '$name'"
     exit 1
   fi
+  # Asegurar que está arrancada (si estaba parada, levantarla).
+  podman info >/dev/null 2>&1 || podman machine start "$name" >/dev/null 2>&1 || true
 fi
 
 # Perfil seccomp (necesario para la jaula). Se descarga bajo $HOME, no /tmp:
