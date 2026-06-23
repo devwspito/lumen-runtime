@@ -15,6 +15,7 @@ Se siembran UNA vez (flag en agent_settings) para respetar los borrados del due�
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 
 from hermes.agents.domain.agent import Agent, AutonomyLevel
@@ -373,3 +374,44 @@ def default_roster() -> list[Agent]:
              "Sé escéptico: por defecto asume riesgo si algo no está claro."),
         ),
     ]
+
+
+# ── Matcher: goal/rol de una delegación → agente del roster ─────────────────────
+# Permite que cuando el Cerebro delega (delegate_task), el Office muestre EN VIVO al
+# especialista concreto "trabajando" (no un sub-agente genérico). Best-effort por
+# solapamiento de términos del nombre/rol/departamento; None si no hay encaje claro.
+
+_SPECIALIST_INDEX: list[tuple[str, frozenset[str]]] | None = None
+
+
+def _stems(text: str) -> set[str]:
+    """Tokeniza a stems de 5 letras (≥4-char words) para tolerar variantes morfológicas
+    ('facturas'↔'facturación', 'investiga'↔'investigador', 'traduce'↔'traductor')."""
+    return {w[:5] for w in re.findall(r"[a-záéíóúñ]{4,}", text.lower())}
+
+
+def _specialist_index() -> list[tuple[str, frozenset[str]]]:
+    global _SPECIALIST_INDEX
+    if _SPECIALIST_INDEX is None:
+        idx: list[tuple[str, frozenset[str]]] = []
+        for a in default_roster():
+            label = DEPARTMENTS.get(a.department or "", ("", ""))[0]
+            terms = _stems(" ".join([a.name, a.role, label, a.department or ""]))
+            idx.append((a.agent_id, frozenset(terms)))
+        _SPECIALIST_INDEX = idx
+    return _SPECIALIST_INDEX
+
+
+def match_specialist(text: str) -> str | None:
+    """Mapea un texto (goal/rol de una delegación) al agent_id del especialista que mejor
+    encaja del roster. None si no hay solapamiento (≥1 stem)."""
+    goal = _stems(text)
+    if not goal:
+        return None
+    best_id: str | None = None
+    best_score = 0
+    for agent_id, terms in _specialist_index():
+        score = len(goal & terms)
+        if score > best_score:
+            best_id, best_score = agent_id, score
+    return best_id if best_score >= 1 else None

@@ -469,7 +469,22 @@ def _build_tool_call_emitter(
         # Record real in-flight tool BEFORE emitting the frame so the registry
         # is always up-to-date by the time the frame reaches the client.
         if live_agent_id:
-            live_activity.record(_task_id_str, live_agent_id, function_name)
+            activity_agent = live_agent_id
+            activity_tool = function_name
+            # Delegación: atribuir la actividad EN VIVO al especialista del roster que
+            # mejor encaja, para que el Office muestre a ESE muñeco "trabajando"
+            # (conectado) durante la sub-tarea, no al Cerebro.
+            if function_name == "delegate_task":
+                from hermes.agents.domain.default_roster import match_specialist  # noqa: PLC0415
+                spec_text = " ".join(
+                    str(function_args.get(k, ""))
+                    for k in ("role", "goal", "context", "task", "instruction")
+                )
+                spec_id = match_specialist(spec_text)
+                if spec_id:
+                    activity_agent = spec_id
+                    activity_tool = "trabajando"
+            live_activity.record(_task_id_str, activity_agent, activity_tool)
         chunk = TaskStreamChunk(kind=StreamChunkKind.TOOL_CALL, tool_call=descriptor)
         try:
             fut = asyncio.run_coroutine_threadsafe(
