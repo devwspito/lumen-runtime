@@ -56,6 +56,12 @@ def classify_mcp_tool(
     if forced_high:
         return McpToolClassification(risk=RiskLevel.HIGH, auto_executable=False)
 
+    # BUILTIN = MCP de fábrica horneado y vetado por nosotros (local, sin egress): sus
+    # operaciones reversibles fluyen sin HITL (LOW + auto). Lo marcado destructivo
+    # (destructive_hint) ya forzó HIGH arriba; los del usuario (USER_ADDED) también.
+    if trust_level is TrustLevel.BUILTIN:
+        return McpToolClassification(risk=RiskLevel.LOW, auto_executable=True)
+
     if read_only_hint is True and _name_looks_read_only(name):
         risk = RiskLevel.LOW
         auto_executable = trust_level is not TrustLevel.USER_ADDED

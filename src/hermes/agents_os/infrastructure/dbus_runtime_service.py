@@ -5307,13 +5307,17 @@ async def _mcp_connect(
             logger.warning(
                 "hermes.dbus.mcp_provider_autowire_failed server=%s: %s", server_id, _e_pv
             )
-    # USER_ADDED = la postura más restrictiva (DEFAULT_DENY + HITL en cada
-    # tool-call): el broker ESCALA al operador, no recorta (regla de oro).
+    # Confianza: los MCP VETADOS del stack de fábrica (locales, sin egress, horneados por
+    # nosotros) entran como BUILTIN → sus tools fluyen sin HITL (la jaula contiene; lo
+    # marcado destructivo sigue gateado). Cualquier OTRO (añadido por el usuario) =
+    # USER_ADDED: DEFAULT_DENY + HITL en cada tool-call (el broker escala, no recorta).
+    _BUILTIN_MCP_SLUGS = frozenset({"excel", "word", "powerpoint"})
+    _trust = TrustLevel.BUILTIN if server_id in _BUILTIN_MCP_SLUGS else TrustLevel.USER_ADDED
     return await manager.connect(
         server_id=McpServerId(server_id),
         slug=ServerSlug(server_id),
         transport=Transport.stdio(argv, env=resolved_env),
-        trust_level=TrustLevel.USER_ADDED,
+        trust_level=_trust,
     )
 
 
