@@ -1189,9 +1189,28 @@ def make_pre_tool_call_hook(
             # reads / capability+external tools are handled elsewhere (gateway, cage,
             # broker HITL). SECURITY gate → not swallowed: errors fail-CLOSED via the
             # outer handler; the flag accessor itself fails-safe to ON.
-            if tool_name and hook_mfa_block(
+            _needs_owner_mfa = bool(tool_name) and hook_mfa_block(
                 tool_name, mfa_on_dangers=_tool_policy.mfa_on_dangers()
-            ):
+            )
+            if _needs_owner_mfa:
+                # Owner pre-approval — the Seguridad checkbox has REAL impact: a capability
+                # the owner has EXPLICITLY ENABLED runs AUTONOMOUSLY (no per-action card).
+                # Only SELF-WIDENING actions (MOST_DELICATE: install_app/skill/mcp,
+                # set_policy, disable_mfa, cronjob, delegate/spawn) ALWAYS need MFA —
+                # enabling those must never silently let the agent widen its own cage.
+                # The structural cage (netns/egress/Landlock) still confines HOW an
+                # enabled action runs. This is the governance model: safe = autonomous,
+                # MFA only on the dangers that grow the agent's own power.
+                from hermes.capabilities.tool_delicacy import Delicacy, delicacy  # noqa: PLC0415
+                if (
+                    delicacy(tool_name) is not Delicacy.MOST_DELICATE
+                    and _tool_policy.is_enabled(tool_name)
+                ):
+                    logger.info(
+                        "hermes.security_hook.pre.owner_preapproved tool=%s", tool_name
+                    )
+                    _needs_owner_mfa = False
+            if _needs_owner_mfa:
                 # Per-action owner approval (pause→approve→resume): query the durable
                 # approval gate by the action digest. If the owner already approved THIS
                 # exact action (web UI + MFA-at-gate), consume the single-use token and
