@@ -77,18 +77,20 @@ def _save_to(path: Path, domains: list[str]) -> None:
     path.write_text(json.dumps({"domains": sorted(set(domains))}))
 
 
-def _push_session(session_id: str, domains: list[str]) -> bool:
+def _push_session(session_id: str, domains: list[str], mode: str = "default-deny") -> bool:
     """Push an allow-list to the egress proxy control socket under ``session_id``.
 
     For the browser plane ``session_id`` is the audit label (applied as global); for the
     MCP plane it is the reserved marker that the engine routes to the pinned MCP policy.
+    ``mode`` is "default-deny" (allow-list) or "open-logged" (any domain, audited). The
+    MCP plane is pinned default-deny by the engine and is immune to an open-logged push.
     """
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.settimeout(3.0)
         s.connect(_PROXY_SOCK)
         msg = json.dumps(
-            {"session_id": session_id, "mode": "default-deny", "domains": domains}
+            {"session_id": session_id, "mode": mode, "domains": domains}
         ) + "\n"
         s.sendall(msg.encode())
         resp = s.recv(64).decode("utf-8", "replace").strip()
@@ -112,6 +114,33 @@ def _push(domains: list[str]) -> bool:
     return _push_session(_SESSION, domains)
 
 
+def _browser_open_for_preset() -> bool:
+    """True when the owner's policy preset is PERMISIVO → the netns-isolated browser may
+    reach ANY site (audited via open-logged). Equilibrado/Bloqueado keep default-deny +
+    the owner's explicit grants. Fail-safe: any policy-read error → False (stay restricted).
+    """
+    try:
+        from hermes.capabilities.tool_policy import ToolPolicyStore  # noqa: PLC0415
+        return ToolPolicyStore()._preset().value == "permisivo"
+    except Exception:  # noqa: BLE001 — never fail the egress apply on a policy read error
+        return False
+
+
+def apply_browser_egress_for_preset() -> bool:
+    """Push the browser-plane egress mode that matches the owner's preset.
+
+    PERMISIVO → ``open-logged`` (any domain, audited) so the agent can actually browse the
+    open web — the browser is netns-isolated and the MCP plane stays pinned default-deny.
+    Else → ``default-deny`` + the persisted owner grants. Called on preset change and boot.
+    The owner is sovereign: choosing PERMISIVO IS the decision to let the browser roam.
+    """
+    if _browser_open_for_preset():
+        ok = _push_session(_SESSION, [], mode="open-logged")
+        logger.info("hermes.egress.browser_mode preset=permisivo mode=open-logged pushed=%s", ok)
+        return ok
+    return _push(_load())
+
+
 def apply_persisted_grants() -> bool:
     """Re-push the persisted grants (browser + MCP planes) to the proxy at startup.
 
@@ -125,7 +154,8 @@ def apply_persisted_grants() -> bool:
     reachable (seed ∪ ∅ = seed).
     """
     domains = _load()
-    ok = _push(domains)
+    # Browser plane follows the preset (PERMISIVO → open-logged; else default-deny + grants).
+    ok = apply_browser_egress_for_preset()
     mcp_domains = _load_from(_MCP_GRANTS_PATH)
     mcp_ok = _push_session(_MCP_GRANT_SESSION, mcp_domains)
     logger.info(
