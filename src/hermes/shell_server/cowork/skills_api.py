@@ -168,7 +168,22 @@ def create_skills_hub_router() -> APIRouter:
         """
         proxy = request.app.state.dbus_proxy
         try:
-            return await proxy.call_dict("search_skills_hub", q, source, limit)
+            # Over-fetch, then hide the catalog "ghosts": the centralized index lists
+            # tens of thousands of stubs (mostly clawhub/official) with an EMPTY repo and
+            # no artifact — they look installable but always 404 on install. Keep only
+            # entries we can actually fetch: a real repo coordinate, or a source that
+            # fetches by its own means (browse-sh slug, well-known URL). Cap at `limit`.
+            raw = await proxy.call_dict("search_skills_hub", q, source, min(limit * 6, 100))
+            items = raw.get("results", []) if isinstance(raw, dict) else []
+            _SELF_FETCH = {"browse-sh", "well-known"}
+            fetchable = [
+                r for r in items
+                if str(r.get("repo") or "").strip() or r.get("source") in _SELF_FETCH
+            ]
+            if isinstance(raw, dict):
+                raw["results"] = fetchable[:limit]
+                return raw
+            return {"query_id": "", "cancelled": False, "results": fetchable[:limit]}
         except AgentUnavailable as exc:
             logger.warning(
                 "hermes.skills.hub.search_unavailable",
