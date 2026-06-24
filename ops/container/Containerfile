@@ -89,6 +89,7 @@ RUN cd /tmp/frontbuild && rm -rf dist && npm run build \
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 ARG PLAYWRIGHT_MCP_VERSION=0.0.29
 RUN npm install -g --ignore-scripts "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" agent-browser \
+    && chmod +x /usr/lib/node_modules/agent-browser/bin/agent-browser-* \
     && npx --yes playwright install chromium \
     && CHROME="$(find /ms-playwright -type f -name chrome -path '*chrome-linux*' | head -1)" \
     && [ -n "$CHROME" ] && ln -sf "$CHROME" /usr/bin/chromium-browser \

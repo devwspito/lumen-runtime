@@ -67,6 +67,15 @@ def create_policies_router(
     async def set_preset(body: PresetBody) -> dict:
         _require_owner_mfa(mfa_store, body.totp)
         store.apply_preset(Preset(body.preset))
+        # The browser egress plane follows the preset: PERMISIVO opens the netns-isolated
+        # browser to the open web (open-logged) so research actually works; Equilibrado/
+        # Bloqueado keep default-deny + the owner's explicit grants. Best-effort — the
+        # preset still applies if the proxy push fails.
+        try:
+            from hermes.shell_server.egress_api import apply_browser_egress_for_preset  # noqa: PLC0415
+            apply_browser_egress_for_preset()
+        except Exception:  # noqa: BLE001
+            logger.warning("hermes.cowork.policies.egress_apply_failed", exc_info=True)
         logger.info("hermes.cowork.policies.preset_applied preset=%s", body.preset)
         return {"ok": True, "preset": body.preset}
 
