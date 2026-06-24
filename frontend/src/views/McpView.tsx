@@ -70,6 +70,25 @@ function getRunner(argv: string | string[] | undefined): string {
     .pop() ?? ''
 }
 
+// Resolve the FETCHABLE npm coordinate ("npm:@scope/pkg") from an npx argv, so the
+// security scan can download + statically analyse the ACTUAL package. Without this the
+// scan only sees the display name (no registry coordinate) → PackageContentScanner has
+// nothing to fetch → every MCP gets the same constant score. Returns null for a non-npx
+// runner or a local/inline argv (no published package to fetch).
+function npmCoordinateFromArgv(argv: string | string[] | undefined): string | null {
+  const arr = Array.isArray(argv)
+    ? argv
+    : String(argv ?? '').split(/\s+/).filter(Boolean)
+  if (!arr.length || getRunner(arr) !== 'npx') return null
+  for (let i = 1; i < arr.length; i++) {
+    const tok = arr[i]!
+    if (tok.startsWith('-')) continue            // skip flags (-y, --yes, ...)
+    if (/[/\\]/.test(tok) && !tok.startsWith('@')) return null  // local path, not a pkg
+    return `npm:${tok}`                          // [@scope/]name[@version]
+  }
+  return null
+}
+
 // EnvField schema derived from entry.env_vars
 interface EnvFieldSchema {
   key: string
@@ -188,9 +207,14 @@ export default function McpView() {
     }
 
     const identifier = entry.server_id ?? entry.id ?? slugify(entry.name ?? '')
+    // Scan the FETCHABLE coordinate (npm:@scope/pkg) when we can resolve it, so the
+    // content scanner downloads + analyses the real package and the verdict is REAL
+    // (a malicious package -> FAIL, a clean one -> PASS) instead of a constant per-kind
+    // score. Falls back to the display identifier if the argv isn't a published package.
+    const scanTarget = npmCoordinateFromArgv(entry.argv) ?? identifier
 
     try {
-      const scan = await scanInstall('mcp', identifier)
+      const scan = await scanInstall('mcp', scanTarget)
       // WARN and FAIL always route through the approval modal so the owner can
       // review and confirm with TOTP — no silent toast degradation.
       if (scan.requires_owner_approval || scan.verdict === 'WARN' || scan.verdict === 'FAIL') {
