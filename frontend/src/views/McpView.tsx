@@ -1,6 +1,6 @@
 import { useEffect, useReducer, useRef, useState } from 'react'
 import { sileo } from 'sileo'
-import { X, Terminal, ChevronDown, ChevronRight, Search, Wrench } from 'lucide-react'
+import { X, Terminal, Search, Wrench } from 'lucide-react'
 import { listMcpServers, addMcpServer, removeMcpServer, searchMcpRegistry, scanInstall, recordSecurityDecision, ApiError } from '../api/client'
 import type { McpServer, McpRegistryEntry, InstallScanResponse } from '../api/types'
 import { useConfirmDialog } from '../components/ConfirmDialog'
@@ -10,6 +10,19 @@ import type { MfaFactors } from '../components/MfaModal'
 import { PageHeader } from '../components/ui/PageHeader'
 import { EmptyState } from '../components/ui/EmptyState'
 import { Button } from '../components/ui/Button'
+import {
+  AnimatePresence,
+  AnimatedListItem,
+  AnimatedExpanderContent,
+  AnimatedChevron,
+  FadeIn,
+  Stagger,
+  StaggerItem,
+  HoverRow,
+  motion,
+  SPRING,
+  TWEEN_FAST,
+} from '../components/ui/motion'
 
 // Curated catalog — mirrors mcp.js MCP_CATALOG (npx-only verified servers).
 const MCP_CATALOG: McpRegistryEntry[] = [
@@ -250,139 +263,159 @@ export default function McpView() {
       />
 
       <div className="view-body cv-view-body">
-        {/* ── Active servers ──────────────────────────────────────────────── */}
-        <section className="cv-section" aria-label="Herramientas activas">
-          <h2 className="cv-section-label">Activas</h2>
-          {state.status === 'loading' && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }} aria-busy="true">
-              {[...Array(2)].map((_, i) => <div key={i} className="cv-skeleton" style={{ height: 48 }} />)}
-            </div>
-          )}
-          {state.status === 'error' && (
-            <div role="alert">
-              <p className="state-error">{state.message}</p>
-              <Button variant="secondary" size="sm" onClick={load} style={{ marginTop: 8 }}>Reintentar</Button>
-            </div>
-          )}
-          {state.status === 'success' && (
-            state.servers.length === 0
-              ? (
-                <EmptyState
-                  icon={<Wrench size={36} />}
-                  title="Sin herramientas conectadas"
-                  description="Añade una del catálogo sugerido o busca en el registro."
-                />
-              )
-              : (
-                <ul className="cv-list" role="list">
-                  {state.servers.map(s => (
-                    <li key={s.server_id ?? s.id} className="ds-list-item-enter">
-                      <McpServerRow
-                        server={s}
-                        onRemove={async () => {
-                          const name = s.label ?? s.server_id ?? ''
-                          const ok = await confirm({
-                            title: `¿Eliminar "${name}"?`,
-                            description: 'El agente dejará de tener acceso a estas herramientas.',
-                            confirmLabel: 'Eliminar',
-                            variant: 'danger',
-                          })
-                          if (!ok) return
-                          try {
-                            await removeMcpServer(s.server_id ?? s.id ?? '')
-                            show('Conjunto de herramientas eliminado', 'ok')
-                            load()
-                          } catch (e) {
-                            show(e instanceof Error ? e.message : 'Error', 'error')
-                          }
-                        }}
+        <Stagger style={{ display: 'flex', flexDirection: 'column', gap: 'var(--sp-8)' }}>
+
+          {/* ── Active servers ──────────────────────────────────────────────── */}
+          <StaggerItem>
+            <section className="cv-section" aria-label="Herramientas activas">
+              <h2 className="cv-section-label">Activas</h2>
+              {state.status === 'loading' && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }} aria-busy="true">
+                  {[...Array(2)].map((_, i) => <div key={i} className="cv-skeleton" style={{ height: 48 }} />)}
+                </div>
+              )}
+              {state.status === 'error' && (
+                <FadeIn>
+                  <div role="alert">
+                    <p className="state-error">{state.message}</p>
+                    <Button variant="secondary" size="sm" onClick={load} style={{ marginTop: 8 }}>Reintentar</Button>
+                  </div>
+                </FadeIn>
+              )}
+              {state.status === 'success' && (
+                state.servers.length === 0
+                  ? (
+                    <EmptyState
+                      icon={<Wrench size={36} />}
+                      title="Sin herramientas conectadas"
+                      description="Añade una del catálogo sugerido o busca en el registro."
+                    />
+                  )
+                  : (
+                    <ul className="cv-list" role="list">
+                      <AnimatePresence initial={false}>
+                        {state.servers.map(s => (
+                          <AnimatedListItem key={s.server_id ?? s.id}>
+                            <McpServerRow
+                              server={s}
+                              onRemove={async () => {
+                                const name = s.label ?? s.server_id ?? ''
+                                const ok = await confirm({
+                                  title: `¿Eliminar "${name}"?`,
+                                  description: 'El agente dejará de tener acceso a estas herramientas.',
+                                  confirmLabel: 'Eliminar',
+                                  variant: 'danger',
+                                })
+                                if (!ok) return
+                                try {
+                                  await removeMcpServer(s.server_id ?? s.id ?? '')
+                                  show('Conjunto de herramientas eliminado', 'ok')
+                                  load()
+                                } catch (e) {
+                                  show(e instanceof Error ? e.message : 'Error', 'error')
+                                }
+                              }}
+                            />
+                          </AnimatedListItem>
+                        ))}
+                      </AnimatePresence>
+                    </ul>
+                  )
+              )}
+            </section>
+          </StaggerItem>
+
+          {/* ── Suggested catalog ───────────────────────────────────────────── */}
+          <StaggerItem>
+            <section className="cv-section" aria-label="Herramientas sugeridas">
+              <h2 className="cv-section-label">Sugeridas</h2>
+              <ul className="cv-list" role="list">
+                <AnimatePresence initial={false}>
+                  {MCP_CATALOG.map(entry => (
+                    <AnimatedListItem key={entry.server_id}>
+                      <CatalogCard
+                        entry={entry}
+                        installedIds={installedIds}
+                        onInstall={installEntry}
                       />
-                    </li>
+                    </AnimatedListItem>
                   ))}
-                </ul>
-              )
-          )}
-        </section>
+                </AnimatePresence>
+              </ul>
+            </section>
+          </StaggerItem>
 
-        {/* ── Suggested catalog ───────────────────────────────────────────── */}
-        <section className="cv-section" aria-label="Herramientas sugeridas">
-          <h2 className="cv-section-label">Sugeridas</h2>
-          <ul className="cv-list" role="list">
-            {MCP_CATALOG.map(entry => (
-              <li key={entry.server_id} className="ds-list-item-enter">
-                <CatalogCard
-                  entry={entry}
-                  installedIds={installedIds}
-                  onInstall={installEntry}
-                />
-              </li>
-            ))}
-          </ul>
-        </section>
-
-        {/* ── Official registry search ─────────────────────────────────── */}
-        <section className="cv-section" aria-label="Buscar más herramientas">
-          <h2 className="cv-section-label">Buscar más herramientas</h2>
-          <div className="cv-search-row">
-            <label className="sr-only" htmlFor="mcp-registry-input">Buscar herramientas externas</label>
-            <div style={{ position: 'relative', flex: 1 }}>
-              <Search size={14} aria-hidden="true" style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--ink4)', pointerEvents: 'none' }} />
-              <input
-                id="mcp-registry-input"
-                ref={regInputRef}
-                className="cv-input"
-                type="search"
-                placeholder="github, slack, postgres…"
-                autoComplete="off"
-                onKeyDown={e => { if (e.key === 'Enter') searchRegistry() }}
-                style={{ paddingLeft: 30 }}
-              />
-            </div>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={searchRegistry}
-              loading={registryState.status === 'loading'}
-            >
-              Buscar
-            </Button>
-          </div>
-          <p className="cv-hint">Conectado al registro oficial de herramientas externas</p>
-          {registryState.status === 'error' && (
-            <div role="alert">
-              <p className="state-error">{registryState.message}</p>
-              <Button variant="secondary" size="sm" onClick={searchRegistry} style={{ marginTop: 8 }}>
-                Reintentar
-              </Button>
-            </div>
-          )}
-          {registryState.status === 'success' && registryState.results.length > 0 && (
-            <ul className="cv-list" role="list">
-              {registryState.results.map((entry, i) => (
-                <li key={`${entry.server_id ?? entry.id ?? entry.name ?? i}`} className="ds-list-item-enter">
-                  <CatalogCard
-                    entry={entry}
-                    installedIds={installedIds}
-                    onInstall={installEntry}
+          {/* ── Official registry search ─────────────────────────────────── */}
+          <StaggerItem>
+            <section className="cv-section" aria-label="Buscar más herramientas">
+              <h2 className="cv-section-label">Buscar más herramientas</h2>
+              <div className="cv-search-row">
+                <label className="sr-only" htmlFor="mcp-registry-input">Buscar herramientas externas</label>
+                <div style={{ position: 'relative', flex: 1 }}>
+                  <Search size={14} aria-hidden="true" style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--ink4)', pointerEvents: 'none' }} />
+                  <input
+                    id="mcp-registry-input"
+                    ref={regInputRef}
+                    className="cv-input"
+                    type="search"
+                    placeholder="github, slack, postgres…"
+                    autoComplete="off"
+                    onKeyDown={e => { if (e.key === 'Enter') searchRegistry() }}
+                    style={{ paddingLeft: 30 }}
                   />
-                </li>
-              ))}
-            </ul>
-          )}
-          {registryState.status === 'success' && registryState.results.length === 0 && (
-            <EmptyState
-              icon={<Search size={32} />}
-              title="Sin resultados"
-              description="Prueba con otro término de búsqueda."
-            />
-          )}
-        </section>
+                </div>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={searchRegistry}
+                  loading={registryState.status === 'loading'}
+                >
+                  Buscar
+                </Button>
+              </div>
+              <p className="cv-hint">Conectado al registro oficial de herramientas externas</p>
+              {registryState.status === 'error' && (
+                <div role="alert">
+                  <p className="state-error">{registryState.message}</p>
+                  <Button variant="secondary" size="sm" onClick={searchRegistry} style={{ marginTop: 8 }}>
+                    Reintentar
+                  </Button>
+                </div>
+              )}
+              {registryState.status === 'success' && registryState.results.length > 0 && (
+                <ul className="cv-list" role="list">
+                  <AnimatePresence initial={false}>
+                    {registryState.results.map((entry, i) => (
+                      <AnimatedListItem key={`${entry.server_id ?? entry.id ?? entry.name ?? i}`}>
+                        <CatalogCard
+                          entry={entry}
+                          installedIds={installedIds}
+                          onInstall={installEntry}
+                        />
+                      </AnimatedListItem>
+                    ))}
+                  </AnimatePresence>
+                </ul>
+              )}
+              {registryState.status === 'success' && registryState.results.length === 0 && (
+                <EmptyState
+                  icon={<Search size={32} />}
+                  title="Sin resultados"
+                  description="Prueba con otro término de búsqueda."
+                />
+              )}
+            </section>
+          </StaggerItem>
 
-        {/* ── Manual add ──────────────────────────────────────────────────── */}
-        <section className="cv-section" aria-label="Añadir manualmente">
-          <h2 className="cv-section-label">Añadir manualmente</h2>
-          <AddMcpForm onAdded={() => { show('Herramienta añadida — tus agentes ya pueden usarla', 'ok'); load() }} onToast={show} />
-        </section>
+          {/* ── Manual add ──────────────────────────────────────────────────── */}
+          <StaggerItem>
+            <section className="cv-section" aria-label="Añadir manualmente">
+              <h2 className="cv-section-label">Añadir manualmente</h2>
+              <AddMcpForm onAdded={() => { show('Herramienta añadida — tus agentes ya pueden usarla', 'ok'); load() }} onToast={show} />
+            </section>
+          </StaggerItem>
+
+        </Stagger>
       </div>
     </>
   )
@@ -403,7 +436,7 @@ function McpServerRow({ server, onRemove }: McpServerRowProps) {
   const tools = server.tool_count != null ? `${server.tool_count} herramienta${server.tool_count === 1 ? '' : 's'}` : ''
 
   return (
-    <div className="mcp-row">
+    <HoverRow className="mcp-row">
       <span style={{ color: 'var(--ink4)', flexShrink: 0, display: 'flex' }} aria-hidden="true">
         <Terminal size={15} />
       </span>
@@ -429,17 +462,15 @@ function McpServerRow({ server, onRemove }: McpServerRowProps) {
             onClick={() => setShowCmd(v => !v)}
             aria-expanded={showCmd}
           >
-            {showCmd
-              ? <ChevronDown size={11} aria-hidden="true" />
-              : <ChevronRight size={11} aria-hidden="true" />}
+            <AnimatedChevron open={showCmd} size={11} />
             <span style={{ fontSize: 'var(--text-caption)' }}>Detalles técnicos</span>
           </button>
         )}
-        {showCmd && argv && (
+        <AnimatedExpanderContent open={showCmd && Boolean(argv)}>
           <div className="mcp-row__cmd" style={{ marginTop: 2, paddingLeft: 16, userSelect: 'all' }}>
             {argv}
           </div>
-        )}
+        </AnimatedExpanderContent>
       </div>
       <button
         className="cv-btn cv-btn--ghost cv-btn--sm cv-btn--danger"
@@ -448,7 +479,7 @@ function McpServerRow({ server, onRemove }: McpServerRowProps) {
       >
         <X size={14} aria-hidden="true" />
       </button>
-    </div>
+    </HoverRow>
   )
 }
 
@@ -496,7 +527,13 @@ function CatalogCard({ entry, installedIds, onInstall }: CatalogCardProps) {
   }
 
   return (
-    <div className="mcp-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 'var(--sp-2)' }}>
+    <motion.div
+      className="mcp-row"
+      style={{ flexDirection: 'column', alignItems: 'stretch', gap: 'var(--sp-2)' }}
+      whileHover={{ y: -2 }}
+      transition={SPRING}
+      layout
+    >
       {/* Main row */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--sp-3)' }}>
         <span style={{ color: 'var(--ink4)', flexShrink: 0, display: 'flex' }} aria-hidden="true">
@@ -545,7 +582,7 @@ function CatalogCard({ entry, installedIds, onInstall }: CatalogCardProps) {
       </div>
 
       {/* Inline key-entry form */}
-      {showEnvForm && (
+      <AnimatedExpanderContent open={showEnvForm}>
         <div className="cv-form-stack" style={{ paddingLeft: 27 }}>
           {envSchema.map(field => (
             <div key={field.key}>
@@ -576,8 +613,8 @@ function CatalogCard({ entry, installedIds, onInstall }: CatalogCardProps) {
             </Button>
           </div>
         </div>
-      )}
-    </div>
+      </AnimatedExpanderContent>
+    </motion.div>
   )
 }
 
@@ -631,7 +668,7 @@ function AddMcpForm({ onAdded, onToast }: AddMcpFormProps) {
   }
 
   return (
-    <div className="cv-form-card">
+    <motion.div className="cv-form-card" whileHover={{ y: -1 }} transition={TWEEN_FAST} layout>
       <h3 className="cv-form-title">Añadir herramienta externa</h3>
       <label className="cv-label" htmlFor="mcp-label">Nombre</label>
       <input
@@ -668,6 +705,6 @@ function AddMcpForm({ onAdded, onToast }: AddMcpFormProps) {
           {adding ? 'Añadiendo…' : 'Añadir'}
         </button>
       </div>
-    </div>
+    </motion.div>
   )
 }

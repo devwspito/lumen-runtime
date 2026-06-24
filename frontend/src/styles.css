@@ -75,6 +75,12 @@
   /* Transitions */
   --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
   --ease-hover:  150ms ease;
+  /* Standard easing token — used by depth + motion system */
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* Depth shadows */
+  --shadow-depth: 0 10px 30px -18px rgba(0,0,0,0.7);
+  --shadow-depth-hover: 0 14px 36px -14px rgba(0,0,0,0.8);
 
   /* Layout */
   --sidebar-width: 260px;
@@ -1619,14 +1625,7 @@ details[open] .tool-summary-group__chevron { transform: rotate(90deg); }
   gap: var(--sp-3);
 }
 
-.cv-section-label {
-  font-size: var(--text-label);
-  font-weight: 700;
-  letter-spacing: .06em;
-  text-transform: uppercase;
-  color: var(--ink4);
-  padding-bottom: var(--sp-1);
-}
+/* cv-section-label override lives in the ds-* block below for specificity */
 
 /* Section head with right-side controls (calendar toggle + button) */
 .cv-section-head {
@@ -1724,31 +1723,66 @@ details[open] .tool-summary-group__chevron { transform: rotate(90deg); }
   font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
-  transition: all var(--ease-hover);
+  transition:
+    background 160ms var(--ease),
+    border-color 160ms var(--ease),
+    box-shadow 160ms var(--ease),
+    color 160ms var(--ease),
+    transform 120ms var(--ease);
   text-decoration: none;
+  /* no layout shift on transforms */
+  will-change: transform;
+}
+
+.cv-btn:active:not(:disabled) { transform: translateY(0) !important; }
+
+.cv-btn:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
 }
 
 .cv-btn--sm { height: 32px; padding: 0 var(--sp-3); font-size: var(--text-label); }
 
-.cv-btn--primary  { background: var(--accent); color: #fff; }
-.cv-btn--primary:hover:not(:disabled) { background: var(--accent-hover); }
+/* Primary: accent bg + subtle glow on hover */
+.cv-btn--primary  {
+  background: var(--accent);
+  color: #fff;
+  border: 1px solid transparent;
+}
+.cv-btn--primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent),
+              0 2px 8px -2px rgba(10, 132, 255, 0.35);
+  transform: translateY(-1px);
+}
 
+/* Secondary: ghost surface */
 .cv-btn--secondary {
   background: var(--surface2);
   color: var(--ink2);
   border: 1px solid var(--line2);
 }
-.cv-btn--secondary:hover:not(:disabled) { background: var(--card2); color: var(--ink); }
+.cv-btn--secondary:hover:not(:disabled) {
+  background: var(--card2);
+  color: var(--ink);
+  border-color: var(--ink4);
+  transform: translateY(-1px);
+}
 
+/* Ghost */
 .cv-btn--ghost {
   background: transparent;
   color: var(--ink3);
   border: 1px solid var(--line);
 }
-.cv-btn--ghost:hover:not(:disabled) { background: var(--surface2); color: var(--ink2); }
+.cv-btn--ghost:hover:not(:disabled) {
+  background: var(--surface2);
+  color: var(--ink2);
+  border-color: var(--line2);
+}
 
 .cv-btn--danger:not(:disabled) { color: var(--danger) !important; }
-.cv-btn--danger:hover:not(:disabled) { background: color-mix(in srgb, var(--danger) 12%, transparent) !important; }
+.cv-btn--danger:hover:not(:disabled) { background: color-mix(in srgb, var(--danger) 12%, transparent) !important; border-color: color-mix(in srgb, var(--danger) 30%, transparent) !important; }
 
 .cv-icon-btn {
   width: 32px;
@@ -1820,8 +1854,13 @@ details[open] .tool-summary-group__chevron { transform: rotate(90deg); }
 /* ── Teach / info card ───────────────────────────────────────────────────── */
 
 .cv-teach-card {
-  background: var(--card);
-  border: 1px solid var(--line);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.025) 0%, rgba(255,255,255,0) 100%),
+    var(--card);
+  border: 1px solid rgba(255,255,255,0.07);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.05),
+    var(--shadow-depth);
   border-radius: var(--r-md);
   padding: var(--sp-5);
   display: flex;
@@ -1910,14 +1949,53 @@ details[open] .tool-summary-group__chevron { transform: rotate(90deg); }
   justify-content: space-between;
   gap: var(--sp-4);
   padding: var(--sp-3) var(--sp-4);
-  background: var(--card);
-  border: 1px solid var(--line);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.025) 0%, rgba(255,255,255,0) 100%),
+    var(--card);
+  border: 1px solid rgba(255,255,255,0.06);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.04),
+    var(--shadow-depth);
   border-radius: var(--r-sm);
-  transition: border-color var(--ease-hover);
+  transition:
+    border-color 180ms var(--ease),
+    box-shadow 180ms var(--ease),
+    transform 180ms var(--ease);
+  position: relative;
+  overflow: hidden;
 }
 
-.provider-row--active { border-color: var(--accent); }
-.provider-row:hover { border-color: var(--line2); }
+/* Accent left-edge highlight on active */
+.provider-row--active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--accent);
+  border-radius: var(--r-sm) 0 0 var(--r-sm);
+}
+
+.provider-row--active {
+  border-color: color-mix(in srgb, var(--accent) 40%, rgba(255,255,255,0.06));
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.06),
+    0 0 0 1px color-mix(in srgb, var(--accent) 20%, transparent),
+    var(--shadow-depth);
+}
+
+/* Hover: lift + border brightens + faint accent tint fades in */
+.provider-row:hover {
+  border-color: rgba(255,255,255,0.12);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.07),
+    var(--shadow-depth-hover);
+  transform: translateY(-1px);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0) 100%),
+    color-mix(in srgb, var(--accent) 3%, var(--card));
+}
 
 .provider-row__left {
   flex: 1;
@@ -2191,9 +2269,26 @@ details[open] .tool-summary-group__chevron { transform: rotate(90deg); }
   align-items: center;
   gap: var(--sp-3);
   padding: var(--sp-3) var(--sp-4);
-  background: var(--card);
-  border: 1px solid var(--line);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.025) 0%, rgba(255,255,255,0) 100%),
+    var(--card);
+  border: 1px solid rgba(255,255,255,0.06);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.04),
+    var(--shadow-depth);
   border-radius: var(--r-sm);
+  transition:
+    border-color 180ms var(--ease),
+    box-shadow 180ms var(--ease),
+    transform 180ms var(--ease);
+}
+
+.skill-row:hover {
+  border-color: rgba(255,255,255,0.12);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.07),
+    var(--shadow-depth-hover);
+  transform: translateY(-1px);
 }
 
 .skill-row__info { flex: 1; min-width: 0; }
@@ -2237,9 +2332,26 @@ details[open] .tool-summary-group__chevron { transform: rotate(90deg); }
   align-items: center;
   gap: var(--sp-3);
   padding: var(--sp-3) var(--sp-4);
-  background: var(--card);
-  border: 1px solid var(--line);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.025) 0%, rgba(255,255,255,0) 100%),
+    var(--card);
+  border: 1px solid rgba(255,255,255,0.06);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.04),
+    var(--shadow-depth);
   border-radius: var(--r-sm);
+  transition:
+    border-color 180ms var(--ease),
+    box-shadow 180ms var(--ease),
+    transform 180ms var(--ease);
+}
+
+.skill-hub-result:hover {
+  border-color: rgba(255,255,255,0.12);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.07),
+    var(--shadow-depth-hover);
+  transform: translateY(-1px);
 }
 
 .skill-hub-result__info { flex: 1; min-width: 0; }
@@ -2283,6 +2395,39 @@ details[open] .tool-summary-group__chevron { transform: rotate(90deg); }
 
 .hub-badge--ok   { background: color-mix(in srgb, var(--ok) 15%, transparent); color: var(--ok); }
 .hub-badge--warn { background: color-mix(in srgb, var(--warn) 15%, transparent); color: var(--warn); }
+
+/* ── Teach section expander (details/summary) ────────────────────────────── */
+
+.cv-teach-expander {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  cursor: pointer;
+  font-size: var(--text-label);
+  font-weight: 600;
+  color: var(--ink2);
+  list-style: none;
+  user-select: none;
+  padding-bottom: var(--sp-2);
+  border: none;
+  background: transparent;
+}
+
+.cv-teach-expander::-webkit-details-marker { display: none; }
+.cv-teach-expander:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; border-radius: var(--r-sm); }
+
+.cv-teach-expander:hover { color: var(--ink); }
+
+.cv-teach-chevron {
+  color: var(--ink4);
+  flex-shrink: 0;
+  transition: transform 200ms var(--ease), color 180ms var(--ease);
+}
+
+details[open] .cv-teach-chevron {
+  transform: rotate(90deg);
+  color: var(--ink2);
+}
 
 /* Teach recording pulse */
 .teach-recording-label {
@@ -4577,9 +4722,8 @@ details[open] .tool-summary-group__chevron { transform: rotate(90deg); }
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   Design system primitives (C0)
-   Used by ArchivosView, MemoriaView, and all C3 view upgrades.
-   Never conflicts with existing .cv-*, .office-*, .seg-* namespaces.
+   Design system primitives — Sereno 2026 craft tier
+   Used by all capability views. Never conflicts with .cv-*, .office-*, .seg-*
    ═══════════════════════════════════════════════════════════════════════════ */
 
 /* ── PageHeader ──────────────────────────────────────────────────────────── */
@@ -4602,28 +4746,86 @@ details[open] .tool-summary-group__chevron { transform: rotate(90deg); }
   padding-top: 2px;
 }
 
+/* PageHeader: stronger type hierarchy */
+.view-header .view-title {
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -.04em;
+  line-height: 1.2;
+}
+
+.view-header .view-subtitle {
+  margin-top: 5px;
+  font-size: var(--text-label);
+  color: var(--ink3);
+  line-height: 1.5;
+  letter-spacing: 0;
+}
+
+/* ── Section labels — uppercase tracked, with hairline rule ─────────────── */
+
+.cv-section-label {
+  font-size: var(--text-micro);
+  font-weight: 700;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  color: var(--ink4);
+  padding-bottom: var(--sp-2);
+  border-bottom: 1px solid var(--line);
+  margin-bottom: var(--sp-1);
+}
+
+/* ── Icon chip — anchors row icons in a tinted rounded chip ─────────────── */
+
+.ds-icon-chip {
+  width: 30px;
+  height: 30px;
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.ds-icon-chip--neutral {
+  background: var(--surface2);
+  color: var(--ink3);
+}
+
 /* ── EmptyState ──────────────────────────────────────────────────────────── */
 
 .ds-empty-state {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: var(--sp-3);
+  gap: var(--sp-4);
   padding: var(--sp-10) var(--sp-6);
   text-align: center;
 }
 
+/* Radial glow circle around the icon */
 .ds-empty-state__icon {
   display: flex;
   align-items: center;
   justify-content: center;
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  background: radial-gradient(
+    ellipse at center,
+    color-mix(in srgb, var(--accent) 14%, transparent) 0%,
+    transparent 72%
+  );
   color: var(--ink4);
-  opacity: 0.4;
+  opacity: 0.7;
+  flex-shrink: 0;
 }
 
 .ds-empty-state__title {
   font-size: var(--text-body);
-  font-weight: 500;
+  font-weight: 600;
   color: var(--ink3);
   max-width: 300px;
   line-height: 1.55;
@@ -4636,35 +4838,62 @@ details[open] .tool-summary-group__chevron { transform: rotate(90deg); }
   max-width: 280px;
   line-height: 1.55;
   margin: 0;
+  margin-top: -4px;
 }
 
-.ds-empty-state__action { margin-top: var(--sp-1); }
+/* Single, sized CTA — never full-width */
+.ds-empty-state__action {
+  margin-top: var(--sp-2);
+  display: flex;
+  justify-content: center;
+}
 
-/* ── Card ────────────────────────────────────────────────────────────────── */
+/* ── Card — depth surface ────────────────────────────────────────────────── */
 
 .ds-card {
-  background: var(--card);
-  border: 1px solid var(--line);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.025) 0%, rgba(255,255,255,0) 100%),
+    var(--card);
+  border: 1px solid rgba(255,255,255,0.07);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.05),
+    var(--shadow-depth);
   border-radius: var(--r-md);
-  transition: border-color 150ms ease, box-shadow 150ms ease;
+  transition:
+    border-color 180ms var(--ease),
+    box-shadow 180ms var(--ease),
+    transform 180ms var(--ease);
 }
 
 .ds-card--hoverable:hover {
-  border-color: var(--line2);
-  box-shadow: var(--shadow-raised);
+  border-color: rgba(255,255,255,0.13);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.07),
+    var(--shadow-depth-hover);
+  transform: translateY(-1px);
 }
 
-/* ── ListRow ─────────────────────────────────────────────────────────────── */
+/* ── ListRow — depth + smooth hover ─────────────────────────────────────── */
 
 .ds-list-row {
   display: flex;
   align-items: center;
   gap: var(--sp-3);
   padding: var(--sp-3) var(--sp-4);
-  background: var(--card);
-  border: 1px solid var(--line);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.025) 0%, rgba(255,255,255,0) 100%),
+    var(--card);
+  border: 1px solid rgba(255,255,255,0.06);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.04),
+    var(--shadow-depth);
   border-radius: var(--r-sm);
-  transition: border-color 150ms ease, background 150ms ease;
+  transition:
+    border-color 180ms var(--ease),
+    box-shadow 180ms var(--ease),
+    background 180ms var(--ease),
+    transform 180ms var(--ease);
+  position: relative;
 }
 
 .ds-list-row--clickable {
@@ -4672,8 +4901,14 @@ details[open] .tool-summary-group__chevron { transform: rotate(90deg); }
 }
 
 .ds-list-row--clickable:hover {
-  background: var(--card2);
-  border-color: var(--line2);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0) 100%),
+    var(--card2);
+  border-color: rgba(255,255,255,0.12);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.07),
+    var(--shadow-depth-hover);
+  transform: translateY(-1px);
 }
 
 .ds-list-row--clickable:focus-visible {
@@ -4720,7 +4955,7 @@ details[open] .tool-summary-group__chevron { transform: rotate(90deg); }
   gap: var(--sp-2);
   flex-shrink: 0;
   opacity: 0;
-  transition: opacity 150ms ease;
+  transition: opacity 160ms var(--ease);
 }
 
 .ds-list-row:hover .ds-list-row__actions,
@@ -5039,16 +5274,30 @@ details[open] .tool-summary-group__chevron { transform: rotate(90deg); }
   outline-offset: 2px;
 }
 
-/* ── List enter animation for new items ──────────────────────────────────── */
+/* ── Staggered list entrance ─────────────────────────────────────────────── */
 
 @keyframes ds-item-in {
-  from { opacity: 0; transform: translateY(4px); }
+  from { opacity: 0; transform: translateY(8px); }
   to   { opacity: 1; transform: translateY(0); }
 }
 
 .ds-list-item-enter {
-  animation: ds-item-in 200ms ease forwards;
+  animation: ds-item-in 220ms var(--ease) both;
+  /* default delay 0 — caller sets animation-delay for stagger */
 }
+
+/* Auto-stagger up to 10 items (nth-child × 30ms) */
+.ds-list-item-enter:nth-child(1)  { animation-delay: 0ms; }
+.ds-list-item-enter:nth-child(2)  { animation-delay: 30ms; }
+.ds-list-item-enter:nth-child(3)  { animation-delay: 60ms; }
+.ds-list-item-enter:nth-child(4)  { animation-delay: 90ms; }
+.ds-list-item-enter:nth-child(5)  { animation-delay: 120ms; }
+.ds-list-item-enter:nth-child(6)  { animation-delay: 150ms; }
+.ds-list-item-enter:nth-child(7)  { animation-delay: 180ms; }
+.ds-list-item-enter:nth-child(8)  { animation-delay: 210ms; }
+.ds-list-item-enter:nth-child(9)  { animation-delay: 240ms; }
+.ds-list-item-enter:nth-child(10) { animation-delay: 270ms; }
+/* Beyond 10: use inline animation-delay from JSX if needed */
 
 @media (prefers-reduced-motion: reduce) {
   .ds-list-item-enter { animation: none; }

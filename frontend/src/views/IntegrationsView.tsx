@@ -12,6 +12,14 @@ import Badge from '../components/Badge'
 import { PageHeader } from '../components/ui/PageHeader'
 import { EmptyState } from '../components/ui/EmptyState'
 import { Button } from '../components/ui/Button'
+import {
+  AnimatePresence,
+  AnimatedListItem,
+  FadeIn,
+  Stagger,
+  StaggerItem,
+  HoverRow,
+} from '../components/ui/motion'
 
 // Mirrors vanilla integrations.js load order: status first → prevents calling
 // connected/apps when Composio has no key (avoids hanging for minutes).
@@ -124,131 +132,148 @@ export default function IntegrationsView() {
       />
 
       <div className="view-body cv-view-body">
-        {/* ── Web search (Brave) ─────────────────────────────────────────── */}
-        <section className="cv-section" aria-label="Búsqueda web">
-          <h2 className="cv-section-label">Búsqueda web</h2>
-          {wsState.status === 'loading' && <div className="cv-skeleton" style={{ height: 48 }} aria-busy="true" />}
-          {wsState.status === 'error' && (
-            <div role="alert">
-              <p className="state-error">{wsState.message}</p>
-              <Button variant="secondary" size="sm" onClick={loadWebSearch} style={{ marginTop: 8 }}>
-                Reintentar
-              </Button>
-            </div>
-          )}
-          {wsState.status === 'ready' && (
-            <WebSearchCard
-              status={wsState.data}
-              onSaved={() => { loadWebSearch(); show('Brave activado — las búsquedas del agente ya usan Brave', 'ok') }}
-              onToast={show}
-            />
-          )}
-        </section>
+        <Stagger style={{ display: 'flex', flexDirection: 'column', gap: 'var(--sp-8)' }}>
 
-        {/* ── Composio status ────────────────────────────────────────────── */}
-        <section className="cv-section" aria-label="Estado Composio">
-          <h2 className="cv-section-label">Composio — conecta tus apps</h2>
-          {composioState.status === 'loading' && (
-            <div className="cv-skeleton" style={{ height: 48 }} aria-busy="true" />
-          )}
-          {composioState.status === 'no-key' && (
-            <ComposioSetupCard
-              onSaved={() => {
-                loadComposio()
-                show('Composio conectado — ahora puedes conectar tus apps', 'ok')
-              }}
-              onToast={show}
-            />
-          )}
-          {composioState.status === 'error' && (
-            <div role="alert">
-              <p className="state-error">{composioState.message}</p>
-              <Button variant="secondary" size="sm" onClick={loadComposio} style={{ marginTop: 8 }}>
-                Reintentar
-              </Button>
-            </div>
-          )}
-          {composioState.status === 'ready' && (
-            <div className="integration-status-ok" aria-label="Composio activo">
-              <Check size={15} className="integration-status-ok__check" aria-hidden="true" />
-              Composio activo · Tu cuenta: <code>{composioState.info.entity_id ?? ''}</code>
-            </div>
-          )}
-        </section>
-
-        {/* ── Connected apps ─────────────────────────────────────────────── */}
-        <section className="cv-section" aria-label="Apps conectadas">
-          <h2 className="cv-section-label">Conectadas</h2>
-          {composioState.status === 'loading' && <div className="cv-skeleton" style={{ height: 48 }} aria-busy="true" />}
-          {(composioState.status === 'no-key' || composioState.status === 'error') && (
-            <p className="cv-empty">Conecta Composio (arriba) para ver y conectar tus apps.</p>
-          )}
-          {composioState.status === 'ready' && (
-            composioState.connected.length === 0
-              ? (
-                <EmptyState
-                  icon={<Plug size={32} />}
-                  title="Sin apps conectadas"
-                  description="Conéctate a Gmail, Slack, Notion y más desde el catálogo de abajo."
+          {/* ── Web search (Brave) ─────────────────────────────────────────── */}
+          <StaggerItem>
+            <section className="cv-section" aria-label="Búsqueda web">
+              <h2 className="cv-section-label">Búsqueda web</h2>
+              {wsState.status === 'loading' && <div className="cv-skeleton" style={{ height: 48 }} aria-busy="true" />}
+              {wsState.status === 'error' && (
+                <FadeIn>
+                  <div role="alert">
+                    <p className="state-error">{wsState.message}</p>
+                    <Button variant="secondary" size="sm" onClick={loadWebSearch} style={{ marginTop: 8 }}>
+                      Reintentar
+                    </Button>
+                  </div>
+                </FadeIn>
+              )}
+              {wsState.status === 'ready' && (
+                <WebSearchCard
+                  status={wsState.data}
+                  onSaved={() => { loadWebSearch(); show('Brave activado — las búsquedas del agente ya usan Brave', 'ok') }}
+                  onToast={show}
                 />
-              )
-              : (
-                <ul className="cv-list" role="list">
-                  {composioState.connected.map((app, i) => (
-                    <li key={app.slug} className="ds-list-item-enter" style={{ animationDelay: `${i * 30}ms` }}>
-                      <AppRow
-                        app={app}
-                        isConnected
-                      />
-                    </li>
-                  ))}
-                </ul>
-              )
-          )}
-        </section>
+              )}
+            </section>
+          </StaggerItem>
 
-        {/* ── Available apps ──────────────────────────────────────────────── */}
-        <section className="cv-section" aria-label="Apps disponibles">
-          <h2 className="cv-section-label">Apps disponibles</h2>
-          {composioState.status === 'loading' && <div className="cv-skeleton" style={{ height: 48 }} aria-busy="true" />}
-          {(composioState.status === 'no-key' || composioState.status === 'error') && (
-            <p className="cv-empty">Conecta Composio (arriba) para ver y conectar tus apps.</p>
-          )}
-          {composioState.status === 'ready' && (() => {
-            const remaining = composioState.apps.filter(a => !connectedSlugs.has(a.slug))
-            return remaining.length === 0
-              ? (
-                <EmptyState
-                  icon={<Globe size={32} />}
-                  title="Sin apps adicionales disponibles"
+          {/* ── Composio status ────────────────────────────────────────────── */}
+          <StaggerItem>
+            <section className="cv-section" aria-label="Estado Composio">
+              <h2 className="cv-section-label">Composio — conecta tus apps</h2>
+              {composioState.status === 'loading' && (
+                <div className="cv-skeleton" style={{ height: 48 }} aria-busy="true" />
+              )}
+              {composioState.status === 'no-key' && (
+                <ComposioSetupCard
+                  onSaved={() => {
+                    loadComposio()
+                    show('Composio conectado — ahora puedes conectar tus apps', 'ok')
+                  }}
+                  onToast={show}
                 />
-              )
-              : (
-                <ul className="cv-list" role="list">
-                  {remaining.map((app, i) => (
-                    <li key={app.slug} className="ds-list-item-enter" style={{ animationDelay: `${i * 20}ms` }}>
-                      <AppRow
-                        app={app}
-                        isConnected={false}
-                        onConnect={async (a) => {
-                          try {
-                            const r = await connectComposioApp(a.slug)
-                            if (r?.redirect_url) {
-                              window.open(r.redirect_url, '_blank', 'noopener,noreferrer')
-                            }
-                            show(`Conectando ${a.name ?? a.slug}… completa la autorización en el navegador`, 'info')
-                            reloadTimerRef.current = setTimeout(loadComposio, 3000)
-                          } catch (e) {
-                            show(e instanceof Error ? e.message : 'Error', 'error')
-                          }
-                        }}
-                      />
-                    </li>
-                  ))}
-                </ul>
-              )
-          })()}
-        </section>
+              )}
+              {composioState.status === 'error' && (
+                <FadeIn>
+                  <div role="alert">
+                    <p className="state-error">{composioState.message}</p>
+                    <Button variant="secondary" size="sm" onClick={loadComposio} style={{ marginTop: 8 }}>
+                      Reintentar
+                    </Button>
+                  </div>
+                </FadeIn>
+              )}
+              {composioState.status === 'ready' && (
+                <div className="integration-status-ok" aria-label="Composio activo">
+                  <Check size={15} className="integration-status-ok__check" aria-hidden="true" />
+                  Composio activo · Tu cuenta: <code>{composioState.info.entity_id ?? ''}</code>
+                </div>
+              )}
+            </section>
+          </StaggerItem>
+
+          {/* ── Connected apps ─────────────────────────────────────────────── */}
+          <StaggerItem>
+            <section className="cv-section" aria-label="Apps conectadas">
+              <h2 className="cv-section-label">Conectadas</h2>
+              {composioState.status === 'loading' && <div className="cv-skeleton" style={{ height: 48 }} aria-busy="true" />}
+              {(composioState.status === 'no-key' || composioState.status === 'error') && (
+                <p className="cv-empty">Conecta Composio (arriba) para ver y conectar tus apps.</p>
+              )}
+              {composioState.status === 'ready' && (
+                composioState.connected.length === 0
+                  ? (
+                    <EmptyState
+                      icon={<Plug size={32} />}
+                      title="Sin apps conectadas"
+                      description="Conéctate a Gmail, Slack, Notion y más desde el catálogo de abajo."
+                    />
+                  )
+                  : (
+                    <ul className="cv-list" role="list">
+                      <AnimatePresence initial={false}>
+                        {composioState.connected.map(app => (
+                          <AnimatedListItem key={app.slug}>
+                            <AppRow app={app} isConnected />
+                          </AnimatedListItem>
+                        ))}
+                      </AnimatePresence>
+                    </ul>
+                  )
+              )}
+            </section>
+          </StaggerItem>
+
+          {/* ── Available apps ──────────────────────────────────────────────── */}
+          <StaggerItem>
+            <section className="cv-section" aria-label="Apps disponibles">
+              <h2 className="cv-section-label">Apps disponibles</h2>
+              {composioState.status === 'loading' && <div className="cv-skeleton" style={{ height: 48 }} aria-busy="true" />}
+              {(composioState.status === 'no-key' || composioState.status === 'error') && (
+                <p className="cv-empty">Conecta Composio (arriba) para ver y conectar tus apps.</p>
+              )}
+              {composioState.status === 'ready' && (() => {
+                const remaining = composioState.apps.filter(a => !connectedSlugs.has(a.slug))
+                return remaining.length === 0
+                  ? (
+                    <EmptyState
+                      icon={<Globe size={32} />}
+                      title="Sin apps adicionales disponibles"
+                    />
+                  )
+                  : (
+                    <ul className="cv-list" role="list">
+                      <AnimatePresence initial={false}>
+                        {remaining.map(app => (
+                          <AnimatedListItem key={app.slug}>
+                            <AppRow
+                              app={app}
+                              isConnected={false}
+                              onConnect={async (a) => {
+                                try {
+                                  const r = await connectComposioApp(a.slug)
+                                  if (r?.redirect_url) {
+                                    window.open(r.redirect_url, '_blank', 'noopener,noreferrer')
+                                  }
+                                  show(`Conectando ${a.name ?? a.slug}… completa la autorización en el navegador`, 'info')
+                                  reloadTimerRef.current = setTimeout(loadComposio, 3000)
+                                } catch (e) {
+                                  show(e instanceof Error ? e.message : 'Error', 'error')
+                                }
+                              }}
+                            />
+                          </AnimatedListItem>
+                        ))}
+                      </AnimatePresence>
+                    </ul>
+                  )
+              })()}
+            </section>
+          </StaggerItem>
+
+        </Stagger>
       </div>
     </>
   )
@@ -265,7 +290,7 @@ interface AppRowProps {
 function AppRow({ app, isConnected, onConnect }: AppRowProps) {
   const displayName = app.name ?? (app as unknown as Record<string, unknown>).toolkit_slug as string | undefined ?? app.slug ?? '—'
   return (
-    <div className={`integration-row${isConnected ? ' integration-row--connected' : ''}`}>
+    <HoverRow className={`integration-row${isConnected ? ' integration-row--connected' : ''}`}>
       <div className="integration-row__icon" aria-hidden="true">
         {app.logo
           ? <img src={app.logo} alt="" width={20} height={20} />
@@ -297,7 +322,7 @@ function AppRow({ app, isConnected, onConnect }: AppRowProps) {
           )
         }
       </div>
-    </div>
+    </HoverRow>
   )
 }
 

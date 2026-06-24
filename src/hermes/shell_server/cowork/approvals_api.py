@@ -154,6 +154,8 @@ _MFA_REASON_MESSAGES: dict[str, str] = {
     "mfa_not_enrolled": "No hay MFA configurado. Configúralo antes de aprobar acciones.",
     "invalid_totp": "Código TOTP incorrecto o expirado.",
     "mfa_required": "Se requiere MFA para aprobar esta acción.",
+    "proposal_invalid": "Esta aprobación ya no es válida (puede haber expirado o ya fue "
+                        "resuelta). Refresca el panel.",
 }
 
 

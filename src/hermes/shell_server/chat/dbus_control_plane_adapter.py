@@ -442,6 +442,17 @@ def _translate_dbus_error(exc: Exception) -> None:
         raise EnqueueNotAuthorized(
             f"UID del shell-server no autorizado por el daemon: {exc}"
         ) from exc
+    # Gate rejections (proposal not found / already resolved / MFA) surface as a clear
+    # 4xx, NOT a generic 503 "agente no disponible" — the daemon IS reachable; the
+    # approval is just no longer valid. (The D-Bus error string carries the gate class.)
+    if "approvalgateerror" in err_str:
+        from hermes.capabilities.infrastructure.sqlite_approval_gate import (  # noqa: PLC0415
+            ApprovalGateError,
+        )
+        raise ApprovalGateError(
+            "Esta aprobación ya no es válida (puede haber expirado o ya fue resuelta).",
+            reason="proposal_invalid",
+        ) from exc
     raise AgentUnavailable(
         f"org.hermes.Runtime1 no disponible en el bus: {exc}"
     ) from exc

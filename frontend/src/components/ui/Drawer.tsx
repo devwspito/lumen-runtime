@@ -1,5 +1,6 @@
 import { useEffect, useRef, type ReactNode } from 'react'
 import { X } from 'lucide-react'
+import { AnimatedDrawer } from './motion'
 
 interface DrawerProps {
   open: boolean
@@ -12,9 +13,9 @@ interface DrawerProps {
 /**
  * Slide-in side panel from the right.
  * Handles: Escape key, click-outside, focus trap, reduced-motion.
+ * Animation is driven by AnimatePresence + spring physics via AnimatedDrawer.
  */
 export function Drawer({ open, title, onClose, children, width = 400 }: DrawerProps) {
-  const drawerRef = useRef<HTMLDivElement>(null)
   const closeButtonRef = useRef<HTMLButtonElement>(null)
 
   // Focus the close button when the drawer opens
@@ -36,11 +37,12 @@ export function Drawer({ open, title, onClose, children, width = 400 }: DrawerPr
 
   // Focus trap
   useEffect(() => {
-    if (!open || !drawerRef.current) return
-    const el = drawerRef.current
+    if (!open) return
 
     function handleTab(e: KeyboardEvent) {
       if (e.key !== 'Tab') return
+      const el = document.querySelector('[data-drawer-panel]') as HTMLElement | null
+      if (!el) return
       const focusable = el.querySelectorAll<HTMLElement>(
         'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
       )
@@ -57,21 +59,9 @@ export function Drawer({ open, title, onClose, children, width = 400 }: DrawerPr
     return () => document.removeEventListener('keydown', handleTab)
   }, [open])
 
-  if (!open) return null
-
   return (
-    <div
-      className="office-drawer-backdrop ds-drawer-backdrop"
-      onClick={e => { if (e.target === e.currentTarget) onClose() }}
-      aria-modal="true"
-      role="dialog"
-      aria-label={title}
-    >
-      <div
-        ref={drawerRef}
-        className="office-drawer ds-drawer"
-        style={{ maxWidth: width }}
-      >
+    <AnimatedDrawer open={open} onBackdropClick={onClose} width={width} label={title}>
+      <div data-drawer-panel>
         <div className="office-drawer-header">
           <div style={{ flex: 1 }}>
             <div className="office-drawer-title">{title}</div>
@@ -90,6 +80,6 @@ export function Drawer({ open, title, onClose, children, width = 400 }: DrawerPr
           {children}
         </div>
       </div>
-    </div>
+    </AnimatedDrawer>
   )
 }

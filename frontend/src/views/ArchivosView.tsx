@@ -18,6 +18,14 @@ import { Drawer } from '../components/ui/Drawer'
 import { EmptyState } from '../components/ui/EmptyState'
 import { PageHeader } from '../components/ui/PageHeader'
 import { Button } from '../components/ui/Button'
+import {
+  AnimatePresence,
+  AnimatedListItem,
+  FadeIn,
+  HoverRow,
+  motion,
+  TWEEN,
+} from '../components/ui/motion'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -65,7 +73,7 @@ const TEXT_KINDS = new Set(['text', 'markdown', 'code', 'log'])
 
 type BrowseState =
   | { status: 'loading' }
-  | { status: 'success'; entries: WorkspaceFile[] }
+  | { status: 'success'; entries: WorkspaceFile[]; path: string }
   | { status: 'error'; message: string }
 
 // ── Breadcrumb ────────────────────────────────────────────────────────────────
@@ -120,8 +128,8 @@ function ListEntry({ entry, onClick }: EntryProps) {
   const isDir = Boolean(entry.is_dir || entry.kind === 'directory')
   const colorClass = iconColorClass(entry.kind, isDir)
   return (
-    <li
-      className="arch-entry ds-list-item-enter"
+    <HoverRow
+      className="arch-entry"
       role="button"
       tabIndex={0}
       onClick={onClick}
@@ -134,7 +142,7 @@ function ListEntry({ entry, onClick }: EntryProps) {
       <span className="arch-entry__name">{entry.name}</span>
       <span className="arch-entry__size">{isDir ? '—' : formatBytes(entry.size)}</span>
       <span className="arch-entry__date">{formatDate(entry.modified)}</span>
-    </li>
+    </HoverRow>
   )
 }
 
@@ -142,8 +150,8 @@ function GridEntry({ entry, onClick }: EntryProps) {
   const isDir = Boolean(entry.is_dir || entry.kind === 'directory')
   const colorClass = iconColorClass(entry.kind, isDir)
   return (
-    <li
-      className="arch-grid-entry ds-list-item-enter"
+    <HoverRow
+      className="arch-grid-entry"
       role="button"
       tabIndex={0}
       onClick={onClick}
@@ -157,7 +165,7 @@ function GridEntry({ entry, onClick }: EntryProps) {
         }
       </span>
       <span className="arch-grid-entry__name">{entry.name}</span>
-    </li>
+    </HoverRow>
   )
 }
 
@@ -257,7 +265,7 @@ export default function ArchivosView() {
         if (!aDir && bDir) return 1
         return a.name.localeCompare(b.name, 'es')
       })
-      setBrowseState({ status: 'success', entries })
+      setBrowseState({ status: 'success', entries, path })
     } catch (err) {
       setBrowseState({
         status: 'error',
@@ -280,6 +288,10 @@ export default function ArchivosView() {
       setSelectedFile(entry)
     }
   }
+
+  // Stable key for the entry list that changes on navigation so AnimatePresence
+  // triggers a cross-fade when the user enters a different folder.
+  const listKey = browseState.status === 'success' ? browseState.path : '__loading__'
 
   return (
     <>
@@ -338,58 +350,79 @@ export default function ArchivosView() {
         )}
 
         {browseState.status === 'error' && (
-          <div role="alert">
-            <p className="state-error">{browseState.message}</p>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => load(currentPath)}
-              style={{ marginTop: 8 }}
-            >
-              Reintentar
-            </Button>
-          </div>
+          <FadeIn>
+            <div role="alert">
+              <p className="state-error">{browseState.message}</p>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => load(currentPath)}
+                style={{ marginTop: 8 }}
+              >
+                Reintentar
+              </Button>
+            </div>
+          </FadeIn>
         )}
 
-        {browseState.status === 'success' && browseState.entries.length === 0 && (
-          <EmptyState
-            icon={<Folder size={40} />}
-            title="Esta carpeta está vacía"
-            description="Los archivos que cree el agente aparecerán aquí."
-          />
-        )}
+        {/* AnimatePresence key on listKey creates a cross-fade when navigating folders */}
+        <AnimatePresence mode="wait">
+          {browseState.status === 'success' && (
+            <motion.div
+              key={listKey}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={TWEEN}
+            >
+              {browseState.entries.length === 0 && (
+                <EmptyState
+                  icon={<Folder size={40} />}
+                  title="Esta carpeta está vacía"
+                  description="Los archivos que cree el agente aparecerán aquí."
+                />
+              )}
 
-        {browseState.status === 'success' && browseState.entries.length > 0 && (
-          viewMode === 'list' ? (
-            <ul
-              className="arch-list"
-              role="list"
-              aria-label={`${browseState.entries.length} elemento${browseState.entries.length === 1 ? '' : 's'}`}
-            >
-              {browseState.entries.map(entry => (
-                <ListEntry
-                  key={entry.path}
-                  entry={entry}
-                  onClick={() => handleEntryClick(entry)}
-                />
-              ))}
-            </ul>
-          ) : (
-            <ul
-              className="arch-grid"
-              role="list"
-              aria-label={`${browseState.entries.length} elemento${browseState.entries.length === 1 ? '' : 's'}`}
-            >
-              {browseState.entries.map(entry => (
-                <GridEntry
-                  key={entry.path}
-                  entry={entry}
-                  onClick={() => handleEntryClick(entry)}
-                />
-              ))}
-            </ul>
-          )
-        )}
+              {browseState.entries.length > 0 && (
+                viewMode === 'list' ? (
+                  <ul
+                    className="arch-list"
+                    role="list"
+                    aria-label={`${browseState.entries.length} elemento${browseState.entries.length === 1 ? '' : 's'}`}
+                  >
+                    <AnimatePresence initial={false}>
+                      {browseState.entries.map(entry => (
+                        <AnimatedListItem key={entry.path}>
+                          <ListEntry
+                            entry={entry}
+                            onClick={() => handleEntryClick(entry)}
+                          />
+                        </AnimatedListItem>
+                      ))}
+                    </AnimatePresence>
+                  </ul>
+                ) : (
+                  <ul
+                    className="arch-grid"
+                    role="list"
+                    aria-label={`${browseState.entries.length} elemento${browseState.entries.length === 1 ? '' : 's'}`}
+                  >
+                    <AnimatePresence initial={false}>
+                      {browseState.entries.map(entry => (
+                        <AnimatedListItem key={entry.path}>
+                          <GridEntry
+                            entry={entry}
+                            onClick={() => handleEntryClick(entry)}
+                          />
+                        </AnimatedListItem>
+                      ))}
+                    </AnimatePresence>
+                  </ul>
+                )
+              )}
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
 
       <FileDrawer

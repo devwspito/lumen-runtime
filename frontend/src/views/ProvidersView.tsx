@@ -1,6 +1,6 @@
 import { useEffect, useReducer, useRef, useState } from 'react'
 import { sileo } from 'sileo'
-import { X, Cpu } from 'lucide-react'
+import { X, Cpu, Cloud, Server, Globe } from 'lucide-react'
 import {
   listProviders, listNativeProviders, addProvider, setActiveProvider,
   testProvider, deleteProvider, startProviderOAuth, getProviderOAuthStatus,
@@ -12,6 +12,18 @@ import Badge from '../components/Badge'
 import { PageHeader } from '../components/ui/PageHeader'
 import { EmptyState } from '../components/ui/EmptyState'
 import { Button } from '../components/ui/Button'
+import {
+  AnimatePresence,
+  AnimatedListItem,
+  AnimatedExpanderContent,
+  FadeIn,
+  Stagger,
+  StaggerItem,
+  motion,
+  useReducedMotion,
+  SPRING,
+  TWEEN_FAST,
+} from '../components/ui/motion'
 
 // Mirrors vanilla providers.js: badge colours per kind/auth-type
 const KIND_COLORS: Record<string, string> = {
@@ -43,6 +55,19 @@ function providerName(p: Provider): string {
   return p.alias ?? p.name ?? p.provider_id ?? ''
 }
 
+function ProviderChip({ provider }: { provider: Provider }) {
+  const kind = String(provider.kind ?? provider.category ?? '').toLowerCase()
+  const isLocal = kind === 'ollama' || kind === 'vllm' || kind === 'openai_compatible'
+  const isCloud = kind === 'anthropic' || kind === 'openai' || kind === 'google' ||
+    kind === 'gemini' || kind === 'azure' || kind === 'mistral' || kind === 'groq'
+  const IconEl = isLocal ? Server : isCloud ? Cloud : Globe
+  return (
+    <span className="ds-icon-chip ds-icon-chip--neutral" aria-hidden="true">
+      <IconEl size={14} />
+    </span>
+  )
+}
+
 // Discriminated state to make impossible combinations unreachable
 type State =
   | { status: 'loading' }
@@ -68,14 +93,25 @@ function show(message: string, kind: 'ok' | 'warn' | 'error' = 'ok') {
   else sileo.warning({ title: message })
 }
 
+// Skeleton loading rows with shimmer
+function SkeletonRows({ count }: { count: number }) {
+  return (
+    <Stagger style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      {[...Array(count)].map((_, i) => (
+        <StaggerItem key={i}>
+          <div className="cv-skeleton" style={{ height: 52 }} />
+        </StaggerItem>
+      ))}
+    </Stagger>
+  )
+}
+
 export default function ProvidersView() {
   const [state, dispatch] = useReducer(reducer, { status: 'loading' })
   const [confirm, ConfirmDialogNode] = useConfirmDialog()
 
   function load() {
     dispatch({ type: 'RELOAD' })
-    // Both calls throw on error — we catch at the combined level so the view
-    // shows an honest error instead of silently returning empty arrays.
     Promise.all([listProviders(), listNativeProviders()])
       .then(([configured, native]) => {
         dispatch({
@@ -108,78 +144,88 @@ export default function ProvidersView() {
 
       <div className="view-body cv-view-body">
         {state.status === 'loading' && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }} aria-busy="true">
-            {[...Array(3)].map((_, i) => <div key={i} className="cv-skeleton" style={{ height: 52 }} />)}
-          </div>
+          <SkeletonRows count={3} />
         )}
 
         {state.status === 'error' && (
-          <div className="state-container" role="alert">
-            <p className="state-error">{state.message}</p>
-            <Button variant="secondary" onClick={load}>Reintentar</Button>
-          </div>
+          <FadeIn>
+            <div className="state-container" role="alert">
+              <p className="state-error">{state.message}</p>
+              <Button variant="secondary" onClick={load}>Reintentar</Button>
+            </div>
+          </FadeIn>
         )}
 
         {state.status === 'success' && (
-          <>
-            <section className="cv-section" aria-label="Proveedores configurados">
-              <h2 className="cv-section-label">Configurados</h2>
-              {state.configured.length === 0
-                ? (
-                  <EmptyState
-                    icon={<Cpu size={36} />}
-                    title="Sin proveedores configurados"
-                    description="Añade uno del catálogo para empezar a chatear."
-                  />
-                )
-                : (
-                  <ul className="cv-list" role="list">
-                    {state.configured.map(p => (
-                      <li key={p.provider_id} className="ds-list-item-enter">
-                        <ProviderRow
-                          provider={p}
-                          isConfigured
-                          onRefresh={load}
-                          onToast={show}
-                          onConfirm={confirm}
-                        />
-                      </li>
-                    ))}
-                  </ul>
-                )
-              }
-            </section>
+          <Stagger style={{ display: 'flex', flexDirection: 'column', gap: 'var(--sp-8)' }}>
+            <StaggerItem>
+              <section className="cv-section" aria-label="Proveedores configurados">
+                <h2 className="cv-section-label">Configurados</h2>
+                {state.configured.length === 0
+                  ? (
+                    <EmptyState
+                      icon={<Cpu size={36} />}
+                      title="Sin proveedores configurados"
+                      description="Añade uno del catálogo para empezar a chatear."
+                    />
+                  )
+                  : (
+                    <ul className="cv-list" role="list">
+                      <AnimatePresence initial={false}>
+                        {state.configured.map(p => (
+                          <AnimatedListItem key={p.provider_id}>
+                            <ProviderRow
+                              provider={p}
+                              isConfigured
+                              onRefresh={load}
+                              onToast={show}
+                              onConfirm={confirm}
+                            />
+                          </AnimatedListItem>
+                        ))}
+                      </AnimatePresence>
+                    </ul>
+                  )
+                }
+              </section>
+            </StaggerItem>
 
-            <section className="cv-section" aria-label="Modelo propio o local">
-              <h2 className="cv-section-label">Modelo propio / local</h2>
-              <CustomProviderCard onAdded={load} onToast={show} />
-            </section>
+            <StaggerItem>
+              <section className="cv-section" aria-label="Modelo propio o local">
+                <h2 className="cv-section-label">Modelo propio / local</h2>
+                <CustomProviderCard onAdded={load} onToast={show} />
+              </section>
+            </StaggerItem>
 
-            <section className="cv-section" aria-label="Catálogo nativo Hermes">
-              <h2 className="cv-section-label">Catálogo nativo Hermes</h2>
-              {state.native.length === 0
-                ? <p className="cv-empty">Catálogo no disponible en esta versión.</p>
-                : (
-                  <ul className="cv-list" role="list">
-                    {state.native
-                      .filter(p => !configuredIds.has(p.provider_id))
-                      .map(p => (
-                        <li key={p.provider_id} className="ds-list-item-enter">
-                          <ProviderRow
-                            provider={p}
-                            isConfigured={false}
-                            onRefresh={load}
-                            onToast={show}
-                            onConfirm={confirm}
-                          />
-                        </li>
-                      ))
-                    }
-                  </ul>
-                )
-              }
-            </section>
-          </>
+            <StaggerItem>
+              <section className="cv-section" aria-label="Catálogo nativo Hermes">
+                <h2 className="cv-section-label">Catálogo nativo Hermes</h2>
+                {state.native.length === 0
+                  ? <p className="cv-empty">Catálogo no disponible en esta versión.</p>
+                  : (
+                    <ul className="cv-list" role="list">
+                      <AnimatePresence initial={false}>
+                        {state.native
+                          .filter(p => !configuredIds.has(p.provider_id))
+                          .map(p => (
+                            <AnimatedListItem key={p.provider_id}>
+                              <ProviderRow
+                                provider={p}
+                                isConfigured={false}
+                                onRefresh={load}
+                                onToast={show}
+                                onConfirm={confirm}
+                              />
+                            </AnimatedListItem>
+                          ))
+                        }
+                      </AnimatePresence>
+                    </ul>
+                  )
+                }
+              </section>
+            </StaggerItem>
+          </Stagger>
         )}
       </div>
     </>
@@ -199,13 +245,12 @@ interface ProviderRowProps {
 }
 
 function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: ProviderRowProps) {
+  const reduced = useReducedMotion()
   const [testing, setTesting] = useState(false)
   const [oauthPending, setOauthPending] = useState(false)
   const [showKeyForm, setShowKeyForm] = useState(false)
   const [apiKeyInput, setApiKeyInput] = useState('')
   const [addingKey, setAddingKey] = useState(false)
-  // Tracks a failed post-add connectivity test so we can show a persistent
-  // inline error. Cleared when the user opens the key form again to retry.
   const [addConnFailed, setAddConnFailed] = useState(false)
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const label = badgeLabel(provider)
@@ -266,7 +311,6 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
       setShowKeyForm(false)
       setApiKeyInput('')
 
-      // Test before activating: only make this model usable when the key works.
       let testPassed = false
       try {
         const r = await testProvider(id)
@@ -281,8 +325,6 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
         onToast(`${name} conectado y verificado — pruébalo en el chat`, 'ok')
         onRefresh()
       } else {
-        // Provider was saved but is NOT activated — leave it inactive and surface
-        // a persistent inline error so the owner knows the model is not usable yet.
         setAddConnFailed(true)
         onRefresh()
       }
@@ -358,13 +400,18 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
     pollRef.current = setTimeout(poll, intervalMs)
   }
 
-  // Cleanup on unmount
   useEffect(() => () => {
     if (pollRef.current) clearTimeout(pollRef.current)
   }, [])
 
   return (
-    <div className={`provider-row${isConfigured && provider.is_active ? ' provider-row--active' : ''}`}>
+    <motion.div
+      className={`provider-row${isConfigured && provider.is_active ? ' provider-row--active' : ''}`}
+      whileHover={reduced ? undefined : { y: -2 }}
+      transition={SPRING}
+      layout
+    >
+      <ProviderChip provider={provider} />
       <div className="provider-row__left">
         <div className="provider-row__name">{name}</div>
         <div className="provider-row__meta">
@@ -426,8 +473,8 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
         ) : null}
       </div>
 
-      {/* Inline masked-input for API key — avoids window.prompt leaking the secret */}
-      {!isConfigured && !isOAuthProvider(provider) && showKeyForm && (
+      {/* Animated inline API-key form */}
+      <AnimatedExpanderContent open={!isConfigured && !isOAuthProvider(provider) && showKeyForm}>
         <div className="cv-form-inline" style={{ marginTop: 'var(--sp-3)', flexWrap: 'wrap', gap: 'var(--sp-2)' }}>
           <label className="sr-only" htmlFor={`pv-key-${id}`}>Clave API para {name}</label>
           <input
@@ -441,14 +488,16 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
             onKeyDown={e => { if (e.key === 'Enter') void handleAddConfirm() }}
             style={{ flex: 1, minWidth: 180 }}
           />
-          <button
+          <motion.button
             className="cv-btn cv-btn--primary cv-btn--sm"
             onClick={handleAddConfirm}
             disabled={addingKey}
             type="button"
+            whileTap={reduced ? undefined : { scale: 0.97 }}
+            transition={TWEEN_FAST}
           >
             {addingKey ? 'Guardando…' : 'Guardar'}
-          </button>
+          </motion.button>
           <button
             className="cv-btn cv-btn--ghost cv-btn--sm"
             onClick={() => { setShowKeyForm(false); setApiKeyInput('') }}
@@ -457,8 +506,8 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
             Cancelar
           </button>
         </div>
-      )}
-    </div>
+      </AnimatedExpanderContent>
+    </motion.div>
   )
 }
 
@@ -473,6 +522,7 @@ function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
   const [open, setOpen] = useState(false)
   const [saving, setSaving] = useState(false)
   const [connFailed, setConnFailed] = useState(false)
+  const reduced = useReducedMotion()
   const aliasRef = useRef<HTMLInputElement>(null)
   const urlRef = useRef<HTMLInputElement>(null)
   const modelRef = useRef<HTMLInputElement>(null)
@@ -491,7 +541,6 @@ function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
 
     setSaving(true)
     try {
-      // Add without activating; only activate after the connection test passes.
       const added = await addProvider({ kind: 'openai_compatible', alias, default_model, base_url, api_key })
       const newId = (added as { provider_id?: string }).provider_id ?? alias
 
@@ -514,7 +563,6 @@ function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
         onToast('Modelo propio añadido y activado — pruébalo en el chat', 'ok')
         onAdded()
       } else {
-        // Saved but not activated — leave form open so the user can correct the URL/key.
         setConnFailed(true)
         onAdded()
       }
@@ -524,16 +572,20 @@ function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
   }
 
   return (
-    <div className="cv-teach-card">
-      <p className="cv-teach-intro">
-        Conecta cualquier servidor compatible: vLLM, LM Studio, Ollama o uno propio.
-      </p>
-      {!open ? (
-        <Button variant="secondary" size="sm" onClick={() => setOpen(true)}>
-          Añadir modelo propio
-        </Button>
-      ) : (
-        <div className="cv-form-stack">
+    <motion.div className="cv-teach-card" layout>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--sp-3)' }}>
+        <p className="cv-teach-intro" style={{ margin: 0 }}>
+          Conecta cualquier servidor compatible: vLLM, LM Studio, Ollama o uno propio.
+        </p>
+        {!open && (
+          <Button variant="secondary" size="sm" onClick={() => setOpen(true)} style={{ alignSelf: 'flex-start', flexShrink: 0 }}>
+            Añadir modelo propio
+          </Button>
+        )}
+      </div>
+
+      <AnimatedExpanderContent open={open}>
+        <div className="cv-form-stack" style={{ paddingTop: 'var(--sp-3)' }}>
           <label className="cv-label" htmlFor="pv-c-alias">Nombre</label>
           <input
             id="pv-c-alias"
@@ -562,7 +614,6 @@ function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
             autoComplete="off"
           />
           <label className="cv-label" htmlFor="pv-c-key">Clave API</label>
-          {/* Never echo back: password input for secrets */}
           <input
             id="pv-c-key"
             ref={keyRef}
@@ -573,13 +624,15 @@ function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
           />
           <p className="cv-hint">La URL base debe terminar en /v1. La clave API solo si tu servidor la pide.</p>
           {connFailed && (
-            <p
+            <motion.p
               className="office-field-error"
               role="alert"
               style={{ color: '#EF4444', fontWeight: 500 }}
+              initial={reduced ? false : { opacity: 0, y: -4 }}
+              animate={{ opacity: 1, y: 0 }}
             >
               Conexión fallida — el modelo se guardó pero no está activo. Corrige la URL o la clave y vuelve a guardar.
-            </p>
+            </motion.p>
           )}
           <div className="cv-form-actions">
             <button
@@ -597,7 +650,7 @@ function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
             </button>
           </div>
         </div>
-      )}
-    </div>
+      </AnimatedExpanderContent>
+    </motion.div>
   )
 }
