@@ -1240,6 +1240,9 @@ def create_app() -> FastAPI:
     from hermes.shell_server.cowork.web_search_api import (  # noqa: PLC0415
         create_web_search_router,
     )
+    from hermes.shell_server.cowork.notifications_api import (  # noqa: PLC0415
+        create_notifications_router,
+    )
 
     app.include_router(create_providers_router())
     # Roster must be registered BEFORE agents_router to avoid FastAPI resolving
@@ -1253,6 +1256,11 @@ def create_app() -> FastAPI:
     app.include_router(create_security_router())
     app.include_router(create_memory_router())
     app.include_router(create_web_search_router())
+    # Notifications bell — /read-all must be registered BEFORE /{id}/read to
+    # avoid FastAPI resolving POST /read-all as /{notification_id}/read with
+    # notification_id="read-all".  The router factory registers them in this
+    # order internally; include_router preserves it.
+    app.include_router(create_notifications_router())
 
     # ------------------------------------------------------------------
     # Static web UI — mounted LAST so it never shadows /api/v1/* or /ws/*.

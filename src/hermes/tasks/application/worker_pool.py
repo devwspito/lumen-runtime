@@ -141,6 +141,8 @@ class WorkerPool:
         browser_adapter: Any | None = None,  # BrowserSurfaceAdapter | None
         agent_registry: Any | None = None,  # AgentRegistryPort | None (autonomy_level)
         conversation_repo: Any | None = None,  # SQLiteConversationRepository | None (Bug #2)
+        notification_store: Any | None = None,  # SqliteNotificationStore | None (bell)
+        memory_extraction_enabled: bool = True,  # Feature B: post-chat memory extraction
     ) -> None:
         self._queue = queue
         self._state = state
@@ -159,6 +161,8 @@ class WorkerPool:
         self._browser_adapter = browser_adapter
         self._agent_registry = agent_registry
         self._conversation_repo = conversation_repo  # SQLiteConversationRepository | None
+        self._notification_store = notification_store  # SqliteNotificationStore | None
+        self._memory_extraction_enabled = memory_extraction_enabled
 
         self._shutdown = asyncio.Event()
         # Condition para wake-on-enqueue con N workers (CTRL-P1-12).
@@ -366,6 +370,8 @@ class WorkerPool:
             chunk_sink=self._chunk_sink,
             agent_registry=self._agent_registry,
             conversation_repo=self._conversation_repo,
+            notification_store=self._notification_store,
+            memory_extraction_enabled=self._memory_extraction_enabled,
         )
 
         heartbeat = asyncio.create_task(

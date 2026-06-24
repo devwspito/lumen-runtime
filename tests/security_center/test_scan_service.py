@@ -115,12 +115,25 @@ async def test_clean_target_returns_pass():
 
 @pytest.mark.asyncio
 async def test_critical_cve_reduces_score():
+    """A single CVE:CRITICAL caps the score to FAIL (≤ 30).
+
+    Policy default weights: cve=20. CRITICAL penalty=25.
+    Weighted deduction = 25 × 20 / 100 = 5. Score before cap = 95.
+    ANY CRITICAL from a non-infra-state category (cve is not in _INFRA_STATE_CATEGORIES)
+    forces score ≤ 30.  Default policy has auto_block_fail=True so ScanBlockedError is raised.
+    With auto_block_fail=False, the record has score=30, verdict=FAIL.
+    """
     risk = Risk(category="cve", severity=Severity.CRITICAL, message="CVE-2024-1234", evidence_ref="CVE-2024-1234")
-    svc, _ = _make_service([_FixedScanner("cve", [risk])])
+    policy = SecurityPolicy(
+        auto_block_fail=False,  # don't raise, just record so we can inspect
+        require_approval_warn=True,
+        scanner_weights={"cve": 20, "mcp_lint": 20, "provenance": 12, "signature": 8, "content": 40},
+    )
+    svc, _ = _make_service([_FixedScanner("cve", [risk])], policy=policy)
     record = await svc.scan(_make_target())
-    # Weight cve=35, CRITICAL penalty=25. scaled = 25*35/100 = 8
-    assert record.score.value == 100 - 8
-    assert record.verdict == Verdict.PASS  # 92 >= 70
+    # Hard-cap: cve:CRITICAL is a real-scanner finding → cap to ≤ 30 (FAIL)
+    assert record.score.value <= 30
+    assert record.verdict == Verdict.FAIL
 
 
 @pytest.mark.asyncio

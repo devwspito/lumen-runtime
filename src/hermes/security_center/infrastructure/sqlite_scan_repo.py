@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS scan_records (
     score           INTEGER NOT NULL,
     verdict         TEXT NOT NULL,
     decision        TEXT NOT NULL DEFAULT 'PENDING',
+    engine          TEXT NOT NULL DEFAULT 'heuristic',
     risks_json      TEXT NOT NULL DEFAULT '[]',
     cached          INTEGER NOT NULL DEFAULT 0,
     elapsed_ms      INTEGER NOT NULL DEFAULT 0,
@@ -41,6 +42,11 @@ CREATE INDEX IF NOT EXISTS idx_scan_records_cache_key
     ON scan_records (cache_key, finished_at DESC);
 CREATE INDEX IF NOT EXISTS idx_scan_records_finished_at
     ON scan_records (finished_at DESC);
+"""
+
+# Migrate existing databases that predate the engine column.
+_MIGRATE_ENGINE_COL = """
+ALTER TABLE scan_records ADD COLUMN engine TEXT NOT NULL DEFAULT 'heuristic';
 """
 
 _POLICY_DDL = """
@@ -71,6 +77,14 @@ class SQLiteScanRepo:
     def _ensure_schema(self) -> None:
         with self._connect() as conn:
             conn.executescript(_DDL)
+            # Idempotent migration: add engine column to pre-existing databases.
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(scan_records)")}
+            if "engine" not in cols:
+                try:
+                    conn.execute(_MIGRATE_ENGINE_COL)
+                    logger.info("hermes.security_center.sqlite_scan_repo.migrated_engine_col")
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("hermes.security_center.sqlite_scan_repo.migrate_failed: %s", exc)
 
     def save(self, record: ScanRecord) -> None:
         risks_json = json.dumps([
@@ -87,9 +101,9 @@ class SQLiteScanRepo:
                 """
                 INSERT OR REPLACE INTO scan_records
                     (scan_id, kind, identifier, source_url, version, sha256,
-                     cache_key, manifest_json, score, verdict, decision, risks_json,
-                     cached, elapsed_ms, started_at, finished_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     cache_key, manifest_json, score, verdict, decision, engine,
+                     risks_json, cached, elapsed_ms, started_at, finished_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     str(record.id),
@@ -103,6 +117,7 @@ class SQLiteScanRepo:
                     record.score.value,
                     record.verdict.value,
                     record.decision,
+                    getattr(record, "engine", "heuristic"),
                     risks_json,
                     int(record.cached),
                     record.elapsed_ms,
@@ -164,12 +179,18 @@ class SQLiteScanRepo:
             sha256=row["sha256"] or "",
             manifest_json=row["manifest_json"] or "",
         )
+        # engine column added in migration; fall back to "heuristic" for pre-migration rows.
+        try:
+            engine = row["engine"] or "heuristic"
+        except (IndexError, KeyError):
+            engine = "heuristic"
         return ScanRecord(
             id=UUID(row["scan_id"]),
             target=target,
             score=InstallScore(value=int(row["score"]), risks=risks),
             verdict=Verdict(row["verdict"]),
             decision=row["decision"],
+            engine=engine,
             started_at=datetime.fromisoformat(row["started_at"]).replace(tzinfo=UTC),
             finished_at=datetime.fromisoformat(row["finished_at"]).replace(tzinfo=UTC),
             cached=bool(row["cached"]),

@@ -10,6 +10,31 @@ Endpoints:
 Security:
   - All reads are fail-soft (return degraded state, not 503).
   - Scan + decision are mutators; fail-hard 503 (CTRL-P1-11).
+
+Owner-approval flow (Part 2 contract):
+  1. Frontend calls POST /api/v1/security/scans/install with {kind, identifier}.
+     Response shape:
+       {
+         scan_id: str,
+         verdict: "PASS" | "WARN" | "FAIL",
+         score: int (0–100),
+         engine: "trivy" | "heuristic",
+         engine_label: str,               # human-readable provenance
+         requires_owner_approval: bool,   # true when verdict != "PASS"
+         risks: [{category, severity, message, evidence_ref}]
+       }
+  2. If requires_owner_approval=true, show the risk list and an approval dialog.
+  3. To approve, POST /api/v1/security/decisions with:
+       {
+         scan_id: str,        # from step 1
+         decision: "approve", # or "allow" / "allow_once" / "installed"
+         totp: str,           # owner TOTP code (required for override)
+         riddle_answer: str   # riddle answer if MFA riddle is configured
+       }
+     Response: { ok: true } on success, or 401/403 on MFA failure.
+  4. After a successful decision the ScanService gate records decision=ALLOWED
+     so the install verb (add_mcp_server / install_hub_skill / install_package)
+     sees the override in cache and proceeds.
 """
 
 from __future__ import annotations
@@ -130,7 +155,22 @@ def create_security_router() -> APIRouter:
     async def scan_install(request: Request, body: ScanInstallRequest) -> dict:
         """Run a pre-install security scan.
 
-        Returns {scan_id, verdict, score, risks}. fail-hard on daemon unavailable.
+        Returns:
+          {
+            scan_id: str,
+            verdict: "PASS" | "WARN" | "FAIL",
+            score: int,
+            engine: "trivy" | "heuristic",
+            engine_label: str,             # human-readable: what type of scan ran
+            requires_owner_approval: bool, # true when verdict != "PASS"
+            risks: [{category, severity, message, evidence_ref}]
+          }
+
+        When engine="heuristic", the scan ran without a full CVE database and the
+        verdict may be conservative.  If requires_owner_approval=true, the owner
+        can approve via POST /api/v1/security/decisions.
+
+        Fail-hard 503 on daemon unavailable.
         """
         proxy = request.app.state.dbus_proxy
         try:

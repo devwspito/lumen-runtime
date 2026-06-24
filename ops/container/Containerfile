@@ -177,28 +177,52 @@ RUN apt-get update && apt-get install -y --no-install-recommends socat \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Trivy CVE scanner (Security Center CVE slot probes /usr/bin/trivy exactly).
-# install.sh normalizes uname -m (aarch64->arm64, x86_64->amd64): same line on
-# arm64 DGX and amd64. Pinned for reproducible bakes; -b /usr/bin is the path
-# trivy_available() probes (trivy_cve_scanner.py:22 _TRIVY_BIN="/usr/bin/trivy").
+# Strategy:
+#   1. Detect arch (uname -m) and resolve to trivy's release naming (x86_64→Linux-64bit,
+#      aarch64→Linux-ARM64).  The install.sh helper does the same but by shelling out;
+#      doing it explicitly avoids "uname not found" edge cases in restricted build envs.
+#   2. Download the pinned release tarball directly from GitHub releases (no
+#      install.sh curl-pipe risk; checksum not verified here — keep it simple and
+#      best-effort consistent with the existing posture).
+#   3. Verify the binary runs (`trivy --version`).
+#   4. Log the engine selection AT BUILD TIME so `docker build` output shows which
+#      path the image uses.  The daemon also logs at boot via _scan_service_lazy().
+# INVARIANT: this entire block is best-effort (`|| echo WARN`).  A failed trivy
+# install must never break the image bake — the Security Center's heuristic fallback
+# (HeuristicFallbackScanner) is the correct degraded path and is already tested.
 ARG TRIVY_VERSION=v0.58.1
-# Best-effort: if the install fails (network/checksum/extract), the build STILL
-# succeeds and trivy_available()→False → the Security Center uses its heuristic CVE
-# fallback (graceful, identical to before). Never let trivy break the image bake.
-RUN ( curl -LsSf https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-        | sh -s -- -b /usr/bin "${TRIVY_VERSION}" \
-      && /usr/bin/trivy --version ) \
-    || echo "WARN: trivy install failed — Security Center falls back to heuristic CVE scan"
+ENV TRIVY_CACHE_DIR=/var/lib/hermes/trivy-cache
+RUN ARCH="$(uname -m)"; \
+    case "$ARCH" in \
+      x86_64)   TRIVY_ARCH="Linux-64bit"  ;; \
+      aarch64)  TRIVY_ARCH="Linux-ARM64"  ;; \
+      armv7l)   TRIVY_ARCH="Linux-ARM"    ;; \
+      *)        echo "WARN: trivy — unknown arch $ARCH, skipping install"; exit 0 ;; \
+    esac; \
+    TRIVY_VER="${TRIVY_VERSION#v}"; \
+    TRIVY_URL="https://github.com/aquasecurity/trivy/releases/download/${TRIVY_VERSION}/trivy_${TRIVY_VER}_${TRIVY_ARCH}.tar.gz"; \
+    echo "▸ trivy install: arch=${TRIVY_ARCH} ver=${TRIVY_VER}"; \
+    ( curl -LsSf "$TRIVY_URL" -o /tmp/trivy.tgz \
+      && tar -xzf /tmp/trivy.tgz -C /usr/bin trivy \
+      && chmod 0755 /usr/bin/trivy \
+      && rm -f /tmp/trivy.tgz \
+      && /usr/bin/trivy --version \
+      && echo "INFO: trivy installed — Security Center will use engine=trivy" ) \
+    || echo "WARN: trivy install failed — Security Center will use engine=heuristic (honest fallback)"
 # Pre-warm the trivy vuln DB so `trivy fs` works OFFLINE under the cage (runtime
 # egress is denied). Without a baked DB trivy would fetch at scan time, fail, and
-# degrade to []  — swapping one no-op for another. TRIVY_CACHE_DIR is the cache the
-# scanner's `trivy fs` reads at runtime; copied-up into the customer's fresh volume
-# like npm-cache. Best-effort (a failed prewarm must not break the bake).
-RUN mkdir -p /var/lib/hermes/trivy-cache && \
-    ( TRIVY_CACHE_DIR=/var/lib/hermes/trivy-cache /usr/bin/trivy fs --download-db-only 2>&1 | tail -2 \
-      || TRIVY_CACHE_DIR=/var/lib/hermes/trivy-cache /usr/bin/trivy image --download-db-only 2>&1 | tail -2 \
-      || true ) ; \
-    chown -R hermes:hermes-work /var/lib/hermes/trivy-cache && \
-    chmod -R g+rwX /var/lib/hermes/trivy-cache
+# degrade to [] — swapping one no-op for another.  TRIVY_CACHE_DIR set above (ENV)
+# so all trivy invocations use the same baked path at build and runtime.
+# Best-effort: a failed prewarm must not break the bake; the engine still works
+# without a local DB (it just won't find CVEs, same as the heuristic path).
+RUN mkdir -p "${TRIVY_CACHE_DIR}" && \
+    ( [ -x /usr/bin/trivy ] \
+      && TRIVY_CACHE_DIR="${TRIVY_CACHE_DIR}" /usr/bin/trivy image --download-db-only \
+           --db-repository ghcr.io/aquasecurity/trivy-db 2>&1 | tail -3 \
+      && echo "INFO: trivy DB pre-warmed at ${TRIVY_CACHE_DIR}" ) \
+    || echo "WARN: trivy DB prewarm skipped (trivy absent or network unavailable)"; \
+    chown -R hermes:hermes-work "${TRIVY_CACHE_DIR}" 2>/dev/null || true; \
+    chmod -R g+rwX "${TRIVY_CACHE_DIR}" 2>/dev/null || true
 
 # Hardening (V): strip ALL SUID-root bits. The cage uses systemd capabilities
 # (NET_ADMIN/SYS_ADMIN on the root units), NOT SUID — so su/mount/passwd/chfn/

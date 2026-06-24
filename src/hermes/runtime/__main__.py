@@ -1601,6 +1601,22 @@ async def _run(*, systemd_notify: bool) -> None:
             _conv_exc,
         )
 
+    # Notification store — written by the orchestrator at task/chat completion.
+    # Best-effort: if unavailable (schema migration failure, etc.) the orchestrator
+    # runs without notifications (honest degradation — no crash).
+    _orchestrator_notification_store = None
+    try:
+        from hermes.notifications.infrastructure.sqlite_notification_store import (  # noqa: PLC0415
+            SqliteNotificationStore as _SqliteNotifStore,
+        )
+        _orchestrator_notification_store = _SqliteNotifStore(db_path=_DB_PATH)
+    except Exception as _notif_exc:  # noqa: BLE001
+        logger.warning(
+            "hermes.runtime.notification_store_unavailable: %s — "
+            "bell notifications will not be persisted",
+            _notif_exc,
+        )
+
     orchestrator = AgentLoopOrchestrator(
         queue=queue,
         state=state,
@@ -1617,6 +1633,7 @@ async def _run(*, systemd_notify: bool) -> None:
         chunk_sink=chunk_sink,
         browser_adapter=browser_adapter,
         conversation_repo=_orchestrator_conversation_repo,
+        notification_store=_orchestrator_notification_store,
     )
 
     # D-Bus adapter — falla silenciosamente si dbus-fast no está disponible
@@ -1642,6 +1659,8 @@ async def _run(*, systemd_notify: bool) -> None:
         # orchestrator.active_worker_count() reads self._pool._active_count (set once
         # run_forever() starts the pool). Returns 0 before pool is running (correct).
         worker_count_fn=orchestrator.active_worker_count,
+        # Notification store: written by orchestrator, read via D-Bus by shell-server.
+        notification_store=_orchestrator_notification_store,
     )
 
     # JailedBrowser eager start: pre-warm the confined headless Chromium so the
@@ -1843,6 +1862,7 @@ def _start_dbus_adapter_if_available(
     nous_engine=None,
     install_executor=None,
     worker_count_fn=None,  # Callable[[], int] | None — live in-flight count
+    notification_store=None,  # SqliteNotificationStore | None — bell feature
 ) -> "tuple[object | None, asyncio.Task | None]":
     """Arranca el adapter D-Bus si dbus-fast está instalado y hay bus de sistema.
 
@@ -1991,6 +2011,8 @@ def _start_dbus_adapter_if_available(
             # Live in-flight worker count: passed from the orchestrator instance
             # in _run() so GetRuntimeStatus returns the real count, not zero.
             worker_count_fn=worker_count_fn,
+            # SqliteNotificationStore for the notification bell REST surface.
+            notification_store=notification_store,
         )
 
         # Step 2 of two-step DbusInstallExecutor construction: inject the live

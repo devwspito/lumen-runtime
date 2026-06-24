@@ -5,11 +5,16 @@ import {
   uninstallHubSkill, promoteSkill,
   createTrainingSession, startTrainingRecording, stopTrainingRecording,
   synthesizeSkill, abandonTrainingSession,
+  pauseTrainingRecording, resumeTrainingRecording, cancelTrainingRecording,
+  getSkillDetails, scanInstall, recordSecurityDecision,
   ApiError,
 } from '../api/client'
-import type { Skill, HubSkillResult, HubInstallResponse } from '../api/types'
+import type { Skill, HubSkillResult, HubInstallResponse, InstallScanResponse, SkillDetails } from '../api/types'
 import { useConfirmDialog } from '../components/ConfirmDialog'
 import Badge, { type BadgeVariant } from '../components/Badge'
+import InstallScanModal from '../components/InstallScanModal'
+import SkillDetailsModal from '../components/SkillDetailsModal'
+import type { MfaFactors } from '../components/MfaModal'
 
 // ── Poll helper ───────────────────────────────────────────────────────────────
 
@@ -71,13 +76,20 @@ function installedReducer(_s: InstalledState, a: InstalledAction): InstalledStat
   }
 }
 
-// Teach-skill phase: discriminated union of the 4 states
-type TeachPhase = 'idle' | 'form' | 'recording' | 'synth'
+// Teach-skill phase: discriminated union of recording states
+type TeachPhase = 'idle' | 'form' | 'recording' | 'paused' | 'synth'
 
 function show(message: string, kind: 'ok' | 'warn' | 'error' = 'ok') {
   if (kind === 'ok') sileo.success({ title: message })
   else if (kind === 'error') sileo.error({ title: message })
   else sileo.warning({ title: message })
+}
+
+// Pending install approval for skills
+interface PendingSkillInstall {
+  scan: InstallScanResponse
+  item: HubSkillResult
+  onBtnUpdate: (s: 'installing' | 'installed' | 'ready') => void
 }
 
 export default function SkillsView() {
@@ -94,6 +106,11 @@ export default function SkillsView() {
   // ── Skill name for teach form (needed inside stop handler)
   const teachNameValueRef = useRef('')
   const [confirm, ConfirmDialogNode] = useConfirmDialog()
+  // ── Install scan approval
+  const [pendingSkillInstall, setPendingSkillInstall] = useState<PendingSkillInstall | null>(null)
+  // ── Skill details modal
+  const [skillDetails, setSkillDetails] = useState<SkillDetails | null>(null)
+  const [loadingDetailsId, setLoadingDetailsId] = useState<string | null>(null)
 
   const pollHandlesRef = useRef<PollHandle[]>([])
 
@@ -158,10 +175,56 @@ export default function SkillsView() {
     const identifier = item.identifier ?? item.slug ?? item.name ?? ''
     const name = item.name ?? identifier
     onBtnUpdate('installing')
-    try {
-      const op: HubInstallResponse = await installSkill(identifier)
 
-      // Security Center BLOCK: show score + risks, offer owner override
+    // Scan-first: show approval modal for WARN/FAIL verdicts
+    try {
+      const scan = await scanInstall('skill', identifier)
+      if (scan.requires_owner_approval) {
+        setPendingSkillInstall({ scan, item, onBtnUpdate })
+        return
+      }
+    } catch {
+      // Scan unavailable — fall through to direct install
+    }
+
+    await doInstallSkill(identifier, name, onBtnUpdate, false)
+  }
+
+  async function handleScanApprove(factors: MfaFactors) {
+    if (!pendingSkillInstall) return
+    const { scan, item, onBtnUpdate } = pendingSkillInstall
+    setPendingSkillInstall(null)
+    const identifier = item.identifier ?? item.slug ?? item.name ?? ''
+    const name = item.name ?? identifier
+    try {
+      await recordSecurityDecision({
+        scan_id: scan.scan_id,
+        decision: 'approve',
+        identifier,
+        kind: 'skill',
+        score: scan.score,
+        verdict: scan.verdict,
+        risks_json: JSON.stringify(scan.risks),
+        totp: factors.totp,
+        riddle_answer: factors.riddle_answer ?? null,
+      })
+      await doInstallSkill(identifier, name, onBtnUpdate, true)
+    } catch (e) {
+      show(e instanceof Error ? e.message : 'Error al registrar la decisión', 'error')
+      onBtnUpdate('ready')
+    }
+  }
+
+  async function doInstallSkill(
+    identifier: string,
+    name: string,
+    onBtnUpdate: (s: 'installing' | 'installed' | 'ready') => void,
+    force: boolean,
+  ) {
+    try {
+      const op: HubInstallResponse = await installSkill(identifier, force)
+
+      // Legacy Security Center BLOCK response (pre-scan endpoint path)
       if (op && op.blocked) {
         const risksText = (op.risks ?? []).slice(0, 3).join('; ') || 'varios riesgos detectados'
         const ok = await confirm({
@@ -171,7 +234,7 @@ export default function SkillsView() {
           variant: 'danger',
         })
         if (ok) {
-          await doInstall(identifier, name, onBtnUpdate, true)
+          await doInstallSkill(identifier, name, onBtnUpdate, true)
         } else {
           onBtnUpdate('ready')
         }
@@ -202,19 +265,6 @@ export default function SkillsView() {
     }
   }
 
-  async function doInstall(identifier: string, name: string, onBtnUpdate: (s: 'installing' | 'installed' | 'ready') => void, force: boolean) {
-    try {
-      const op2 = await installSkill(identifier, force)
-      if (op2 && (op2.ok === false || op2.blocked || op2.error)) {
-        throw new Error(op2.error ?? 'No se pudo instalar: security')
-      }
-      handleInstallOp(op2, name, onBtnUpdate)
-    } catch (e) {
-      show(`No se pudo instalar: ${e instanceof Error ? e.message : 'error'}`, 'error')
-      onBtnUpdate('ready')
-    }
-  }
-
   // ── Teach skill ───────────────────────────────────────────────────────────
 
   async function handleTeachStart() {
@@ -233,6 +283,28 @@ export default function SkillsView() {
         abandonTrainingSession(teachSessionRef.current)
         teachSessionRef.current = null
       }
+    }
+  }
+
+  async function handleTeachPause() {
+    const sid = teachSessionRef.current
+    if (!sid) return
+    try {
+      await pauseTrainingRecording(sid)
+      setTeachPhase('paused')
+    } catch (e) {
+      show(`No se pudo pausar: ${e instanceof Error ? e.message : 'error'}`, 'error')
+    }
+  }
+
+  async function handleTeachResume() {
+    const sid = teachSessionRef.current
+    if (!sid) return
+    try {
+      await resumeTrainingRecording(sid)
+      setTeachPhase('recording')
+    } catch (e) {
+      show(`No se pudo reanudar: ${e instanceof Error ? e.message : 'error'}`, 'error')
     }
   }
 
@@ -259,17 +331,54 @@ export default function SkillsView() {
     }
   }
 
-  function handleTeachCancel() {
-    if (teachSessionRef.current) {
-      abandonTrainingSession(teachSessionRef.current)
+  async function handleTeachCancel() {
+    const sid = teachSessionRef.current
+    if (sid) {
+      try {
+        await cancelTrainingRecording(sid)
+      } catch {
+        // cancel is best-effort; also try abandon
+        abandonTrainingSession(sid)
+      }
       teachSessionRef.current = null
     }
     setTeachPhase('idle')
   }
 
+  async function handleViewSkillDetails(skill: Skill) {
+    const pkgId = skill.package_id ?? skill.skill_id ?? ''
+    if (!pkgId) return
+    setLoadingDetailsId(pkgId)
+    try {
+      const details = await getSkillDetails(pkgId)
+      setSkillDetails(details)
+    } catch (e) {
+      show(e instanceof Error ? e.message : 'No se pudieron cargar los detalles', 'error')
+    } finally {
+      setLoadingDetailsId(null)
+    }
+  }
+
   return (
     <>
       {ConfirmDialogNode}
+      {pendingSkillInstall && (
+        <InstallScanModal
+          scan={pendingSkillInstall.scan}
+          name={pendingSkillInstall.item.name ?? pendingSkillInstall.item.identifier ?? ''}
+          onApprove={handleScanApprove}
+          onCancel={() => {
+            pendingSkillInstall.onBtnUpdate('ready')
+            setPendingSkillInstall(null)
+          }}
+        />
+      )}
+      {skillDetails && (
+        <SkillDetailsModal
+          details={skillDetails}
+          onClose={() => setSkillDetails(null)}
+        />
+      )}
       <header className="view-header">
         <h1 className="view-title">Habilidades</h1>
         <p className="view-subtitle">Amplía lo que puede hacer el agente. Busca e instala en segundos.</p>
@@ -371,6 +480,8 @@ export default function SkillsView() {
                     <li key={s.package_id ?? s.skill_id ?? i}>
                       <SkillRow
                         skill={s}
+                        loadingDetails={loadingDetailsId === (s.package_id ?? s.skill_id ?? '')}
+                        onView={() => handleViewSkillDetails(s)}
                         onPromote={async () => {
                           const pkgId = s.package_id ?? s.skill_id ?? ''
                           try {
@@ -472,12 +583,63 @@ export default function SkillsView() {
 
               {teachPhase === 'recording' && (
                 <div className="cv-form-stack">
-                  <p className="teach-recording-label" role="status">
-                    ● Grabando la demostración. Cuando termines, pulsa "Crear skill" y el agente la sintetiza.
+                  <p className="teach-recording-label" role="status" aria-live="polite">
+                    ● Grabando la demostración…
                   </p>
-                  <button className="cv-btn cv-btn--secondary cv-btn--sm" onClick={handleTeachStop}>
-                    Crear skill
-                  </button>
+                  <div className="cv-form-actions">
+                    <button
+                      className="cv-btn cv-btn--secondary cv-btn--sm"
+                      onClick={handleTeachPause}
+                      type="button"
+                    >
+                      Pausar
+                    </button>
+                    <button
+                      className="cv-btn cv-btn--primary cv-btn--sm"
+                      onClick={handleTeachStop}
+                      type="button"
+                    >
+                      Detener y crear skill
+                    </button>
+                    <button
+                      className="cv-btn cv-btn--ghost cv-btn--sm cv-btn--danger"
+                      onClick={handleTeachCancel}
+                      type="button"
+                    >
+                      Cancelar
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {teachPhase === 'paused' && (
+                <div className="cv-form-stack">
+                  <p className="state-label" role="status" aria-live="polite">
+                    ⏸ Grabación en pausa.
+                  </p>
+                  <div className="cv-form-actions">
+                    <button
+                      className="cv-btn cv-btn--primary cv-btn--sm"
+                      onClick={handleTeachResume}
+                      type="button"
+                    >
+                      Reanudar
+                    </button>
+                    <button
+                      className="cv-btn cv-btn--secondary cv-btn--sm"
+                      onClick={handleTeachStop}
+                      type="button"
+                    >
+                      Detener y crear skill
+                    </button>
+                    <button
+                      className="cv-btn cv-btn--ghost cv-btn--sm cv-btn--danger"
+                      onClick={handleTeachCancel}
+                      type="button"
+                    >
+                      Cancelar
+                    </button>
+                  </div>
                 </div>
               )}
 
@@ -506,11 +668,13 @@ function stateMeta(state: string): { label: string; variant: BadgeVariant } {
 
 interface SkillRowProps {
   skill: Skill
+  loadingDetails: boolean
+  onView: () => void
   onPromote: () => void
   onUninstall: () => void
 }
 
-function SkillRow({ skill, onPromote, onUninstall }: SkillRowProps) {
+function SkillRow({ skill, loadingDetails, onView, onPromote, onUninstall }: SkillRowProps) {
   const name = skill.skill_name ?? skill.name ?? skill.slug ?? ''
   const meta = stateMeta(skill.state ?? '')
   const version = skill.version ? `v${skill.version}` : ''
@@ -530,6 +694,14 @@ function SkillRow({ skill, onPromote, onUninstall }: SkillRowProps) {
         {meta.label && (
           <Badge variant={meta.variant}>{meta.label}</Badge>
         )}
+        <button
+          className="cv-btn cv-btn--secondary cv-btn--sm"
+          onClick={onView}
+          disabled={loadingDetails}
+          aria-label={`Ver instrucciones de ${name}`}
+        >
+          {loadingDetails ? '…' : 'Ver'}
+        </button>
         {isValidated && (
           <button
             className="cv-btn cv-btn--primary cv-btn--sm"

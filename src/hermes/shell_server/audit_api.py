@@ -12,6 +12,7 @@ contra la DB compartida con el runtime.
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -208,6 +209,29 @@ class PromoteSkillRequest(BaseModel):
     confirm: bool
 
 
+class SkillDetailsDTO(BaseModel):
+    """Full skill details including the SKILL.md content for the viewer."""
+
+    package_id: str
+    skill_id: str
+    skill_name: str
+    version: int
+    state: str
+    surface_kinds: list[str]
+    skill_kind: str = "recorded"
+    toolkit_slug: str | None = None
+    signed_at: str
+    signature_short: str | None
+    validated_at: str | None = None
+    promoted_at: str | None = None
+    signing_method: str = "v1"
+    # The SKILL.md content (None when the file does not exist on disk,
+    # e.g. Composio skills have no file, or the home dir is absent in CI).
+    instructions: str | None = None
+    instructions_path: str | None = None
+    created_at: str | None = None  # alias for signed_at, for frontend convenience
+
+
 class ConsentDTO(BaseModel):
     consent_id: str
     capability: str
@@ -289,6 +313,33 @@ def _row_to_skill_dto_from_dict(d: dict) -> SkillPackageDTO:
     )
 
 
+_DEFAULT_HERMES_HOME = "/var/lib/hermes/hermes-home"
+
+
+def _hermes_home() -> Path:
+    return Path(os.environ.get("HERMES_HOME") or _DEFAULT_HERMES_HOME)
+
+
+def _skill_id_to_slug(skill_id: str) -> str:
+    """skill_id is already the slug (produced by skill_synthesis.slugify)."""
+    return skill_id
+
+
+def _read_skill_instructions(skill_id: str) -> tuple[str | None, str | None]:
+    """Read the SKILL.md for the given skill_id from $HERMES_HOME/skills/<slug>/.
+
+    Returns (content, absolute_path_str) or (None, None) when absent.
+    Never raises: missing file or unreadable path yields (None, None).
+    """
+    slug = _skill_id_to_slug(skill_id)
+    skill_path = _hermes_home() / "skills" / slug / "SKILL.md"
+    try:
+        content = skill_path.read_text(encoding="utf-8")
+        return content, str(skill_path)
+    except OSError:
+        return None, None
+
+
 def create_audit_router(db_path: Path) -> APIRouter:
     init_schema(db_path)
     _seed_demo_data(db_path)
@@ -328,6 +379,51 @@ def create_audit_router(db_path: Path) -> APIRouter:
                 """
             ).fetchall()
         return [_row_to_skill_dto(r) for r in rows]
+
+    @router.get("/skills/{package_id}/details", response_model=SkillDetailsDTO)
+    async def get_skill_details(package_id: str) -> SkillDetailsDTO:
+        """Return full skill metadata + SKILL.md content for the skill viewer.
+
+        The instructions field contains the raw SKILL.md text read from
+        $HERMES_HOME/skills/<slug>/SKILL.md.  It is None when the file does not
+        exist (Composio skills have no on-disk document; synthesized skills written
+        by skill_synthesis.py do).
+
+        Returns 404 if the package_id is not found in skill_packages_view.
+        """
+        with _conn(db_path) as c:
+            row = c.execute(
+                """
+                SELECT spv.*, cs.toolkit_slug
+                  FROM skill_packages_view spv
+                  LEFT JOIN composio_skills cs ON cs.package_id = spv.package_id
+                 WHERE spv.package_id = ?
+                """,
+                (package_id,),
+            ).fetchone()
+        if row is None:
+            raise HTTPException(404, "skill not found")
+
+        base = _row_to_skill_dto(row)
+        instructions, instructions_path = _read_skill_instructions(base.skill_id)
+        return SkillDetailsDTO(
+            package_id=base.package_id,
+            skill_id=base.skill_id,
+            skill_name=base.skill_name,
+            version=base.version,
+            state=base.state,
+            surface_kinds=base.surface_kinds,
+            skill_kind=base.skill_kind,
+            toolkit_slug=base.toolkit_slug,
+            signed_at=base.signed_at,
+            signature_short=base.signature_short,
+            validated_at=base.validated_at,
+            promoted_at=base.promoted_at,
+            signing_method=base.signing_method,
+            instructions=instructions,
+            instructions_path=instructions_path,
+            created_at=base.signed_at,
+        )
 
     @router.post("/skills/composio", response_model=SkillPackageDTO, status_code=201)
     async def create_composio_skill(

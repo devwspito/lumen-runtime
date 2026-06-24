@@ -71,6 +71,8 @@ class AgentLoopOrchestrator:
         browser_adapter: Any | None = None,  # BrowserSurfaceAdapter | None
         agent_registry: Any | None = None,   # AgentRegistryPort | None (autonomy_level)
         conversation_repo: Any | None = None,  # SQLiteConversationRepository | None (Bug #2)
+        notification_store: Any | None = None,  # SqliteNotificationStore | None (bell)
+        memory_extraction_enabled: bool = True,  # Feature B: post-chat memory extraction
     ) -> None:
         self._queue = queue
         self._state = state
@@ -88,6 +90,8 @@ class AgentLoopOrchestrator:
         self._browser_adapter = browser_adapter  # BrowserSurfaceAdapter | None
         self._agent_registry = agent_registry  # AgentRegistryPort | None
         self._conversation_repo = conversation_repo  # SQLiteConversationRepository | None
+        self._notification_store = notification_store  # SqliteNotificationStore | None
+        self._memory_extraction_enabled = memory_extraction_enabled
         self._shutdown = asyncio.Event()
         self._wake: MonoWorkerWakeSignal = MonoWorkerWakeSignal()
         self._pool: Any | None = None  # set by run_forever(); read by active_worker_count()
@@ -147,6 +151,8 @@ class AgentLoopOrchestrator:
             browser_adapter=self._browser_adapter,
             agent_registry=self._agent_registry,
             conversation_repo=self._conversation_repo,
+            notification_store=self._notification_store,
+            memory_extraction_enabled=self._memory_extraction_enabled,
         )
         # Propagar el shutdown event del orchestrator al pool.
         pool._shutdown = self._shutdown  # type: ignore[attr-defined]
@@ -534,6 +540,8 @@ class AgentLoopOrchestrator:
 
         audit_entry_id, head_hash = await self._emit_chat_replied(item, narrative)
         await self._do_mark_completed(item, audit_entry_id, head_hash)
+        # Feature B: post-cycle memory extraction (best-effort, fail-soft).
+        await self._maybe_extract_memory(item, narrative)
 
     def _persist_assistant_turn(self, item: WorkItem, narrative: str) -> None:
         """Persiste la respuesta del asistente en el store de conversaciones para
@@ -602,6 +610,7 @@ class AgentLoopOrchestrator:
             reason=reason,
         )
         await self._emit_failed(item, reason)
+        self._emit_notification_failed(item, reason)
 
     async def _do_mark_completed(
         self, item: WorkItem, audit_entry_id: Any, head_hash: str | None = None
@@ -613,6 +622,7 @@ class AgentLoopOrchestrator:
             execution_head_hash=head_hash,
         )
         await self._emit_completed(item, audit_entry_id)
+        self._emit_notification_completed(item)
 
     # ------------------------------------------------------------------
     # Private: audit emission (T026)
@@ -718,6 +728,81 @@ class AgentLoopOrchestrator:
             tenant_id=item.tenant_id,
             reason=reason,
         )
+
+    # ------------------------------------------------------------------
+    # Private: notification emission (bell feature)
+    # Fail-soft: a notification failure NEVER breaks the task/chat path.
+    # ------------------------------------------------------------------
+
+    def _emit_notification_completed(self, item: WorkItem) -> None:
+        """Emit a task-completed notification. Fail-soft."""
+        if self._notification_store is None:
+            return
+        is_chat = item.kind is WorkItemKind.CHAT_MESSAGE
+        kind = "chat" if is_chat else "task"
+        if is_chat:
+            title = "Chat respondido"
+            body = "El asistente ha completado la respuesta."
+        else:
+            label = _item_label(item)
+            title = f"Tarea '{label}' completada"
+            body = "La tarea ha terminado con éxito."
+        try:
+            self._notification_store.add(
+                kind=kind,
+                title=title,
+                body=body,
+                status="ok",
+                conversation_id=item.payload.get("conversation_id") or None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("hermes.notifications.emit_completed_failed: %s", exc)
+
+    def _emit_notification_failed(self, item: WorkItem, reason: str) -> None:
+        """Emit a task-failed notification. Fail-soft."""
+        if self._notification_store is None:
+            return
+        is_chat = item.kind is WorkItemKind.CHAT_MESSAGE
+        kind = "chat" if is_chat else "task"
+        label = _item_label(item)
+        if is_chat:
+            title = "Error en el chat"
+            body = f"La respuesta falló: {reason[:120]}"
+        else:
+            title = f"Tarea '{label}' falló"
+            body = f"Error: {reason[:120]}"
+        try:
+            self._notification_store.add(
+                kind=kind,
+                title=title,
+                body=body,
+                status="error",
+                conversation_id=item.payload.get("conversation_id") or None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("hermes.notifications.emit_failed_failed: %s", exc)
+
+    async def _maybe_extract_memory(
+        self, item: WorkItem, narrative: str
+    ) -> None:
+        """Post-cycle memory extraction hook (Feature B). Fail-soft."""
+        if not self._memory_extraction_enabled:
+            return
+        user_message = (item.payload.get("text") or "").strip()
+        if not user_message and not narrative.strip():
+            return
+        try:
+            from hermes.memory.application.post_cycle_extractor import (  # noqa: PLC0415
+                maybe_extract_and_store,
+            )
+            await maybe_extract_and_store(
+                user_message=user_message,
+                assistant_reply=narrative,
+                tenant_id=item.tenant_id,
+                engine=self._engine,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("hermes.memory.post_cycle.failed: %s", exc)
 
     async def _fetch_hitl_token(self, proposal_id: Any) -> str | None:
         """Busca el token HITL aprobado para este proposal, si el gate está inyectado.
@@ -1004,6 +1089,25 @@ def _record_chat_activity(task_id: str, agent_id: str) -> None:
         live_activity.record(task_id, agent_id, "chat_responding")
     except Exception:  # noqa: BLE001 — never interrupt the chat path
         pass
+
+
+def _item_label(item: "WorkItem") -> str:
+    """Return a short human label for a WorkItem (for notifications).
+
+    Priority: payload 'label' > payload 'title' > instruction[:60] > task id.
+    Never raises — used in notification emit (fail-soft context).
+    """
+    try:
+        payload = item.payload or {}
+        label = (
+            payload.get("label")
+            or payload.get("title")
+            or payload.get("text", "")[:60]
+            or str(item.id)[:8]
+        )
+        return str(label).strip()[:80] or str(item.id)[:8]
+    except Exception:  # noqa: BLE001
+        return str(item.id)[:8]
 
 
 class _CountingChunkSink:

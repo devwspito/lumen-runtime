@@ -1,9 +1,15 @@
-"""HeuristicFallbackScanner — caps score to 70 when trivy is unavailable.
+"""HeuristicFallbackScanner — CVE slot placeholder when trivy is unavailable.
 
-This scanner does not produce risks — instead, it emits a single LOW/MEDIUM
-notice that the CVE scanner was skipped. The scan_service respects this by
-capping the effective CVE contribution, ensuring the final score never reaches
-100 when CVE data is missing.
+Emits a single MEDIUM notice under category="cve" so the scoring engine
+deducts the cve-weight fraction (preventing a false 100-score when no CVE
+data was collected) and so the UI can show honest provenance.
+
+IMPORTANT: this scanner is ALWAYS paired with engine='heuristic' in the
+ScanService composition.  ScanService._compose_score() treats CRITICAL from
+category='cve' with engine='heuristic' as a WARN cap (≤ 55), not a hard FAIL,
+because the finding means "trivy absent" not "known CVE detected".  This
+prevents a legitimate install from being permanently blocked solely because
+the trivy binary was not available at build time.
 """
 
 from __future__ import annotations
@@ -19,9 +25,10 @@ logger = logging.getLogger("hermes.security_center.heuristic_fallback")
 class HeuristicFallbackScanner:
     """Injected in place of TriviaCveScanner when the trivy binary is absent.
 
-    Emits a single MEDIUM risk under category="cve" so that the weighted
-    score engine deducts the cve-weight fraction, effectively capping the
-    score at ≤70 (the PASS threshold boundary).
+    Emits a single MEDIUM risk (not CRITICAL) so the score is nudged
+    below the 100 ceiling but the heuristic engine's cap rule in
+    _compose_score handles the final verdict.  The message is explicit
+    about the fallback so it surfaces in the UI's risk list.
     """
 
     name = "cve"
@@ -29,12 +36,16 @@ class HeuristicFallbackScanner:
     async def scan(self, target: InstallTarget) -> list[Risk]:  # noqa: ARG002
         logger.warning(
             "hermes.security.trivy_unavailable kind=%s identifier=%s — "
-            "CVE scan skipped, score capped",
+            "CVE scan skipped, using heuristic fallback",
             target.kind, target.identifier,
         )
         return [Risk(
             category="cve",
             severity=Severity.MEDIUM,
-            message="CVE scan unavailable — trivy binary not found at /usr/bin/trivy",
-            evidence_ref="cve:trivy_missing",
+            message=(
+                "Escaneo CVE no disponible (trivy ausente) — "
+                "revisión básica (heurística), no es un análisis completo de vulnerabilidades. "
+                "El dueño puede revisar y aprobar."
+            ),
+            evidence_ref="cve:heuristic_fallback",
         )]

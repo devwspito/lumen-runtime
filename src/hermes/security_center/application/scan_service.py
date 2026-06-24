@@ -41,6 +41,10 @@ class ScanService:
       2. Run enabled scanners concurrently via asyncio.gather.
       3. Compose weighted score: start at 100, apply per-scanner penalties.
       4. Persist ScanRecord and return it.
+
+    engine: 'trivy' | 'heuristic' — set at construction time by the composition
+    root based on which CVE scanner is active.  Recorded on every ScanRecord so
+    the UI can show honest provenance ("revisión básica" vs "escaneo completo").
     """
 
     def __init__(
@@ -49,10 +53,18 @@ class ScanService:
         scanners: list[IScanner],
         history_repo: IScanHistoryRepo,
         policy_repo: IPolicyRepo,
+        engine: str = "heuristic",
     ) -> None:
         self._scanners = scanners
         self._history_repo = history_repo
         self._policy_repo = policy_repo
+        self._engine = engine
+
+        logger.info(
+            "hermes.security.scan_service_init engine=%s scanners=%s",
+            self._engine,
+            [s.name for s in self._scanners],
+        )
 
     async def scan(self, target: InstallTarget) -> ScanRecord:
         """Run the full scan pipeline. Returns the final ScanRecord.
@@ -95,7 +107,7 @@ class ScanService:
         t0 = time.monotonic()
 
         all_risks = await self._run_scanners(target, policy)
-        score_value = self._compose_score(all_risks, policy)
+        score_value = self._compose_score(all_risks, policy, self._engine)
         elapsed_ms = int((time.monotonic() - t0) * 1000)
 
         install_score = InstallScore(value=score_value, risks=tuple(all_risks))
@@ -104,6 +116,7 @@ class ScanService:
             score=install_score,
             verdict=install_score.verdict,
             decision=ScanDecision.PENDING,
+            engine=self._engine,
             started_at=started_at,
             finished_at=datetime.now(tz=UTC),
             cached=False,
@@ -194,7 +207,22 @@ class ScanService:
             )
             return []
 
-    def _compose_score(self, risks: list[Risk], policy: SecurityPolicy) -> int:
+    # Categories whose CRITICAL findings mean "infrastructure unavailable" rather
+    # than "proven malware". On a heuristic-engine scan these should cap to WARN
+    # territory (≤ 55), not hard FAIL — they require owner review, not a permanent
+    # block.
+    #
+    # "signature" CRITICALs in engine=heuristic mean "signing key absent / skill
+    # not yet registered in the keystore" — legitimate for new or just-installed
+    # skills. They should be reviewable by the owner, not a permanent hard block.
+    #
+    # "cve" is deliberately ABSENT: the HeuristicFallbackScanner only emits MEDIUM,
+    # so cve:CRITICAL always comes from a real trivy scan and deserves the hard-cap.
+    _INFRA_STATE_CATEGORIES: frozenset[str] = frozenset({"signature"})
+
+    def _compose_score(
+        self, risks: list[Risk], policy: SecurityPolicy, engine: str = "heuristic"
+    ) -> int:
         """Weighted deduction from 100, with hard caps for decisive findings.
 
         The plain weighted model dilutes severe findings: a single CRITICAL
@@ -202,14 +230,22 @@ class ScanService:
         ~90 → PASS. That is exactly the C2 "scan is theater" hole. So before the
         weighted sum we apply non-negotiable caps:
 
-          - ANY CRITICAL finding  → score forced to FAIL (< 40). A package that
-            runs an install hook or fails signature verification is never PASS.
-          - ANY HIGH finding from a CONTENT analysis (the only scanner that read
-            the real bytes — including its "could not analyze" signal) → score
-            capped into WARN/FAIL territory so it can never auto-allow.
+          ALWAYS (regardless of engine):
+          - ANY CRITICAL finding → score forced to FAIL (< 40).
+          - ANY HIGH finding from the CONTENT scanner (real bytes — including its
+            "could not analyze" signal) → score capped at ≤ 45 (WARN/FAIL).
 
-        The weighted sum still runs for the residual LOW/MEDIUM noise and for
-        non-content HIGHs, so benign packages keep a meaningful gradient.
+          ENGINE-AWARE (infrastructure state — soft cap):
+          When engine='heuristic' and the ONLY CRITICALs are from infrastructure-
+          state categories (signature = signing key absent / skill not registered),
+          apply a WARN cap (≤ 55) instead of the hard FAIL cap (≤ 30). This allows
+          the owner to approve a legitimately new skill whose signing key has not been
+          provisioned, rather than being permanently blocked.
+          NOTE: this soft-cap only applies when there is NO CRITICAL from any real-
+          content scanner — those always hard-fail regardless.
+
+        The weighted sum still runs for the residual LOW/MEDIUM noise, so benign
+        packages keep a meaningful gradient.
         """
         from hermes.security_center.domain.scan_score import Severity
 
@@ -224,8 +260,20 @@ class ScanService:
         content_high = any(
             r.severity == Severity.HIGH and r.category == "content" for r in risks
         )
-        if has_critical:
-            return min(score, 30)   # below the FAIL threshold (40)
+        # Infra-state CRITICALs: signature-only CRITICALs that come from "infra
+        # unavailable" in heuristic mode (no non-infra CRITICALs present).
+        only_infra_criticals = has_critical and engine == "heuristic" and all(
+            r.severity != Severity.CRITICAL or r.category in self._INFRA_STATE_CATEGORIES
+            for r in risks
+        )
+
+        if has_critical and not only_infra_criticals:
+            return min(score, 30)   # hard FAIL: real CVE or malware signal
         if content_high:
-            return min(score, 45)   # WARN at best — never an auto-allow PASS
+            return min(score, 45)   # unanalyzable bytes — WARN/FAIL
+        if only_infra_criticals:
+            # Infra unavailable with heuristic engine: cap to WARN, not hard FAIL.
+            # Owner can review and approve.
+            return min(score, 55)
+
         return score

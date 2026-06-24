@@ -311,6 +311,9 @@ class DbusRuntimeServiceWiring:
         # Injected from __main__ via orchestrator.active_worker_count.
         # None → runtime_status reports active_task_count=0 (honest degradation).
         worker_count_fn: "Callable[[], int] | None" = None,
+        # SqliteNotificationStore — persists task/chat completion notifications.
+        # None → notification verbs degrade gracefully (empty list / no-op write).
+        notification_store: "Any | None" = None,
     ) -> None:
         self._state = agent_state
         self._gate = approval_gate
@@ -350,6 +353,9 @@ class DbusRuntimeServiceWiring:
         # Live in-flight worker count accessor (injected from __main__).
         # None → runtime_status reports 0 (honest degradation, not a lie).
         self._worker_count_fn: Callable[[], int] | None = worker_count_fn
+        # SqliteNotificationStore — written by daemon, read via D-Bus by shell-server.
+        # None → verbs degrade gracefully (list=[]/count=0/mark-read=no-op).
+        self._notification_store = notification_store
 
     # ------------------------------------------------------------------
     # Kill-switch (CTRL-12 / KILL-1)
@@ -1218,7 +1224,13 @@ class DbusRuntimeServiceWiring:
         # daemon gira, y TriviaCveScanner autoaplica su propio wait_for(120 s)
         # devolviendo [] al expirar. (El gate síncrono inline de composition.py NO
         # debe llevar Trivy: ahí se await-ea en el loop del daemon.)
-        cve_scanner = TriviaCveScanner() if trivy_available() else HeuristicFallbackScanner()
+        using_trivy = trivy_available()
+        cve_scanner = TriviaCveScanner() if using_trivy else HeuristicFallbackScanner()
+        engine = "trivy" if using_trivy else "heuristic"
+        logger.info(
+            "hermes.security.scan_engine_selected engine=%s trivy_bin=/usr/bin/trivy",
+            engine,
+        )
         self._scan_service = ScanService(
             # INVARIANTE (load-bearing): _run_scan_sync corre el scan en un HILO
             # aparte con su PROPIO loop cuando el loop del daemon ya gira (ver
@@ -1238,6 +1250,7 @@ class DbusRuntimeServiceWiring:
             ],
             history_repo=SQLiteScanRepo(),
             policy_repo=SQLitePolicyRepo(),
+            engine=engine,
         )
         return self._scan_service
 
@@ -1280,6 +1293,7 @@ class DbusRuntimeServiceWiring:
         """Serialize a ScanRecord to the JSON string expected by InstallReview QML.
 
         Maps evidence_ref → evidence to match the QML field name.
+        Includes engine/engine_label/requires_owner_approval for honest provenance.
         """
         risks = [
             {
@@ -1290,12 +1304,17 @@ class DbusRuntimeServiceWiring:
             }
             for r in record.score.risks
         ]
+        engine = getattr(record, "engine", "heuristic")
+        verdict_val = record.verdict.value if hasattr(record.verdict, "value") else str(record.verdict)
         return json.dumps({
             "scan_id": str(record.id),
             "identifier": record.target.identifier,
             "kind": record.target.kind,
             "score": record.score.value,
-            "verdict": record.verdict.value,
+            "verdict": verdict_val,
+            "engine": engine,
+            "engine_label": getattr(record, "engine_label", engine),
+            "requires_owner_approval": verdict_val in ("WARN", "FAIL"),
             "risks": risks,
         })
 
@@ -1540,13 +1559,25 @@ class DbusRuntimeServiceWiring:
         }
 
     def _serialize_scan_record_from_blocked(self, identifier: str) -> str:
-        """Minimal JSON for a blocked install when we have no ScanRecord object."""
+        """Minimal JSON for a blocked install when we have no ScanRecord object.
+
+        Carries engine provenance so the UI still shows honest scan context.
+        """
         import uuid as _uuid  # noqa: PLC0415
+        svc = self._scan_service  # may be None (not yet lazy-built)
+        engine = getattr(svc, "_engine", "heuristic") if svc is not None else "heuristic"
         return json.dumps({
             "scan_id": _uuid.uuid4().hex,
             "identifier": identifier,
             "score": 0,
             "verdict": "FAIL",
+            "engine": engine,
+            "engine_label": (
+                "escaneo completo de vulnerabilidades (trivy CVE DB)"
+                if engine == "trivy"
+                else "revisión básica (heurística) — no es un escaneo completo de vulnerabilidades"
+            ),
+            "requires_owner_approval": True,
             "risks": [],
         })
 
@@ -1576,8 +1607,11 @@ class DbusRuntimeServiceWiring:
         try:
             record = self._run_scan_sync(target)
         except ScanBlockedError as exc:
-            # Policy auto-blocked: still return the score so the UI can show it.
+            # Policy auto-blocked: return the real record if available so the UI
+            # shows actual score, engine, and risks rather than empty FAIL.
             logger.info("hermes.dbus.scan_install_blocked identifier=%s: %s", ident, exc)
+            if exc.record is not None:
+                return self._serialize_scan_record(exc.record)
             return self._serialize_scan_record_from_blocked(ident)
         except Exception as exc:  # noqa: BLE001
             logger.warning("hermes.dbus.scan_install_failed identifier=%s: %s", ident, exc)
@@ -3457,6 +3491,72 @@ class DbusRuntimeServiceWiring:
             )
             return {"ok": True, "deleted": True}
         return {"ok": False, "error": result.get("error", "unknown")}
+
+    # ------------------------------------------------------------------
+    # Notifications — task/chat completion bell
+    # Written by daemon (orchestrator post-cycle hooks), read via D-Bus.
+    # Read-only verbs: no authZ (same policy as list_memory/list_providers).
+    # Mutators (mark-read): no cross-tenant risk; authZ not required for
+    # single-owner install, consistent with memory's delete_memory_entry.
+    # ------------------------------------------------------------------
+
+    def list_notifications(self, *, limit: int, unread_only: bool) -> str:
+        """Return JSON list of notifications (newest first).
+
+        Each item: {id, kind, title, body, status, conversation_id,
+                    created_at, read}.
+        Fail-soft: returns [] if the store is unavailable.
+        """
+        import json as _json  # noqa: PLC0415
+
+        if self._notification_store is None:
+            return _json.dumps([])
+        try:
+            entries = self._notification_store.list(
+                limit=limit or 100, unread_only=unread_only
+            )
+            return _json.dumps(entries)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.notifications.list_failed: %s", exc)
+            return _json.dumps([])
+
+    def get_notification_unread_count(self) -> int:
+        """Return the count of unread notifications. Fail-soft: 0 on error."""
+        if self._notification_store is None:
+            return 0
+        try:
+            return self._notification_store.unread_count()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.notifications.count_failed: %s", exc)
+            return 0
+
+    def mark_notification_read(self, *, notification_id: str) -> dict:
+        """Mark one notification as read. Returns {ok, updated}."""
+        import json as _json  # noqa: PLC0415
+
+        if self._notification_store is None:
+            return {"ok": True, "updated": False}
+        try:
+            updated = self._notification_store.mark_read(notification_id)
+            return {"ok": True, "updated": updated}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "hermes.dbus.notifications.mark_read_failed: %s", exc
+            )
+            return {"ok": False, "error": str(exc)}
+
+    def mark_all_notifications_read(self) -> dict:
+        """Mark all unread notifications as read. Returns {ok, count}."""
+        if self._notification_store is None:
+            return {"ok": True, "count": 0}
+        try:
+            count = self._notification_store.mark_all_read()
+            return {"ok": True, "count": count}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "hermes.dbus.notifications.mark_all_read_failed: %s", exc
+            )
+            return {"ok": False, "error": str(exc)}
 
     # ------------------------------------------------------------------
     # T017 — Desktop overlay methods (spec 014-agentic-desktop)

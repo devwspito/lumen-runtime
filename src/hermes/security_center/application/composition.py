@@ -44,6 +44,8 @@ def build_default_scan_service():
     except ImportError:
         return None
 
+    # composition.py is the inline-path composition (no trivy — 120 s timeout
+    # would block the daemon's event loop).  Engine is always 'heuristic' here.
     return ScanService(
         scanners=[
             PackageContentScanner(),
@@ -55,4 +57,5 @@ def build_default_scan_service():
         ],
         history_repo=SQLiteScanRepo(),
         policy_repo=SQLitePolicyRepo(),
+        engine="heuristic",
     )

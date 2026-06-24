@@ -1,9 +1,11 @@
 import { useEffect, useReducer, useRef, useState } from 'react'
 import { sileo } from 'sileo'
-import { listMcpServers, addMcpServer, removeMcpServer, searchMcpRegistry, ApiError } from '../api/client'
-import type { McpServer, McpRegistryEntry } from '../api/types'
+import { listMcpServers, addMcpServer, removeMcpServer, searchMcpRegistry, scanInstall, recordSecurityDecision, ApiError } from '../api/client'
+import type { McpServer, McpRegistryEntry, InstallScanResponse } from '../api/types'
 import { useConfirmDialog } from '../components/ConfirmDialog'
 import Badge from '../components/Badge'
+import InstallScanModal from '../components/InstallScanModal'
+import type { MfaFactors } from '../components/MfaModal'
 
 // Curated catalog — mirrors mcp.js MCP_CATALOG (npx-only verified servers).
 const MCP_CATALOG: McpRegistryEntry[] = [
@@ -101,9 +103,18 @@ function show(message: string, kind: 'ok' | 'warn' | 'error' = 'ok', durationMs 
   else sileo.warning({ title: message, duration: durationMs })
 }
 
+// Pending install approval: holds the scan result + pending install entry
+interface PendingInstall {
+  scan: InstallScanResponse
+  entry: McpRegistryEntry
+  collectedEnv: Record<string, string>
+  onDone: () => void
+}
+
 export default function McpView() {
   const [state, dispatch] = useReducer(reducer, { status: 'loading' })
   const [registryState, setRegistryState] = useState<RegistryState>({ status: 'idle' })
+  const [pendingInstall, setPendingInstall] = useState<PendingInstall | null>(null)
   const regInputRef = useRef<HTMLInputElement>(null)
   const [confirm, ConfirmDialogNode] = useConfirmDialog()
 
@@ -125,14 +136,7 @@ export default function McpView() {
     ? new Set(state.servers.map(s => s.server_id ?? s.id ?? ''))
     : new Set<string>()
 
-  async function installEntry(entry: McpRegistryEntry, collectedEnv: Record<string, string>, onDone: () => void) {
-    const runner = getRunner(entry.argv)
-    if (runner && runner !== 'npx') {
-      show(`Solo se admiten herramientas npx por ahora (esta usa ${runner}).`, 'warn', 7000)
-      onDone()
-      return
-    }
-
+  async function doAddMcpServer(entry: McpRegistryEntry, collectedEnv: Record<string, string>, onDone: () => void) {
     const argv = Array.isArray(entry.argv)
       ? entry.argv
       : String(entry.argv ?? '').split(/\s+/).filter(Boolean)
@@ -158,6 +162,54 @@ export default function McpView() {
     }
   }
 
+  async function installEntry(entry: McpRegistryEntry, collectedEnv: Record<string, string>, onDone: () => void) {
+    const runner = getRunner(entry.argv)
+    if (runner && runner !== 'npx') {
+      show(`Solo se admiten herramientas npx por ahora (esta usa ${runner}).`, 'warn', 7000)
+      onDone()
+      return
+    }
+
+    const identifier = entry.server_id ?? entry.id ?? slugify(entry.name ?? '')
+
+    try {
+      const scan = await scanInstall('mcp', identifier)
+      if (scan.requires_owner_approval) {
+        // Hold the install until the owner approves via the scan modal
+        setPendingInstall({ scan, entry, collectedEnv, onDone })
+        return
+      }
+      // PASS → proceed directly
+      await doAddMcpServer(entry, collectedEnv, onDone)
+    } catch {
+      // Scan endpoint unavailable — fall back to direct install
+      await doAddMcpServer(entry, collectedEnv, onDone)
+    }
+  }
+
+  async function handleScanApprove(factors: MfaFactors) {
+    if (!pendingInstall) return
+    const { scan, entry, collectedEnv, onDone } = pendingInstall
+    setPendingInstall(null)
+    try {
+      await recordSecurityDecision({
+        scan_id: scan.scan_id,
+        decision: 'approve',
+        identifier: scan.identifier ?? entry.server_id ?? entry.id ?? '',
+        kind: 'mcp',
+        score: scan.score,
+        verdict: scan.verdict,
+        risks_json: JSON.stringify(scan.risks),
+        totp: factors.totp,
+        riddle_answer: factors.riddle_answer ?? null,
+      })
+      await doAddMcpServer(entry, collectedEnv, onDone)
+    } catch (e) {
+      show(e instanceof Error ? e.message : 'Error al registrar la decisión', 'error')
+      onDone()
+    }
+  }
+
   async function searchRegistry() {
     const q = regInputRef.current?.value.trim() ?? ''
     if (q.length < 2) return
@@ -177,6 +229,17 @@ export default function McpView() {
   return (
     <>
       {ConfirmDialogNode}
+      {pendingInstall && (
+        <InstallScanModal
+          scan={pendingInstall.scan}
+          name={pendingInstall.entry.label ?? pendingInstall.entry.name ?? pendingInstall.scan.identifier ?? ''}
+          onApprove={handleScanApprove}
+          onCancel={() => {
+            pendingInstall.onDone()
+            setPendingInstall(null)
+          }}
+        />
+      )}
       <header className="view-header">
         <h1 className="view-title">Herramientas externas</h1>
         <p className="view-subtitle">Conecta conjuntos de herramientas externos para ampliar las capacidades del agente.</p>

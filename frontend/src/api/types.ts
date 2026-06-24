@@ -368,6 +368,81 @@ export interface InstallDecisionPayload {
   riddle_answer: string | null
 }
 
+// ── Notifications ─────────────────────────────────────────────────────────────
+
+export type NotificationKind = 'task' | 'chat' | 'system'
+export type NotificationStatus = 'ok' | 'error' | 'info'
+
+export interface Notification {
+  id: string
+  kind: NotificationKind
+  title: string
+  body: string
+  status: NotificationStatus
+  conversation_id: string | null
+  created_at: string
+  read: boolean
+}
+
+export interface UnreadCountResponse {
+  count: number
+}
+
+// ── Security install scan ──────────────────────────────────────────────────────
+
+export interface InstallRisk {
+  category: string
+  severity: string
+  message: string
+  evidence_ref?: string
+}
+
+export interface InstallScanResponse {
+  scan_id: string
+  verdict: 'PASS' | 'WARN' | 'FAIL'
+  score: number
+  engine: string
+  engine_label: string
+  requires_owner_approval: boolean
+  risks: InstallRisk[]
+  identifier?: string
+  kind?: string
+}
+
+export interface SecurityDecisionPayload {
+  scan_id: string
+  decision: 'approve'
+  identifier: string
+  kind: string
+  score: number
+  verdict: string
+  risks_json: string
+  totp: string
+  riddle_answer: string | null
+}
+
+// ── Skill details ──────────────────────────────────────────────────────────────
+
+export interface SkillDetails {
+  package_id: string
+  skill_id?: string
+  skill_name?: string
+  version?: string
+  state?: string
+  surface_kinds?: string | string[]
+  skill_kind?: string
+  instructions: string | null
+  instructions_path?: string
+  created_at?: string
+}
+
+// ── Training state ─────────────────────────────────────────────────────────────
+
+export interface TrainingState {
+  state: 'idle' | 'capturing' | 'paused' | 'review' | string
+  session_id?: string
+}
+
 // ── Memory ────────────────────────────────────────────────────────────────────
 
 export interface MemoryItem {

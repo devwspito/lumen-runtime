@@ -36,6 +36,12 @@ import type {
   AgentRoster,
   WorkspaceFile,
   MemoryItem,
+  Notification,
+  UnreadCountResponse,
+  InstallScanResponse,
+  SecurityDecisionPayload,
+  SkillDetails,
+  TrainingState,
 } from './types'
 
 // Mirrors the timeout strategy in vanilla api.js: snappy GETs fail fast;
@@ -313,6 +319,22 @@ export function abandonTrainingSession(sessionId: string): Promise<unknown> {
   ).catch(() => ({}))
 }
 
+export function pauseTrainingRecording(sessionId: string): Promise<TrainingState> {
+  return request<TrainingState>(`/training/${encodeURIComponent(sessionId)}/pause`, { method: 'POST', body: '{}' })
+}
+
+export function resumeTrainingRecording(sessionId: string): Promise<TrainingState> {
+  return request<TrainingState>(`/training/${encodeURIComponent(sessionId)}/resume`, { method: 'POST', body: '{}' })
+}
+
+export function cancelTrainingRecording(sessionId: string): Promise<TrainingState> {
+  return request<TrainingState>(`/training/${encodeURIComponent(sessionId)}/cancel`, { method: 'POST', body: '{}' })
+}
+
+export function getSkillDetails(packageId: string): Promise<SkillDetails> {
+  return request<SkillDetails>(`/skills/${encodeURIComponent(packageId)}/details`)
+}
+
 // ── Integrations (Composio) ───────────────────────────────────────────────────
 
 export function getComposioStatus(): Promise<ComposioStatus> {
@@ -481,6 +503,42 @@ export function recordInstallDecision(payload: InstallDecisionPayload): Promise<
     body: JSON.stringify(payload),
     timeoutMs: 30_000,
   })
+}
+
+export function scanInstall(kind: 'mcp' | 'skill', identifier: string): Promise<InstallScanResponse> {
+  return request<InstallScanResponse>('/security/scans/install', {
+    method: 'POST',
+    body: JSON.stringify({ kind, identifier }),
+    timeoutMs: 30_000,
+  })
+}
+
+export function recordSecurityDecision(payload: SecurityDecisionPayload): Promise<unknown> {
+  return request<unknown>('/security/decisions', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+    timeoutMs: 30_000,
+  })
+}
+
+// ── Notifications ─────────────────────────────────────────────────────────────
+
+export function listNotifications(limit = 100, unreadOnly = false): Promise<Notification[]> {
+  return request<Notification[]>(
+    `/notifications?limit=${limit}&unread_only=${unreadOnly}`,
+  ).catch(() => [])
+}
+
+export function getUnreadCount(): Promise<UnreadCountResponse> {
+  return request<UnreadCountResponse>('/notifications/unread-count').catch(() => ({ count: 0 }))
+}
+
+export function markNotificationRead(id: string): Promise<unknown> {
+  return request<unknown>(`/notifications/${encodeURIComponent(id)}/read`, { method: 'POST' })
+}
+
+export function markAllNotificationsRead(): Promise<unknown> {
+  return request<unknown>('/notifications/read-all', { method: 'POST' })
 }
 
 export function listEgressDomains(): Promise<EgressDomainsResponse> {

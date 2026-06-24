@@ -1296,6 +1296,45 @@ class Runtime1ServiceInterface(ServiceInterface):
             raise DBusError("org.hermes.Error.Unauthorized", str(exc)) from exc
 
     # ------------------------------------------------------------------
+    # Notifications — task/chat completion bell (read via D-Bus by shell-server)
+    # Read verbs: no authZ (same policy as list_memory / list_providers).
+    # Mark-read verbs: single-owner install, no cross-tenant risk.
+    # ------------------------------------------------------------------
+
+    @method()
+    async def ListNotifications(self, limit: "u", unread_only: "b") -> "s":  # noqa: N802,F821,UP037
+        """List notifications newest-first. JSON → [{id,kind,title,body,status,
+        conversation_id,created_at,read}].
+
+        limit: max entries (u = uint32; 0 uses default 100).
+        unread_only: if true, return only unread entries.
+        Returns [] when the store is unavailable (fail-soft).
+        No authZ: read-only, same policy as ListMemory / ListProviders.
+        """
+        return self._wiring.list_notifications(
+            limit=int(limit) or 100, unread_only=bool(unread_only)
+        )
+
+    @method()
+    async def GetNotificationUnreadCount(self) -> "u":  # noqa: N802,F821,UP037
+        """Return count of unread notifications (uint32). 0 on store unavailable."""
+        return self._wiring.get_notification_unread_count()
+
+    @method()
+    async def MarkNotificationRead(self, notification_id: "s") -> "s":  # noqa: N802,F821,UP037
+        """Mark one notification as read. Returns JSON {ok, updated}."""
+        result = self._wiring.mark_notification_read(
+            notification_id=notification_id
+        )
+        return json.dumps(result)
+
+    @method()
+    async def MarkAllNotificationsRead(self) -> "s":  # noqa: N802,F821,UP037
+        """Mark all unread notifications as read. Returns JSON {ok, count}."""
+        result = self._wiring.mark_all_notifications_read()
+        return json.dumps(result)
+
+    # ------------------------------------------------------------------
     # Acceso remoto (Settings → toggle) — espejo noVNC con URL individual.
     # enable/disable mutan (password = consentimiento, PAM en root helper);
     # status es read-only (sin authZ, mismo patrón que list_*).

@@ -34,7 +34,10 @@ def test_get_policy_returns_default():
     p = svc.get_policy()
     assert p.auto_block_fail is True
     assert p.require_approval_warn is True
-    assert p.scanner_weights["cve"] == 35
+    # Default weights: content=40, cve=20, mcp_lint=20, provenance=12, signature=8
+    assert p.scanner_weights["cve"] == 20
+    assert p.scanner_weights["content"] == 40
+    assert sum(p.scanner_weights.values()) == 100
 
 
 # ---------------------------------------------------------------------------

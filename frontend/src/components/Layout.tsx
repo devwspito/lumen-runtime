@@ -3,6 +3,7 @@ import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { listConversations, listPendingApprovals } from '../api/client'
 import { useChat } from '../hooks/useChat'
 import type { ConversationSummary } from '../api/types'
+import NotificationsPanel from './NotificationsPanel'
 
 // activeProviderReload lets child views (ProvidersView) trigger a re-check after
 // connecting a model. The "Falta conectar un modelo" nudge was removed — the chat
@@ -341,6 +342,7 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
             <div className="sidebar-mark" aria-hidden="true">L</div>
             <span className="sidebar-name">Lumen</span>
           </div>
+          <NotificationsPanel loadConversation={chat.loadConversation} />
         </div>
 
         {/* New chat button — always resets the conversation */}

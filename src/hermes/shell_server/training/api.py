@@ -1,16 +1,28 @@
 """Training API: REST endpoints para enseñar una skill nueva.
 
 Flow:
-  POST /api/v1/training            inicia una sesión
-  POST /api/v1/training/{id}/start  comienza capture (PipeWire portal)
-  POST /api/v1/training/{id}/stop   detiene capture
-  POST /api/v1/training/{id}/sign   firma SkillPackage + persist
-  POST /api/v1/training/{id}/abandon abandona
-  GET  /api/v1/training/{id}        estado actual
+  POST /api/v1/training                inicia una sesión
+  POST /api/v1/training/{id}/start     abre el navegador enjaulado y comienza capture
+  POST /api/v1/training/{id}/pause     pausa la grabación (capturing → paused)
+  POST /api/v1/training/{id}/resume    reanuda la grabación (paused → capturing)
+  POST /api/v1/training/{id}/stop      detiene capture y cierra el navegador
+  POST /api/v1/training/{id}/cancel    cancela la sesión en cualquier estado activo
+  POST /api/v1/training/{id}/sign      firma SkillPackage + persist
+  POST /api/v1/training/{id}/abandon   abandona
+  GET  /api/v1/training/{id}           estado actual
 
-F6.1: el capture real (PipeWire screen + voz Whisper + clicks/keys) lo
-hace el TrainingCaptureCoordinator.  El router acepta un coordinador
-inyectado para que los tests puedan pasar uno falso sin compositor.
+Navegador enjaulado (Part 1):
+  POST /start llama a _browser_controller.start() del módulo agent_browser,
+  que ya encapsula la jaula Landlock + netns + launcher (HERMES_BROWSER_JAIL).
+  En CI (HERMES_BROWSER_JAIL=0) arranca Chromium sin jaula.
+  POST /stop llama a _browser_controller.stop().
+  El coordinator (_coord()) es siempre None en producción (no hay captura de
+  PipeWire en el contenedor Playwright); las llamadas a coord son no-ops cuando
+  None y no bloquean el flujo del estado.
+
+State machine de la grabación:
+  idle → capturing → paused → capturing → review → validated
+                  ↘ cancelled
 
 Persistence helpers (compile + persist SkillPackage) live in persist.py
 and are shared with the GTK4 shell process, which drives the coordinator
@@ -283,6 +295,97 @@ def create_training_router(
             except Exception:
                 logger.exception("coordinator.begin failed session=%s", session_id)
 
+        # Launch the jailed browser so the operator has a real isolated surface
+        # to demonstrate in. Uses the existing hermes-browser-launcher / Landlock
+        # jail (HERMES_BROWSER_JAIL=1) or direct Chromium spawn in CI/dev
+        # (HERMES_BROWSER_JAIL=0). Fail-soft: never blocks the state transition.
+        await _launch_recording_browser(session_id)
+
+        return _read_state(db_path, session_id)
+
+    @router.post("/{session_id}/pause", response_model=TrainingState)
+    async def pause_recording(session_id: UUID) -> TrainingState:
+        """Pause an active recording session (capturing → paused). Idempotent."""
+        with _conn(db_path) as c:
+            res = c.execute(
+                "UPDATE training_sessions SET state = 'paused' "
+                "WHERE session_id = ? AND state = 'capturing'",
+                (str(session_id),),
+            )
+            if res.rowcount == 0:
+                # Idempotent: if already paused, return current state.
+                row = c.execute(
+                    "SELECT state FROM training_sessions WHERE session_id = ?",
+                    (str(session_id),),
+                ).fetchone()
+                if row is None:
+                    raise HTTPException(404, "session not found")
+                if row["state"] == "paused":
+                    return _read_state(db_path, session_id)
+                raise HTTPException(409, f"session not capturing (state={row['state']})")
+
+        logger.info("training.pause session=%s", session_id)
+        return _read_state(db_path, session_id)
+
+    @router.post("/{session_id}/resume", response_model=TrainingState)
+    async def resume_recording(session_id: UUID) -> TrainingState:
+        """Resume a paused recording session (paused → capturing). Idempotent."""
+        with _conn(db_path) as c:
+            res = c.execute(
+                "UPDATE training_sessions SET state = 'capturing' "
+                "WHERE session_id = ? AND state = 'paused'",
+                (str(session_id),),
+            )
+            if res.rowcount == 0:
+                row = c.execute(
+                    "SELECT state FROM training_sessions WHERE session_id = ?",
+                    (str(session_id),),
+                ).fetchone()
+                if row is None:
+                    raise HTTPException(404, "session not found")
+                if row["state"] == "capturing":
+                    return _read_state(db_path, session_id)
+                raise HTTPException(409, f"session not paused (state={row['state']})")
+
+        logger.info("training.resume session=%s", session_id)
+        return _read_state(db_path, session_id)
+
+    @router.post("/{session_id}/cancel", response_model=TrainingState)
+    async def cancel_recording(session_id: UUID) -> TrainingState:
+        """Cancel a session in any active state (idle/capturing/paused/review → cancelled).
+
+        Idempotent: already-cancelled sessions return 200 with current state.
+        Stops the recording browser and cleans up the orchestrator.
+        """
+        with _conn(db_path) as c:
+            res = c.execute(
+                "UPDATE training_sessions SET state = 'cancelled', stopped_at = ? "
+                "WHERE session_id = ? AND state IN ('idle','capturing','paused','review')",
+                (_now_iso(), str(session_id)),
+            )
+            if res.rowcount == 0:
+                row = c.execute(
+                    "SELECT state FROM training_sessions WHERE session_id = ?",
+                    (str(session_id),),
+                ).fetchone()
+                if row is None:
+                    raise HTTPException(404, "session not found")
+                # Idempotent for already-terminal states.
+
+        _stop_recording_browser(session_id)
+
+        coord = _coord()
+        if coord is not None:
+            try:
+                coord.end(session_id=session_id)
+            except Exception:
+                pass
+        try:
+            orchestrator.abandon(session_id=session_id, reason="user_cancel")
+        except Exception:
+            pass
+
+        logger.info("training.cancel session=%s", session_id)
         return _read_state(db_path, session_id)
 
     @router.post("/{session_id}/stop", response_model=TrainingState)
@@ -290,11 +393,13 @@ def create_training_router(
         with _conn(db_path) as c:
             res = c.execute(
                 "UPDATE training_sessions SET state = 'review', stopped_at = ? "
-                "WHERE session_id = ? AND state = 'capturing'",
+                "WHERE session_id = ? AND state IN ('capturing','paused')",
                 (_now_iso(), str(session_id)),
             )
             if res.rowcount == 0:
-                raise HTTPException(409, "session not capturing")
+                raise HTTPException(409, "session not capturing or paused")
+
+        _stop_recording_browser(session_id)
 
         coord = _coord()
         if coord is not None:
@@ -590,3 +695,43 @@ def _count_steps(
         return len(orchestrator.get_session(session_id=session_id).steps)
     except Exception:
         return 0
+
+
+# ---------------------------------------------------------------------------
+# Browser launch/stop helpers (Part 1)
+# ---------------------------------------------------------------------------
+# We reuse the existing _BrowserController from agent_browser (which already
+# encapsulates the Landlock jail / hermes-browser-launcher / direct Popen
+# paths). Importing it here is safe: the module is always bundled.
+
+async def _launch_recording_browser(session_id: UUID) -> None:
+    """Launch the jailed recording browser for a training session.
+
+    Fail-soft: logs the error without re-raising so the state transition
+    is never blocked by a browser launch failure.
+    """
+    try:
+        from hermes.shell_server.agent_browser import _browser_controller  # noqa: PLC0415
+        await _browser_controller.start()
+        logger.info("training.browser_launched session=%s", session_id)
+    except Exception:
+        logger.warning(
+            "training.browser_launch_failed session=%s — "
+            "el navegador no pudo abrirse; la sesión continúa sin captura visual",
+            session_id,
+            exc_info=True,
+        )
+
+
+def _stop_recording_browser(session_id: UUID) -> None:
+    """Stop the recording browser (fail-soft)."""
+    try:
+        from hermes.shell_server.agent_browser import _browser_controller  # noqa: PLC0415
+        _browser_controller.stop()
+        logger.info("training.browser_stopped session=%s", session_id)
+    except Exception:
+        logger.warning(
+            "training.browser_stop_failed session=%s",
+            session_id,
+            exc_info=True,
+        )
