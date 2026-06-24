@@ -147,7 +147,11 @@ def create_integrations_router(db_path: Path) -> APIRouter:
         limit: int = Query(50, le=200),
     ) -> list[ToolkitItem]:
         """List available Composio toolkits (apps the user can connect)."""
-        client = _build_client(_repo())
+        repo = _repo()
+        integration = repo.get_or_none(kind=_KIND)
+        if integration is None or not integration.has_api_key:
+            return []  # fail-soft: no Composio key configured → empty catalog, NOT 503
+        client = _build_client(repo)
         try:
             toolkits = await client.list_toolkits(search=search, limit=limit)
         except ComposioApiError as exc:
@@ -165,6 +169,9 @@ def create_integrations_router(db_path: Path) -> APIRouter:
     async def list_connected() -> list[ConnectedAccountItem]:
         """List accounts connected via Composio for the configured entity_id."""
         repo = _repo()
+        integration = repo.get_or_none(kind=_KIND)
+        if integration is None or not integration.has_api_key:
+            return []  # fail-soft: no Composio key configured → empty, NOT 503
         client = _build_client(repo)
         entity_id = _get_entity_id(repo)
         try:
