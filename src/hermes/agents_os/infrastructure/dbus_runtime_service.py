@@ -4116,9 +4116,9 @@ async def _nous_validate_provider(provider: Any, api_key: str | None) -> "tuple[
     )
     req, bare = nous_request_from_model_config(temp_config)
 
-    def _run() -> str:
+    def _run() -> "tuple[bool, str | None]":
         from hermes_cli.runtime_provider import resolve_runtime_provider  # noqa: PLC0415
-        from run_agent import AIAgent  # noqa: PLC0415
+        from openai import OpenAI  # noqa: PLC0415
 
         rt = resolve_runtime_provider(
             requested=req.requested,
@@ -4126,26 +4126,39 @@ async def _nous_validate_provider(provider: Any, api_key: str | None) -> "tuple[
             explicit_base_url=req.explicit_base_url,
             target_model=req.target_model,
         )
-        agent = AIAgent(
-            api_key=rt.get("api_key"),
-            base_url=rt.get("base_url"),
-            provider=rt.get("provider"),
-            api_mode=rt.get("api_mode"),
-            model=bare,
-            credential_pool=rt.get("credential_pool"),
-            enabled_toolsets=[],
-            max_iterations=2,
-            save_trajectories=False,
-            quiet_mode=True,
+        # HONEST reachability+auth probe: hit the CONFIGURED endpoint with a
+        # 1-token completion and let it RAISE on 404 / 401 / offline / DNS. The
+        # OLD path ran the full agent loop (AIAgent.run_conversation), which
+        # SWALLOWS API failures into a non-empty "⚠️ No reply…" final_response —
+        # so a dead endpoint returned a non-empty string and the test reported
+        # "Conexión Exitosa" even though it NEVER reached the user's model
+        # (verified: a bogus base_url returned ok:true while the journal showed
+        # HTTP 404 / ERR_NGROK_3200). max_retries=0 → fail fast and honestly;
+        # base_url=None falls back to the provider default (e.g. api.openai.com).
+        client = OpenAI(
+            api_key=(rt.get("api_key") or "x"),
+            base_url=(rt.get("base_url") or None),
+            timeout=20.0,
+            max_retries=0,
         )
-        r = agent.run_conversation("OK")
-        return str(r.get("final_response") if isinstance(r, dict) else r or "")
+        completion = client.chat.completions.create(
+            model=bare,
+            messages=[{"role": "user", "content": "OK"}],
+            max_tokens=1,
+            temperature=0,
+        )
+        choices = getattr(completion, "choices", None) or []
+        if not choices:
+            return False, "el endpoint respondió sin 'choices' (¿modelo o ruta /v1 incorrectos?)"
+        return True, None
 
     loop = asyncio.get_event_loop()
-    resp = await loop.run_in_executor(None, _run)
-    if resp and resp.strip():
-        return True, None
-    return False, "el modelo no devolvió respuesta"
+    try:
+        ok, err = await loop.run_in_executor(None, _run)
+    except Exception as exc:  # noqa: BLE001 — surface the REAL provider error
+        raw = str(exc).strip()
+        return False, (raw[:300] if raw else type(exc).__name__)
+    return ok, err
 
 
 def _uid_to_uuid(uid: int) -> UUID:
