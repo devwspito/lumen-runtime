@@ -184,9 +184,14 @@ class ApprovalGatePort(Protocol):
         """
         ...
 
-    async def approve(self, *, proposal_id: UUID, approved_by: UUID) -> str:
+    async def approve(
+        self, *, proposal_id: UUID, approved_by: UUID, mfa_factors: Any | None = None
+    ) -> str:
         """Aprobación humana: genera approval_token firmado, marca approved,
         registra quién aprobó (SC-004). Lo invoca la API de supervisión.
+
+        `mfa_factors` se verifica AQUÍ (el gate es el único punto de enforcement MFA
+        en toda superficie — red-team 2026-06-19, finding 3). Fail-closed sin factores.
         """
         ...
 

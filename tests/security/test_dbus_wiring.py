@@ -56,8 +56,10 @@ class _FakeApprovalGate:
     async def register_pending(self, *, proposal_id, **_) -> None:
         self._pending.add(proposal_id)
 
-    async def approve(self, *, proposal_id: UUID, approved_by: UUID) -> str:
-        self.approve_calls.append({"proposal_id": proposal_id, "approved_by": approved_by})
+    async def approve(self, *, proposal_id: UUID, approved_by: UUID, mfa_factors=None) -> str:
+        self.approve_calls.append({
+            "proposal_id": proposal_id, "approved_by": approved_by, "mfa_factors": mfa_factors,
+        })
         return f"fake-token-{proposal_id}"
 
     async def reject(self, *, proposal_id: UUID, rejected_by: UUID, reason: str) -> None:

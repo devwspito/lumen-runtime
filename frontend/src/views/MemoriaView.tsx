@@ -1,13 +1,22 @@
 /**
  * MemoriaView — agent long-term memory browser.
- * Mirrors vanilla memory.js: list all entries + search.
- * Endpoints: GET /memory, GET /memory/search?q=
+ *
+ * - List: GET /memory (rows with truncated content)
+ * - Full content: GET /memory/{entry_id}  (entry_id = "{target}:{entry_index}")
+ * - Delete: DELETE /memory/{id}
+ * - Search: GET /memory/search?q=
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { sileo } from 'sileo'
-import { listMemory, searchMemory, ApiError } from '../api/client'
-import type { MemoryItem } from '../api/types'
+import { Brain, Search, Trash2 } from 'lucide-react'
+import { listMemory, searchMemory, forgetMemoryItem, getMemoryEntry, ApiError } from '../api/client'
+import type { MemoryItem, MemoryEntryDetail } from '../api/types'
+import { Drawer } from '../components/ui/Drawer'
+import { EmptyState } from '../components/ui/EmptyState'
+import { PageHeader } from '../components/ui/PageHeader'
+import { Button } from '../components/ui/Button'
+import { Spinner } from '../components/ui/Spinner'
 
 // ── State machine ─────────────────────────────────────────────────────────────
 
@@ -16,31 +25,53 @@ type MemoryState =
   | { status: 'success'; items: MemoryItem[]; query: string }
   | { status: 'error'; message: string }
 
+type DrawerState =
+  | { open: false }
+  | { open: true; item: MemoryItem; detail: MemoryEntryDetail | null; loading: boolean }
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function memoryContent(item: MemoryItem): string {
-  // Prefer the backend's pre-truncated field; fall back to full content or plain text.
-  // Never JSON.stringify — that leaks raw object noise to the user.
   return String(item.content_truncated ?? item.content ?? item.text ?? '').trim()
 }
 
 function formatDate(iso?: string): string {
   if (!iso) return ''
-  return new Date(iso).toLocaleString('es')
+  return new Date(iso).toLocaleString('es', {
+    day: 'numeric', month: 'short', year: 'numeric',
+    hour: '2-digit', minute: '2-digit',
+  })
 }
 
-// ── Memory item row ───────────────────────────────────────────────────────────
+function entryId(item: MemoryItem): string {
+  if (item.id) return item.id
+  const target = item.target ?? ''
+  const idx = item.entry_index ?? 0
+  return target ? `${target}:${idx}` : ''
+}
+
+// ── Memory row ────────────────────────────────────────────────────────────────
 
 interface MemoryRowProps {
   item: MemoryItem
+  index: number
+  onClick: () => void
 }
 
-function MemoryRow({ item }: MemoryRowProps) {
+function MemoryRow({ item, index, onClick }: MemoryRowProps) {
   const content = memoryContent(item)
   const time = formatDate(item.created_at)
 
   return (
-    <li className="memory-item">
+    <li
+      className="memory-item memory-item--clickable ds-list-item-enter"
+      role="button"
+      tabIndex={0}
+      onClick={onClick}
+      onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick() } }}
+      aria-label={`Entrada de memoria ${index + 1}${item.target ? ` — ${item.target}` : ''}`}
+      style={{ animationDelay: `${Math.min(index * 30, 300)}ms` }}
+    >
       <div className="memory-item__content">{content}</div>
       {time && <div className="memory-item__time">{time}</div>}
     </li>
@@ -52,6 +83,8 @@ function MemoryRow({ item }: MemoryRowProps) {
 export default function MemoriaView() {
   const [state, setState] = useState<MemoryState>({ status: 'loading' })
   const [searchInput, setSearchInput] = useState('')
+  const [drawer, setDrawer] = useState<DrawerState>({ open: false })
+  const [deleting, setDeleting] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
 
   const load = useCallback(async (query = '') => {
@@ -67,20 +100,54 @@ export default function MemoriaView() {
     }
   }, [])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { void load() }, [load])
 
   function handleSearch() {
-    const q = searchInput.trim()
-    load(q)
-  }
-
-  function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
-    if (e.key === 'Enter') handleSearch()
+    void load(searchInput.trim())
   }
 
   function handleRetry() {
     setSearchInput('')
-    load('')
+    void load('')
+  }
+
+  async function openDrawer(item: MemoryItem) {
+    setDrawer({ open: true, item, detail: null, loading: true })
+    const id = entryId(item)
+    if (!id) {
+      // No resolvable ID — show what we have without fetching
+      setDrawer({ open: true, item, detail: null, loading: false })
+      return
+    }
+    try {
+      const detail = await getMemoryEntry(id)
+      setDrawer(prev => prev.open ? { ...prev, detail, loading: false } : prev)
+    } catch {
+      // Show truncated content as fallback
+      setDrawer(prev => prev.open ? { ...prev, detail: null, loading: false } : prev)
+    }
+  }
+
+  function closeDrawer() {
+    setDrawer({ open: false })
+  }
+
+  async function handleDelete() {
+    if (!drawer.open) return
+    const item = drawer.item
+    const id = entryId(item)
+    if (!id) { sileo.error({ title: 'No se puede eliminar esta entrada.' }); return }
+    setDeleting(true)
+    try {
+      await forgetMemoryItem(id)
+      sileo.success({ title: 'Entrada eliminada' })
+      closeDrawer()
+      void load(searchInput.trim())
+    } catch (e) {
+      sileo.error({ title: e instanceof Error ? e.message : 'Error al eliminar' })
+    } finally {
+      setDeleting(false)
+    }
   }
 
   const isSuccess = state.status === 'success'
@@ -88,37 +155,47 @@ export default function MemoriaView() {
 
   return (
     <>
-      <header className="view-header">
-        <h1 className="view-title">Memoria</h1>
-        <p className="view-subtitle">Lo que Lumen recuerda entre conversaciones.</p>
-      </header>
+      <PageHeader
+        title="Memoria"
+        subtitle="Lo que Lumen recuerda entre conversaciones."
+      />
 
       <div className="view-body cv-view-body">
         {/* Search */}
         <section className="cv-section" aria-label="Buscar en memoria">
           <div className="cv-search-row">
-            <label className="sr-only" htmlFor="memory-search">
-              Buscar en memoria
-            </label>
-            <input
-              id="memory-search"
-              ref={inputRef}
-              className="cv-input"
-              type="search"
-              placeholder="Buscar en memoria…"
-              autoComplete="off"
-              aria-label="Buscar en memoria"
-              value={searchInput}
-              onChange={e => setSearchInput(e.target.value)}
-              onKeyDown={handleKeyDown}
-            />
-            <button
-              className="cv-btn cv-btn--secondary cv-btn--sm"
+            <label className="sr-only" htmlFor="memory-search">Buscar en memoria</label>
+            <div style={{ position: 'relative', flex: 1 }}>
+              <Search
+                size={14}
+                aria-hidden="true"
+                style={{
+                  position: 'absolute', left: 10, top: '50%',
+                  transform: 'translateY(-50%)', color: 'var(--ink4)',
+                  pointerEvents: 'none',
+                }}
+              />
+              <input
+                id="memory-search"
+                ref={inputRef}
+                className="cv-input"
+                type="search"
+                placeholder="Buscar en memoria…"
+                autoComplete="off"
+                value={searchInput}
+                onChange={e => setSearchInput(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') handleSearch() }}
+                style={{ paddingLeft: 30 }}
+              />
+            </div>
+            <Button
+              variant="secondary"
+              size="sm"
               onClick={handleSearch}
-              type="button"
+              loading={state.status === 'loading'}
             >
               Buscar
-            </button>
+            </Button>
           </div>
         </section>
 
@@ -129,40 +206,87 @@ export default function MemoriaView() {
           </h2>
 
           {state.status === 'loading' && (
-            <div className="cv-skeleton" aria-busy="true" aria-label="Cargando memoria…" />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }} aria-busy="true">
+              {[...Array(4)].map((_, i) => (
+                <div key={i} className="cv-skeleton" style={{ height: 52 }} />
+              ))}
+            </div>
           )}
 
           {state.status === 'error' && (
             <div role="alert">
               <p className="state-error">{state.message}</p>
-              <button
-                className="cv-btn cv-btn--secondary cv-btn--sm"
-                onClick={handleRetry}
-                style={{ marginTop: 8 }}
-                type="button"
-              >
+              <Button variant="secondary" size="sm" onClick={handleRetry} style={{ marginTop: 8 }}>
                 Reintentar
-              </button>
+              </Button>
             </div>
           )}
 
           {isSuccess && state.items.length === 0 && (
-            <p className="cv-empty">
-              {activeQuery
+            <EmptyState
+              icon={<Brain size={40} />}
+              title={activeQuery
                 ? `Sin resultados para "${activeQuery}"`
-                : 'Aún no hay recuerdos. Lumen irá guardando lo importante de tus conversaciones automáticamente.'}
-            </p>
+                : 'Aún no hay recuerdos'}
+              description={activeQuery
+                ? undefined
+                : 'Lumen irá guardando lo importante de tus conversaciones automáticamente.'}
+            />
           )}
 
           {isSuccess && state.items.length > 0 && (
             <ul className="cv-list memory-list" role="list">
               {state.items.map((item, i) => (
-                <MemoryRow key={item.id ?? i} item={item} />
+                <MemoryRow
+                  key={item.id ?? i}
+                  item={item}
+                  index={i}
+                  onClick={() => void openDrawer(item)}
+                />
               ))}
             </ul>
           )}
         </section>
       </div>
+
+      {/* Full-content drawer */}
+      <Drawer
+        open={drawer.open}
+        title={drawer.open && drawer.item.target ? drawer.item.target : 'Detalle'}
+        onClose={closeDrawer}
+      >
+        {drawer.open && (
+          <div className="mem-drawer-content">
+            {drawer.item.target && (
+              <p className="mem-drawer-target">{drawer.item.target}</p>
+            )}
+
+            {drawer.loading ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--sp-2)', padding: 'var(--sp-4) 0', color: 'var(--ink4)' }}>
+                <Spinner size={16} label="Cargando contenido completo…" />
+                <span style={{ fontSize: 'var(--text-label)' }}>Cargando…</span>
+              </div>
+            ) : (
+              <p className="mem-drawer-body">
+                {(drawer.detail?.content ?? memoryContent(drawer.item)) || '(sin contenido)'}
+              </p>
+            )}
+
+            <div className="mem-drawer-actions">
+              <Button
+                variant="danger"
+                size="sm"
+                onClick={handleDelete}
+                loading={deleting}
+                aria-label="Eliminar esta entrada de memoria"
+              >
+                <Trash2 size={14} aria-hidden="true" />
+                Eliminar
+              </Button>
+            </div>
+          </div>
+        )}
+      </Drawer>
     </>
   )
 }

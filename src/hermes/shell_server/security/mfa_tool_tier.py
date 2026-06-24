@@ -16,27 +16,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from hermes.capabilities.tool_delicacy import Delicacy, delicacy
 from hermes.shell_server.security.mfa import MfaStore, ProtectionLevel
-
-# Delicacy → MFA tier. Single source (was duplicated in approvals_api._DELICACY_TO_MFA).
-_DELICACY_TO_MFA: dict[Delicacy, ProtectionLevel] = {
-    Delicacy.NORMAL: ProtectionLevel.MFA,
-    Delicacy.DELICATE: ProtectionLevel.MFA_HUMANITY,
-    Delicacy.MOST_DELICATE: ProtectionLevel.MFA_RIDDLE,
-}
 
 
 def classify_level(risk: str, tool: str) -> ProtectionLevel:
-    """Server-side MFA tier from the single delicacy source (never trust the client).
+    """Server-side MFA tier — TOTP-only model (owner decision 2026-06-24).
 
-    A 'critical'/'severe' daemon risk floors the tier at MFA+humanity even for a tool
-    the catalog rates NORMAL.
+    An agent that drives the browser can READ and solve any on-screen challenge
+    (a math "9+2", an image captcha, dragging a figure). The ONLY factor outside its
+    reach is the TOTP secret (owner-only 0600 file, sandbox uid cannot read it). So a
+    presence/humanity/riddle challenge adds zero security against the real threat
+    (the agent self-approving) — every action gates on TOTP and nothing else.
+
+    `risk`/`tool` are kept as the single classification entry point for future
+    per-action policy, but today every level collapses to MFA (TOTP).
     """
-    level = _DELICACY_TO_MFA[delicacy(tool)]
-    if level is ProtectionLevel.MFA and (risk or "").lower() in ("critical", "severe"):
-        return ProtectionLevel.MFA_HUMANITY
-    return level
+    return ProtectionLevel.MFA
 
 
 @dataclass(frozen=True)

@@ -5,6 +5,7 @@
 
 import { createPortal } from 'react-dom'
 import { useEffect, useRef } from 'react'
+import { X } from 'lucide-react'
 import type { SkillDetails } from '../api/types'
 import Badge from './Badge'
 
@@ -80,7 +81,7 @@ export default function SkillDetailsModal({ details, onClose }: SkillDetailsModa
             aria-label="Cerrar"
             onClick={onClose}
           >
-            ✕
+            <X size={16} aria-hidden="true" />
           </button>
         </div>
 

@@ -229,10 +229,17 @@ class ControlPlanePort(Protocol):
         ...
 
     async def approve(
-        self, *, channel: AuthenticatedChannel, proposal_id: UUID
+        self,
+        *,
+        channel: AuthenticatedChannel,
+        proposal_id: UUID,
+        mfa_factors: Any | None = None,
     ) -> str:
         """HITL approve. `approved_by` = UUID(channel.sender_uid). NO dispara
-        run_cycle (NFR-001); el loop re-dispatcha. Devuelve approval_token."""
+        run_cycle (NFR-001); el loop re-dispatcha. Devuelve approval_token.
+
+        `mfa_factors` se reenvía al gate (punto único de verificación MFA en TODA
+        superficie — red-team 2026-06-19, finding 3)."""
         ...
 
     async def reject(

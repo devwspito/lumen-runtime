@@ -17,8 +17,9 @@ import {
   type ChangeEvent,
 } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
+import { GitBranch, Loader2, CheckCircle2, AlertTriangle, FileText, X } from 'lucide-react'
 import type { ChatMessage, ToolStep } from '../hooks/useChat'
-import { listProviders, uploadWorkspaceFile, ApiError } from '../api/client'
+import { listProviders, uploadWorkspaceFile, getRuntimeStatus, ApiError } from '../api/client'
 import type { Provider } from '../api/types'
 import type { ChatOutletContext } from '../components/Layout'
 import ContextPanel from '../components/ContextPanel'
@@ -78,19 +79,80 @@ function Welcome({ onSuggestion }: WelcomeProps) {
 
 const DELEGATION_NAMES = new Set(['delegate_task', 'mixture_of_agents'])
 
-interface DelegationStepProps {
-  step: ToolStep
+/** Poll /runtime/status every 2 s while a delegation is in-flight. */
+function useDelegationActivity(isActive: boolean): { tool: string; agentId: string } | null {
+  const [activity, setActivity] = useState<{ tool: string; agentId: string } | null>(null)
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  useEffect(() => {
+    if (!isActive) {
+      setActivity(null)
+      return
+    }
+
+    let alive = true
+    const poll = async () => {
+      try {
+        const status = await getRuntimeStatus()
+        if (!alive) return
+        const entry = (status.activity ?? []).find((a) => a.tool && a.tool !== 'chat_responding' && a.tool !== 'delegate_task')
+        if (entry) {
+          setActivity({ tool: entry.tool ?? 'trabajando', agentId: entry.agent_id })
+        } else {
+          // Fall back to any activity entry (including "trabajando")
+          const fallback = (status.activity ?? [])[0]
+          setActivity(fallback ? { tool: fallback.tool ?? 'trabajando', agentId: fallback.agent_id } : null)
+        }
+      } catch {
+        // Transient error — keep last state
+      }
+    }
+
+    void poll()
+    intervalRef.current = setInterval(() => { void poll() }, 2_000)
+
+    return () => {
+      alive = false
+      if (intervalRef.current !== null) clearInterval(intervalRef.current)
+    }
+  }, [isActive])
+
+  return activity
 }
 
-function DelegationStep({ step }: DelegationStepProps) {
+interface DelegationStepProps {
+  step: ToolStep
+  isStreaming: boolean
+}
+
+function DelegationStep({ step, isStreaming }: DelegationStepProps) {
   const specialist = step.target || step.label || 'especialista'
+  const liveActivity = useDelegationActivity(isStreaming)
+
   return (
-    <div className="delegation-step" role="status" aria-label={`Delegado a ${specialist}`}>
-      <span className="delegation-step__icon" aria-hidden="true">🤝</span>
+    <div
+      className={`delegation-step${isStreaming ? ' delegation-step--active' : ' delegation-step--done'}`}
+      role="status"
+      aria-label={isStreaming ? `Delegando a ${specialist}` : `Completado por ${specialist}`}
+    >
+      <span className="delegation-step__icon" aria-hidden="true">
+        <GitBranch size={15} />
+      </span>
       <div className="delegation-step__body">
         <div className="delegation-step__label">
-          Delegado a <span className="delegation-step__specialist">{specialist}</span>
+          {isStreaming ? 'Delegando a' : 'Delegado a'}{' '}
+          <span className="delegation-step__specialist">{specialist}</span>
+          {isStreaming ? (
+            <Loader2 size={12} className="spin" aria-hidden="true" />
+          ) : (
+            <CheckCircle2 size={12} style={{ color: 'var(--ok)', flexShrink: 0 }} aria-hidden="true" />
+          )}
         </div>
+        {isStreaming && liveActivity && (
+          <div className="delegation-step__live" aria-live="polite" aria-atomic="true">
+            {liveActivity.tool.replace(/_/g, ' ')}
+          </div>
+        )}
       </div>
     </div>
   )
@@ -121,9 +183,14 @@ function ToolSummary({ steps, isStreaming }: ToolSummaryProps) {
   return (
     <>
       {/* Delegation cards — always visible, never collapsed */}
-      {delegations.map((step, i) => (
-        <DelegationStep key={i} step={step} />
-      ))}
+      {delegations.map((step, i) => {
+        // A delegation is "in progress" only when it is the most recent step
+        // AND the turn is still streaming — earlier delegation steps are completed.
+        const isLastStep = i === delegations.length - 1
+        return (
+          <DelegationStep key={i} step={step} isStreaming={isStreaming && isLastStep} />
+        )
+      })}
 
       {/* Regular tools — collapsed summary (only if any exist) */}
       {(regular.length > 0 || (isStreaming && !DELEGATION_NAMES.has(last.name))) && (
@@ -215,6 +282,12 @@ interface AssistantMessageProps {
 function AssistantMessage({ message }: AssistantMessageProps) {
   const { thinkingText, thinkingDone, toolSteps, activityText, renderedHtml, isStreaming } = message
 
+  // Suppress the generic spinner when a delegation card is already showing its own live indicator
+  const hasDelegationInFlight =
+    isStreaming &&
+    toolSteps.length > 0 &&
+    DELEGATION_NAMES.has(toolSteps[toolSteps.length - 1]!.name)
+
   return (
     <div className="message message--agent" role="article" aria-label="Respuesta de Lumen">
       <ThinkingBlock text={thinkingText} done={thinkingDone} />
@@ -236,8 +309,8 @@ function AssistantMessage({ message }: AssistantMessageProps) {
         />
       )}
 
-      {/* Streaming cursor */}
-      {isStreaming && !activityText && (
+      {/* Streaming cursor — hidden when a delegation card already shows a live spinner */}
+      {isStreaming && !activityText && !hasDelegationInFlight && (
         <div className="agent-activity" aria-live="polite">
           <span className="spin" aria-hidden="true">⟳</span>
         </div>
@@ -364,8 +437,10 @@ function AttachmentChip({ name, uploading, error, onRemove }: AttachmentChipProp
     >
       {uploading ? (
         <span className="spin" aria-hidden="true" style={{ fontSize: 10 }}>⟳</span>
+      ) : error ? (
+        <AlertTriangle size={14} aria-hidden="true" />
       ) : (
-        <span aria-hidden="true" style={{ fontSize: 11 }}>{error ? '⚠' : '📄'}</span>
+        <FileText size={14} aria-hidden="true" />
       )}
       <span
         style={{
@@ -390,13 +465,14 @@ function AttachmentChip({ name, uploading, error, onRemove }: AttachmentChipProp
           cursor: 'pointer',
           padding: 0,
           lineHeight: 1,
-          fontSize: 11,
+          display: 'flex',
+          alignItems: 'center',
           opacity: 0.7,
           flexShrink: 0,
         }}
         disabled={uploading}
       >
-        ✕
+        <X size={14} aria-hidden="true" />
       </button>
     </div>
   )

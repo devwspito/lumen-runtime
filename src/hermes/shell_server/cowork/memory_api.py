@@ -1,9 +1,14 @@
 """Memory REST API — D-Bus surface for agent memory retrieval and deletion.
 
 Endpoints:
-  GET    /api/v1/memory           list recent memory entries
+  GET    /api/v1/memory           list recent memory entries (content truncated at 200 chars)
   GET    /api/v1/memory/search    semantic search (?q=query)
+  GET    /api/v1/memory/{id}      fetch one entry with FULL content by id '{target}:{index}'
   DELETE /api/v1/memory/{id}      forget one entry by id '{target}:{index}'
+
+The list endpoint returns {id, target, content_truncated, entry_index} — content
+is deliberately truncated at the D-Bus boundary as a bulk-PII guard.  The detail
+endpoint returns the full content for a single, explicitly requested entry.
 
 DELETE is idempotent (200 even when already removed). 403 on authorization
 failure. 503 when daemon is unavailable.
@@ -63,6 +68,38 @@ def create_memory_router() -> APIRouter:
                 extra={"query": q, "reason": str(exc)},
             )
             return []
+
+    @router.get("/{entry_id}")
+    async def get_memory_entry(request: Request, entry_id: str) -> dict:
+        """Fetch a single memory entry by its composite id '{target}:{index}'.
+
+        Returns {id, target, content, entry_index} with the FULL content — not
+        truncated.  Use this to populate a detail drawer in the UI.
+
+        Returns 404 when the entry does not exist.
+        Returns 503 when the daemon is unavailable.
+        """
+        proxy = request.app.state.dbus_proxy
+        try:
+            result = await proxy.call_dict("GetMemoryEntry", entry_id)
+        except AgentUnavailable as exc:
+            logger.warning(
+                "hermes.memory.get_entry_unavailable",
+                extra={"entry_id": entry_id, "reason": str(exc)},
+            )
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "agent_unavailable",
+                    "message": "El agente no está disponible.",
+                },
+            ) from exc
+        if not result:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "not_found", "message": "memory entry not found"},
+            )
+        return result
 
     @router.delete("/{entry_id}")
     async def forget_memory_entry(request: Request, entry_id: str) -> dict:

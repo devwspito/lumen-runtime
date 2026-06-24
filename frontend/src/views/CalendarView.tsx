@@ -1,8 +1,12 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import { sileo } from 'sileo'
+import { Calendar, ChevronLeft, ChevronRight, Trash2, X } from 'lucide-react'
 import { listConfiguredTasks, listRecentTasks, createTask, deleteTask, toggleTask, listAgents, ApiError } from '../api/client'
 import type { ConfiguredTask, RecentTask, Agent, CreateTaskPayload } from '../api/types'
 import { useConfirmDialog } from '../components/ConfirmDialog'
+import { PageHeader } from '../components/ui/PageHeader'
+import { Button } from '../components/ui/Button'
+import { EmptyState } from '../components/ui/EmptyState'
 
 // ── Cron parsing (mirrors tasks-view.js exactly) ──────────────────────────────
 
@@ -266,10 +270,15 @@ export default function CalendarView() {
   return (
     <>
       {ConfirmDialogNode}
-      <header className="view-header">
-        <h1 className="view-title">Tareas programadas</h1>
-        <p className="view-subtitle">Agenda programada y cola de ejecución del agente.</p>
-      </header>
+      <PageHeader
+        title="Tareas programadas"
+        subtitle="Agenda programada y cola de ejecución del agente."
+        actions={
+          <Button variant="primary" size="sm" onClick={() => openModal()}>
+            Nueva tarea
+          </Button>
+        }
+      />
 
       <div className="view-body cv-view-body">
         {/* ── Scheduled tasks section ─────────────────────────────────────── */}
@@ -277,9 +286,6 @@ export default function CalendarView() {
           <div className="cv-section-head">
             <h2 className="cv-section-label">Programadas</h2>
             <div className="cv-section-head__right">
-              <button className="cv-btn cv-btn--primary cv-btn--sm" onClick={() => openModal()}>
-                + Nueva tarea
-              </button>
               <div className="seg-toggle" role="tablist" aria-label="Vista">
                 <button
                   className={`seg-toggle__btn${viewMode === 'board' ? ' is-active' : ''}`}
@@ -301,12 +307,21 @@ export default function CalendarView() {
             </div>
           </div>
 
-          {state.loading && <div className="cv-skeleton" aria-busy="true" />}
-          {state.error && <p className="state-error" role="alert">{state.error}</p>}
+          {state.loading && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }} aria-busy="true">
+              {[...Array(3)].map((_, i) => <div key={i} className="cv-skeleton" style={{ height: 48 }} />)}
+            </div>
+          )}
+          {state.error && (
+            <div role="alert">
+              <p className="state-error">{state.error}</p>
+              <Button variant="secondary" size="sm" onClick={loadAll} style={{ marginTop: 8 }}>Reintentar</Button>
+            </div>
+          )}
 
           {!state.loading && !state.error && (
             <>
-              {/* ── Month calendar — always visible; clicking a day opens the modal ── */}
+              {/* ── Month calendar ── */}
               {viewMode === 'board' && (
                 <>
                   <MonthCalendar
@@ -318,12 +333,11 @@ export default function CalendarView() {
                     onTaskClick={setDetailTask}
                   />
                   {state.tasks.length === 0 && (
-                    <p
-                      className="cv-empty"
-                      style={{ textAlign: 'center', marginTop: 'var(--sp-4)' }}
-                    >
-                      Sin tareas programadas — haz clic en un día para crear una.
-                    </p>
+                    <EmptyState
+                      icon={<Calendar size={36} />}
+                      title="Sin tareas programadas"
+                      description="Haz clic en un día del calendario para crear una."
+                    />
                   )}
                 </>
               )}
@@ -332,21 +346,20 @@ export default function CalendarView() {
               {viewMode === 'list' && (
                 state.tasks.length === 0
                   ? (
-                    <div style={{ textAlign: 'center', padding: 'var(--sp-8) 0' }}>
-                      <p className="cv-empty">Sin tareas programadas.</p>
-                      <button
-                        className="cv-btn cv-btn--primary cv-btn--sm"
-                        style={{ marginTop: 'var(--sp-4)' }}
-                        onClick={() => openModal()}
-                      >
-                        + Crear primera tarea
-                      </button>
-                    </div>
+                    <EmptyState
+                      icon={<Calendar size={36} />}
+                      title="Sin tareas programadas"
+                      action={
+                        <Button variant="primary" size="sm" onClick={() => openModal()}>
+                          Crear primera tarea
+                        </Button>
+                      }
+                    />
                   )
                   : (
                     <ul className="cv-list" role="list">
                       {state.tasks.map((task, i) => (
-                        <li key={task.trigger_id ?? task.task_id ?? i}>
+                        <li key={task.trigger_id ?? task.task_id ?? i} className="ds-list-item-enter" style={{ animationDelay: `${Math.min(i * 20, 200)}ms` }}>
                           <ConfiguredTaskRow
                             task={task}
                             onViewDetail={setDetailTask}
@@ -366,11 +379,16 @@ export default function CalendarView() {
         <section className="cv-section" aria-label="Ejecuciones recientes">
           <h2 className="cv-section-label">Ejecuciones recientes</h2>
           {state.recentTasks.length === 0
-            ? <p className="cv-empty">Sin ejecuciones recientes.</p>
+            ? (
+              <EmptyState
+                icon={<Calendar size={28} />}
+                title="Sin ejecuciones recientes"
+              />
+            )
             : (
               <ul className="cv-list" role="list">
                 {state.recentTasks.map((task, i) => (
-                  <li key={task.task_id ?? i}>
+                  <li key={task.task_id ?? i} className="ds-list-item-enter" style={{ animationDelay: `${Math.min(i * 20, 200)}ms` }}>
                     <RecentTaskRow task={task} />
                   </li>
                 ))}
@@ -444,7 +462,7 @@ function MonthCalendar({ tasks, calRef, onChangeMonth, agentLabel, onDayClick, o
           aria-label="Mes anterior"
           onClick={() => onChangeMonth(new Date(year, month - 1, 1))}
         >
-          ‹
+          <ChevronLeft size={16} aria-hidden="true" />
         </button>
         <h3 className="cal__title">{monthLabel}</h3>
         <button
@@ -452,14 +470,15 @@ function MonthCalendar({ tasks, calRef, onChangeMonth, agentLabel, onDayClick, o
           aria-label="Mes siguiente"
           onClick={() => onChangeMonth(new Date(year, month + 1, 1))}
         >
-          ›
+          <ChevronRight size={16} aria-hidden="true" />
         </button>
-        <button
-          className="cv-btn cv-btn--secondary cv-btn--sm"
+        <Button
+          variant="secondary"
+          size="sm"
           onClick={() => { const n = new Date(); onChangeMonth(new Date(n.getFullYear(), n.getMonth(), 1)) }}
         >
           Hoy
-        </button>
+        </Button>
       </div>
       <div className="cal__dows" aria-hidden="true">
         {DOW_LABELS.map(d => <div key={d}>{d}</div>)}
@@ -590,7 +609,7 @@ function ConfiguredTaskRow({ task, onViewDetail, onToggle, onDelete }: Configure
           onClick={() => onDelete(task)}
           aria-label="Eliminar tarea"
         >
-          ✕
+          <Trash2 size={13} aria-hidden="true" />
         </button>
       </div>
     </div>
@@ -659,7 +678,9 @@ function TaskDetailDrawer({ task, agentLabel, onClose }: TaskDetailDrawerProps) 
               Pausada
             </span>
           )}
-          <button type="button" className="office-modal-close" onClick={onClose} aria-label="Cerrar">✕</button>
+          <button type="button" className="office-modal-close" onClick={onClose} aria-label="Cerrar">
+            <X size={16} aria-hidden="true" />
+          </button>
         </div>
 
         <div className="office-drawer-body" style={{ gap: 'var(--sp-4)' }}>
@@ -700,13 +721,7 @@ function TaskDetailDrawer({ task, agentLabel, onClose }: TaskDetailDrawerProps) 
           </div>
 
           <div className="office-drawer-actions" style={{ marginTop: 'var(--sp-4)' }}>
-            <button
-              type="button"
-              className="office-btn office-btn--ghost"
-              onClick={onClose}
-            >
-              Cerrar
-            </button>
+            <Button variant="ghost" size="sm" onClick={onClose}>Cerrar</Button>
           </div>
         </div>
       </div>
@@ -823,7 +838,9 @@ function TaskModal({ agents, presetDate, onClose, onCreate }: TaskModalProps) {
       >
         <div className="modal-card__head">
           <h3 className="modal-card__title">Programar una tarea</h3>
-          <button className="cv-icon-btn" onClick={onClose} aria-label="Cerrar">✕</button>
+          <button className="cv-icon-btn" onClick={onClose} aria-label="Cerrar">
+            <X size={16} aria-hidden="true" />
+          </button>
         </div>
 
         <div className="modal-card__body">
@@ -949,14 +966,10 @@ function TaskModal({ agents, presetDate, onClose, onCreate }: TaskModalProps) {
         </div>
 
         <div className="modal-card__actions">
-          <button className="cv-btn cv-btn--ghost cv-btn--sm" onClick={onClose}>Cancelar</button>
-          <button
-            className="cv-btn cv-btn--primary cv-btn--sm"
-            onClick={handleCreate}
-            disabled={creating}
-          >
-            {creating ? 'Creando…' : 'Crear tarea'}
-          </button>
+          <Button variant="ghost" size="sm" onClick={onClose}>Cancelar</Button>
+          <Button variant="primary" size="sm" onClick={handleCreate} loading={creating}>
+            Crear tarea
+          </Button>
         </div>
       </div>
     </div>

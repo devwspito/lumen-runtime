@@ -1,15 +1,16 @@
 """Security/Policies API — the backing of the per-command Policies UI (P4.B).
 
   GET  /api/v1/policies              → {preset, tools:{name:enabled}, overridden:[...]}
-  POST /api/v1/policies/preset       body: {preset, totp, riddle_answer}
-  POST /api/v1/policies/tool         body: {tool, enabled, totp, riddle_answer}
+  POST /api/v1/policies/preset       body: {preset, totp}
+  POST /api/v1/policies/tool         body: {tool, enabled, totp}
+  POST /api/v1/policies/tools        body: {tools:{name:enabled}, totp}   (batch save)
 
 The owner sees EVERY command and toggles it (checkboxes) or picks a preset
 (Equilibrado / Permisivo / Bloqueado). A disabled command is refused at the universal
-tool gate (security_hook). Changing the policy is itself a MOST-DELICATE action —
-weakening your own defenses — so every mutation requires MFA + the human riddle. This
+tool gate (security_hook). Changing the policy weakens your own defenses, so every
+mutation requires the owner's TOTP (TOTP-only model, owner decision 2026-06-24). This
 stops the agent (or an injection) from quietly opening its own cage: it cannot mint the
-TOTP nor answer the riddle (no access to the owner-only secret).
+TOTP (no access to the owner-only 0600 secret).
 
 Read is open (the UI renders the current state); mutations are MFA-gated.
 """
@@ -31,20 +32,24 @@ logger = logging.getLogger("hermes.shell_server.cowork.policies_api")
 class PresetBody(BaseModel):
     preset: Literal["equilibrado", "permisivo", "bloqueado"]
     totp: str
-    riddle_answer: str | None = None
 
 
 class ToolBody(BaseModel):
     tool: str
     enabled: bool
     totp: str
-    riddle_answer: str | None = None
+
+
+class ToolsBody(BaseModel):
+    """Batch tool toggle — the owner edits checkboxes and saves once (one TOTP)."""
+
+    tools: dict[str, bool]
+    totp: str
 
 
 class MfaOnDangersBody(BaseModel):
     enabled: bool
     totp: str
-    riddle_answer: str | None = None
 
 
 def create_policies_router(
@@ -60,26 +65,36 @@ def create_policies_router(
 
     @router.post("/api/v1/policies/preset")
     async def set_preset(body: PresetBody) -> dict:
-        _require_owner_mfa(mfa_store, body.totp, body.riddle_answer)
+        _require_owner_mfa(mfa_store, body.totp)
         store.apply_preset(Preset(body.preset))
         logger.info("hermes.cowork.policies.preset_applied preset=%s", body.preset)
         return {"ok": True, "preset": body.preset}
 
     @router.post("/api/v1/policies/tool")
     async def set_tool(body: ToolBody) -> dict:
-        _require_owner_mfa(mfa_store, body.totp, body.riddle_answer)
+        _require_owner_mfa(mfa_store, body.totp)
         store.set_tool(body.tool, body.enabled)
         logger.info(
             "hermes.cowork.policies.tool_set tool=%s enabled=%s", body.tool, body.enabled
         )
         return {"ok": True, "tool": body.tool, "enabled": body.enabled}
 
+    @router.post("/api/v1/policies/tools")
+    async def set_tools(body: ToolsBody) -> dict:
+        # Batch: the owner edits many checkboxes locally and saves once → ONE MFA prompt
+        # for the whole change set (not one per toggle).
+        _require_owner_mfa(mfa_store, body.totp)
+        for tool, enabled in body.tools.items():
+            store.set_tool(tool, enabled)
+        logger.info("hermes.cowork.policies.tools_set count=%d", len(body.tools))
+        return {"ok": True, "count": len(body.tools)}
+
     @router.post("/api/v1/policies/mfa_on_dangers")
     async def set_mfa_on_dangers(body: MfaOnDangersBody) -> dict:
         # The escape hatch: turning MFA-on-dangers OFF makes cage-escaping dangers run
         # autonomously (owner-responsible). DISABLING the danger gate is the agent's
-        # self-widening vector → gated MFA + riddle, which the caged agent cannot mint.
-        _require_owner_mfa(mfa_store, body.totp, body.riddle_answer)
+        # self-widening vector → gated on the owner's TOTP, which the caged agent cannot mint.
+        _require_owner_mfa(mfa_store, body.totp)
         store.set_mfa_on_dangers(body.enabled)
         logger.info("hermes.cowork.policies.mfa_on_dangers_set enabled=%s", body.enabled)
         return {"ok": True, "mfa_on_dangers": body.enabled}
@@ -87,16 +102,17 @@ def create_policies_router(
     return router
 
 
-def _require_owner_mfa(mfa_store: MfaStore, totp: str, riddle_answer: str | None) -> None:
-    """Changing the security policy is most-delicate → MFA + riddle. Fail-closed."""
+def _require_owner_mfa(mfa_store: MfaStore, totp: str) -> None:
+    """Changing the security policy gates on the owner's TOTP (TOTP-only model,
+    owner decision 2026-06-24). Fail-closed: not enrolled or bad code → reject. The caged
+    agent cannot mint the TOTP (owner-only 0600 secret), so it cannot open its own cage."""
     if not mfa_store.is_enrolled():
         raise HTTPException(status_code=403, detail={
             "code": "mfa_not_enrolled",
             "message": "Configura el MFA antes de cambiar las políticas de seguridad."})
-    ok, reason = mfa_store.verify(
-        level=ProtectionLevel.MFA_RIDDLE, totp=totp or "", riddle_answer=riddle_answer)
+    ok, reason = mfa_store.verify(level=ProtectionLevel.MFA, totp=totp or "")
     if not ok:
         logger.warning("hermes.cowork.policies.mfa_denied reason=%s", reason)
         raise HTTPException(status_code=401, detail={
             "code": reason,
-            "message": "Cambiar las políticas exige tu código MFA y la respuesta del acertijo."})
+            "message": "Cambiar las políticas exige tu código MFA."})

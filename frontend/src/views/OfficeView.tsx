@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { sileo } from 'sileo'
+import { X } from 'lucide-react'
 
 import { getAgentRoster, getRuntimeStatus, listMcpServers, createAgent, setActiveAgent, updateAgent, deleteAgent } from '../api/client'
 import type { AgentRoster, RosterAgent, RosterDepartment, RuntimeStatus, CreateAgentPayload, UpdateAgentPayload } from '../api/types'
@@ -145,8 +146,9 @@ function DeptSelector({ departments, value, onChange, id }: DeptSelectorProps) {
             className="office-btn office-btn--ghost"
             style={{ height: 36, padding: '0 var(--sp-3)', fontSize: 'var(--text-label)' }}
             onClick={handleClear}
+            aria-label="Borrar búsqueda"
           >
-            ✕
+            <X size={16} aria-hidden="true" />
           </button>
         </div>
       )}
@@ -274,7 +276,7 @@ function AgentFormModal({ departments, mode, editTarget, prefill, onClose, onSav
             onClick={onClose}
             aria-label="Cerrar"
           >
-            ✕
+            <X size={16} aria-hidden="true" />
           </button>
         </div>
 
@@ -460,7 +462,7 @@ function AgentDrawer({ agent, departments, isWorking, onClose, onClone, onRefetc
                 Ruflo
               </span>
             )}
-            <button type="button" className="office-modal-close" onClick={onClose} aria-label="Cerrar">✕</button>
+            <button type="button" className="office-modal-close" onClick={onClose} aria-label="Cerrar"><X size={16} aria-hidden="true" /></button>
           </div>
 
           <div className="office-drawer-body">

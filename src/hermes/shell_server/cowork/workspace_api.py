@@ -2,20 +2,23 @@
 
 The agent writes deliverables into /var/lib/hermes/workspace (configured via
 HERMES_WORKSPACE_DIR). This router exposes them to the web UI:
-  GET  /api/v1/workspace/files        — list all files (read-only, no auth)
-  GET  /api/v1/workspace/file/{name}  — download a file (read-only, no auth)
-  POST /api/v1/workspace/files        — upload a file into the workspace
-                                        (mutating → global Bearer middleware applies)
+  GET  /api/v1/workspace/files             — list directory contents (Finder-style)
+  GET  /api/v1/workspace/file/{name}       — download a top-level file (legacy)
+  GET  /api/v1/workspace/download          — download any file by ?path= (subfolder-aware)
+  POST /api/v1/workspace/files             — upload a file into the workspace
+                                             (mutating → global Bearer middleware applies)
 
 Security:
-  - Only files directly inside the workspace dir are served or written (no
-    subdirectory traversal). File names are sanitised via os.path.basename and
-    an explicit resolve+prefix check against the workspace root.
-  - No symlinks outside the workspace dir are followed (Path.resolve() check).
+  - All path inputs are resolved with Path.resolve() and verified to fall
+    strictly inside the resolved workspace root — no traversal is possible.
+  - Symlinks that point outside the workspace root are rejected (resolve()
+    follows symlinks, so the final resolved path is always checked).
+  - File names are sanitised via os.path.basename on the legacy download
+    endpoint; the newer `path` parameter accepts relative sub-paths but the
+    same resolve+prefix check applies.
   - Upload enforces a 25 MB max size and rejects empty files.
   - On filename collision the upload de-duplicates with a numeric suffix rather
     than silently overwriting.
-  - path returned in the listing is basename only — never exposes FS layout.
   - Fail-soft: if the workspace dir is missing on GET, returns an empty list.
 """
 
@@ -23,9 +26,10 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, UploadFile
+from fastapi import APIRouter, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 
 logger = logging.getLogger("hermes.shell_server.cowork.workspace_api")
@@ -58,6 +62,37 @@ def _workspace_dir() -> Path:
 def _infer_kind(name: str) -> str:
     suffix = Path(name).suffix.lstrip(".").lower()
     return _EXT_KIND.get(suffix, "file")
+
+
+def _resolve_root(workspace: Path) -> Path:
+    """Return the resolved (symlink-expanded) absolute workspace root."""
+    return workspace.resolve()
+
+
+def _safe_entry_path(workspace: Path, rel_path: str) -> Path | None:
+    """Resolve a relative path to an entry strictly inside `workspace`.
+
+    Accepts paths with subdirectory components (e.g. "reports/q1.pdf").
+    Returns None if:
+      - the input is empty or navigates outside the workspace (traversal);
+      - the resolved path escapes the workspace root (symlink or ../);
+      - the path does not exist.
+
+    Does NOT filter on file-vs-directory — callers decide what is acceptable.
+    """
+    # Normalise: strip leading slashes so joinpath doesn't treat it as absolute.
+    clean = rel_path.lstrip("/")
+    if not clean:
+        return None
+    root = _resolve_root(workspace)
+    candidate = (root / clean).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None
+    if not candidate.exists():
+        return None
+    return candidate
 
 
 def _safe_child(workspace: Path, name: str) -> Path | None:
@@ -135,44 +170,87 @@ def _deduplicate(dest: Path) -> Path:
     return dest.with_name(f"{base}_{ts}{suffix}")
 
 
+def _entry_dict(entry: Path, workspace_root: Path) -> dict:
+    """Build the response dict for one directory entry."""
+    stat = entry.stat()
+    rel = entry.relative_to(workspace_root)
+    return {
+        "name": entry.name,
+        "kind": _infer_kind(entry.name) if entry.is_file() else "folder",
+        "path": rel.as_posix(),
+        "is_dir": entry.is_dir(),
+        "size": stat.st_size if entry.is_file() else 0,
+        "modified": datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat(),
+    }
+
+
 def create_workspace_router() -> APIRouter:
     router = APIRouter()
 
     @router.get("/api/v1/workspace/files")
-    async def list_workspace_files() -> list[dict]:
-        """List agent deliverables in the workspace directory.
+    async def list_workspace_files(
+        path: str = Query(default="", description="Relative path inside workspace to list"),
+    ) -> list[dict]:
+        """List directory contents inside the workspace (Finder-style).
 
-        Returns [{name, kind, path}] — path is always basename only.
+        path="" (default) lists the workspace root.
+        path="subdir" lists workspace/subdir.
+
+        Returns [{name, kind, path, is_dir, size, modified}].
         Fail-soft: empty list if directory is absent or unreadable.
+        Rejects traversal attempts with HTTP 400.
         """
         workspace = _workspace_dir()
-        if not workspace.is_dir():
-            return []
+        root = _resolve_root(workspace)
+
+        if path:
+            target_dir = _safe_entry_path(workspace, path)
+            if target_dir is None or not target_dir.is_dir():
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": "invalid_path", "message": "path is outside workspace or does not exist"},
+                )
+        else:
+            target_dir = root
+            if not target_dir.is_dir():
+                return []
+
         try:
-            entries = [
-                {
-                    "name": f.name,
-                    "kind": _infer_kind(f.name),
-                    "path": f.name,  # basename only — no traversal surface
-                }
-                for f in sorted(workspace.iterdir())
-                if f.is_file()
-            ]
+            entries = sorted(target_dir.iterdir(), key=lambda e: (not e.is_dir(), e.name))
+            return [_entry_dict(e, root) for e in entries]
         except OSError as exc:
             logger.warning(
                 "hermes.cowork.workspace.list_failed",
-                extra={"workspace": str(workspace), "error": str(exc)},
+                extra={"workspace": str(target_dir), "error": str(exc)},
             )
             return []
-        return entries
+
+    @router.get("/api/v1/workspace/download")
+    async def download_workspace_file_by_path(
+        path: str = Query(..., min_length=1, description="Relative path of the file inside workspace"),
+    ) -> FileResponse:
+        """Download a file from anywhere inside the workspace by relative path.
+
+        Supports subdirectories: ?path=reports/q1.pdf
+        Guards against path traversal: the resolved path must be strictly
+        inside the workspace root. Returns 400 on traversal, 404 if not found.
+        """
+        workspace = _workspace_dir()
+        candidate = _safe_entry_path(workspace, path)
+        if candidate is None or not candidate.is_file():
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "not_found", "message": "file not found"},
+            )
+        return FileResponse(path=str(candidate), filename=candidate.name)
 
     @router.get("/api/v1/workspace/file/{name}")
     async def download_workspace_file(name: str) -> FileResponse:
-        """Download a single file from the workspace directory.
+        """Download a single top-level file from the workspace directory.
 
-        Guards against path traversal: only files directly in the workspace
-        directory are served. Returns 404 if the file does not exist or the
-        name is invalid.
+        Legacy endpoint: only serves files directly in the workspace root.
+        For files in subdirectories use GET /api/v1/workspace/download?path=.
+        Guards against path traversal: returns 404 if the name is invalid.
         """
         workspace = _workspace_dir()
         candidate = _safe_child(workspace, name)

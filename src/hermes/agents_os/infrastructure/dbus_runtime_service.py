@@ -2325,6 +2325,7 @@ class DbusRuntimeServiceWiring:
         *,
         proposal_id: UUID,
         sender_uid: int,
+        totp: str | None = None,
         operator_token: str | None = None,
     ) -> HitlApprovalResult:
         """Aprueba una acción HIGH pendiente y re-encola la tarea (FR-015).
@@ -2347,9 +2348,16 @@ class DbusRuntimeServiceWiring:
         approved_by = self._authorize_and_resolve(
             sender_uid, operation="approve_action", operator_token=operator_token
         )
+        # Forward the owner's TOTP to the gate — the gate is the single MFA enforcement
+        # point for ALL surfaces (red-team 2026-06-19, finding 3). Previously no factors
+        # reached the gate → it verified with None → always failed → the error crossed
+        # D-Bus as a generic fault and surfaced as "agente no disponible".
+        from hermes.shell_server.security.mfa_tool_tier import MfaFactors  # noqa: PLC0415
+
         token = await self._gate.approve(
             proposal_id=proposal_id,
             approved_by=approved_by,
+            mfa_factors=MfaFactors(totp=totp),
         )
         logger.info(
             "hermes.dbus.hitl_approved",
@@ -3434,6 +3442,59 @@ class DbusRuntimeServiceWiring:
                 if limit is not None and entry_idx >= limit:
                     return result
         return result
+
+    def get_memory_entry(self, *, entry_id: str) -> dict:
+        """Fetch a single memory entry by its composite id '{target}:{index}'.
+
+        Returns {id, target, content, entry_index} with the FULL content (not
+        truncated). This is intentional: the caller drills into a single entry
+        whose id they already hold from the list; the bulk-PII guard on
+        list_memory still applies.
+        Returns {} if the entry does not exist or the store is unavailable.
+        No authZ: read-only, same policy as list_memory.
+        """
+        import json as _json  # noqa: PLC0415
+
+        if not entry_id or ":" not in entry_id:
+            return {}
+
+        parts = entry_id.rsplit(":", 1)
+        if len(parts) != 2:
+            return {}
+        target, index_str = parts[0], parts[1]
+
+        try:
+            entry_index = int(index_str)
+        except ValueError:
+            return {}
+
+        try:
+            from hermes.memory.infrastructure.tenant_memory_store import (  # noqa: PLC0415
+                TenantMemoryStore,
+            )
+            from hermes.memory.infrastructure.nous_memory_bridge import (  # noqa: PLC0415
+                _DEFAULT_MEMORY_ROOT,
+            )
+            from hermes.runtime.__main__ import _resolve_tenant_id  # noqa: PLC0415
+            tenant_id = _resolve_tenant_id()
+            store = TenantMemoryStore(root=_DEFAULT_MEMORY_ROOT, tenant_id=tenant_id)
+        except Exception:  # noqa: BLE001
+            return {}
+
+        try:
+            entries = store.read(target)
+        except Exception:  # noqa: BLE001
+            return {}
+
+        if entry_index >= len(entries):
+            return {}
+
+        return {
+            "id": entry_id,
+            "target": target,
+            "content": entries[entry_index],
+            "entry_index": entry_index,
+        }
 
     def delete_memory_entry(self, *, entry_id: str, sender_uid: int) -> dict:
         """Olvida (borra) una entrada de memoria por su id compuesto '{target}:{index}'.

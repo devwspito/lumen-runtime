@@ -5,26 +5,17 @@
  *   (a) Pending HITL approvals — polled every 3 s, Approve/Deny via MfaModal.
  *   (b) Governance — MFA enrollment + security policy presets + accordion catalog.
  *   (c) Security center — egress permissions, audit chain, recent scans.
- *
- * Design changes vs. previous version:
- *   - "Configuración avanzada" section REMOVED; capabilities are always an
- *     accordion (collapsed: name + count + delicacy chip + section toggle;
- *     expanded: full per-tool checkbox list).
- *   - Preset buttons show a PREVIEW only; a "Guardar" button triggers MfaModal.
- *   - All MFA collection goes through MfaModal — no inline input fields.
- *   - "Pedir mi MFA para los comandos peligrosos" requires MFA to DISABLE (ON is free).
- *   - When mfa_on_dangers is OFF, approvals and toggles fire directly.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { sileo } from 'sileo'
+import { Save } from 'lucide-react'
 import {
   listPendingApprovals,
   mfaStatus,
-  mfaSetRiddle,
   getPolicies,
   setPolicyPreset,
-  setPolicyTool,
+  setPolicyTools,
   setMfaOnDangers,
   getSecurityScans,
   getAuditChainHead,
@@ -45,7 +36,7 @@ import type {
 import ApprovalCard from '../components/ApprovalCard'
 import MfaEnroll from '../components/MfaEnroll'
 import MfaModal from '../components/MfaModal'
-import type { MfaTier, MfaFactors } from '../components/MfaModal'
+import type { MfaFactors } from '../components/MfaModal'
 
 // ── Approvals section ─────────────────────────────────────────────────────────
 
@@ -112,7 +103,6 @@ const CATEGORY_LABELS: Record<string, string> = {
   programming:   'Programación',
   filesystem:    'Ficheros',
   memory:        'Memoria',
-  // Legacy / catch-all mappings
   network:       'Red',
   browser:       'Navegador',
   tasks:         'Tareas programadas',
@@ -179,6 +169,8 @@ function ToggleSwitch({ id, checked, onChange, disabled, indeterminate, 'aria-la
 interface CategoryGroupProps {
   category: string
   entries: PolicyCatalogEntry[]
+  /** Overrides for local pending changes (tool name → enabled). */
+  pendingChanges: Record<string, boolean>
   busy: boolean
   onToggleTool: (name: string, enabled: boolean) => void
   onToggleAll: (category: string, enabled: boolean, entries: PolicyCatalogEntry[]) => void
@@ -187,14 +179,20 @@ interface CategoryGroupProps {
 function CategoryGroup({
   category,
   entries,
+  pendingChanges,
   busy,
   onToggleTool,
   onToggleAll,
 }: CategoryGroupProps) {
   const [expanded, setExpanded] = useState(false)
 
-  const allOn = entries.every(e => e.enabled)
-  const allOff = entries.every(e => !e.enabled)
+  // Merge committed state with local pending changes
+  const effectiveEntries = entries.map(e =>
+    e.name in pendingChanges ? { ...e, enabled: pendingChanges[e.name] } : e,
+  )
+
+  const allOn = effectiveEntries.every(e => e.enabled)
+  const allOff = effectiveEntries.every(e => !e.enabled)
   const mixed = !allOn && !allOff
   const delicacy = aggregateDelicacy(entries)
   const switchId = `cat-switch-${category}`
@@ -202,36 +200,48 @@ function CategoryGroup({
 
   return (
     <div className="seg-pol-group">
-      <div className="seg-pol-group__header">
-        <button
-          type="button"
-          className="seg-pol-group__expand"
-          aria-expanded={expanded}
-          aria-controls={bodyId}
-          onClick={() => setExpanded(v => !v)}
-          title={expanded ? 'Contraer' : 'Expandir herramientas'}
+      {/* Entire header row is clickable to toggle expand/collapse */}
+      <div
+        className="seg-pol-group__header seg-pol-group__header--clickable"
+        role="button"
+        tabIndex={0}
+        aria-expanded={expanded}
+        aria-controls={bodyId}
+        onClick={() => setExpanded(v => !v)}
+        onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded(v => !v) } }}
+      >
+        <span
+          className={`seg-pol-chevron ${expanded ? 'seg-pol-chevron--open' : ''}`}
+          aria-hidden="true"
         >
-          <span className={`seg-pol-chevron ${expanded ? 'seg-pol-chevron--open' : ''}`} aria-hidden="true">▸</span>
-        </button>
+          ▸
+        </span>
 
         <span className="seg-pol-group__name">{categoryLabel(category)}</span>
         <span className="seg-pol-group__count" aria-label={`${entries.length} herramientas`}>{entries.length}</span>
 
         <DelicacyBadge level={delicacy} />
 
-        <label className="seg-pol-group__toggle-label" htmlFor={switchId}>
-          <span className="sr-only">
-            {allOn ? 'Todo activo' : allOff ? 'Todo desactivado' : 'Parcialmente activo'} — activar o desactivar toda la categoría
-          </span>
-        </label>
-        <ToggleSwitch
-          id={switchId}
-          aria-label={`Activar o desactivar todas las herramientas de ${categoryLabel(category)}`}
-          checked={allOn}
-          indeterminate={mixed}
-          disabled={busy}
-          onChange={v => onToggleAll(category, v, entries)}
-        />
+        {/* Stop propagation so the toggle switch doesn't also expand/collapse */}
+        <div
+          onClick={e => e.stopPropagation()}
+          onKeyDown={e => e.stopPropagation()}
+          style={{ display: 'contents' }}
+        >
+          <label className="seg-pol-group__toggle-label" htmlFor={switchId}>
+            <span className="sr-only">
+              {allOn ? 'Todo activo' : allOff ? 'Todo desactivado' : 'Parcialmente activo'} — activar o desactivar toda la categoría
+            </span>
+          </label>
+          <ToggleSwitch
+            id={switchId}
+            aria-label={`Activar o desactivar todas las herramientas de ${categoryLabel(category)}`}
+            checked={allOn}
+            indeterminate={mixed}
+            disabled={busy}
+            onChange={v => onToggleAll(category, v, effectiveEntries)}
+          />
+        </div>
       </div>
 
       {expanded && (
@@ -240,7 +250,7 @@ function CategoryGroup({
           className="seg-pol-tool-list"
           aria-label={`Herramientas de ${categoryLabel(category)}`}
         >
-          {entries.map(entry => (
+          {effectiveEntries.map(entry => (
             <ToolRow
               key={entry.name}
               entry={entry}
@@ -298,12 +308,10 @@ function ToolRow({ entry, busy, onToggle }: ToolRowProps) {
 }
 
 // ── Pending MFA action ────────────────────────────────────────────────────────
-// Represents an action queued to fire after MFA confirmation.
 
 type PendingAction =
   | { kind: 'preset'; preset: string }
-  | { kind: 'tool'; tool: string; enabled: boolean }
-  | { kind: 'section'; category: string; enabled: boolean; entries: PolicyCatalogEntry[] }
+  | { kind: 'batch'; changes: Record<string, boolean> }
   | { kind: 'mfa_dangers'; enabled: boolean }
 
 // ── Governance section ────────────────────────────────────────────────────────
@@ -312,9 +320,6 @@ function GovernanceSection() {
   const [mfa, setMfa] = useState<MfaStatus | null>(null)
   const [pol, setPol] = useState<PoliciesResponse | null>(null)
   const [loading, setLoading] = useState(true)
-  const [riddleQ, setRiddleQ] = useState('')
-  const [riddleA, setRiddleA] = useState('')
-  const [riddleTotp, setRiddleTotp] = useState('')
   const [busy, setBusy] = useState(false)
 
   // Preset preview: which preset is pending save (not yet applied)
@@ -323,6 +328,10 @@ function GovernanceSection() {
   // MFA modal state: what action is waiting for factors
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null)
 
+  // Local tool overrides accumulate until "Guardar cambios" is clicked
+  const [toolPending, setToolPending] = useState<Record<string, boolean>>({})
+  const hasPendingTools = Object.keys(toolPending).length > 0
+
   const mfaDisabled = pol?.mfa_on_dangers === false
 
   const load = useCallback(async () => {
@@ -330,6 +339,8 @@ function GovernanceSection() {
     setMfa(m)
     setPol(p)
     setLoading(false)
+    // Clear any local pending state on reload so we don't show stale overrides
+    setToolPending({})
   }, [])
 
   useEffect(() => { load() }, [load])
@@ -359,42 +370,29 @@ function GovernanceSection() {
     return Object.keys(pol?.tools ?? {}).sort()
   }, [pol?.catalog, pol?.tools])
 
-  // Determine MFA tier needed for the current pending action.
-  // Presets + mfa_dangers switch need riddle if enrolled; tools use mfa tier.
-  function tierForAction(action: PendingAction): MfaTier {
-    if (action.kind === 'preset' || action.kind === 'mfa_dangers') {
-      return mfa?.riddle_set ? 'mfa_riddle' : 'mfa'
-    }
-    // Tool / section toggles: use the most delicate tier among the entries
-    if (action.kind === 'tool') {
-      const entry = pol?.catalog?.find(e => e.name === action.tool)
-      if (entry?.delicacy === 'most_delicate') return 'mfa_riddle'
-      if (entry?.delicacy === 'delicate') return mfa?.riddle_set ? 'mfa_riddle' : 'mfa_humanity'
-      return 'mfa'
-    }
-    if (action.kind === 'section') {
-      const delicacy = aggregateDelicacy(action.entries)
-      if (delicacy === 'most_delicate') return 'mfa_riddle'
-      if (delicacy === 'delicate') return mfa?.riddle_set ? 'mfa_riddle' : 'mfa_humanity'
-      return 'mfa'
-    }
-    return 'mfa'
-  }
-
-  // Apply optimistic update for a single tool
-  function applyOptimisticTool(toolName: string, enabled: boolean) {
+  // Persist a batch of tool changes directly (no MFA modal needed).
+  async function persistBatchDirect(changes: Record<string, boolean>) {
+    setBusy(true)
+    // Optimistic local update
     setPol(prev => {
       if (!prev) return prev
-      return {
-        ...prev,
-        tools: { ...prev.tools, [toolName]: enabled },
-        catalog: prev.catalog?.map(e => e.name === toolName ? { ...e, enabled } : e),
-      }
+      const updatedTools = { ...prev.tools, ...changes }
+      const updatedCatalog = prev.catalog?.map(e =>
+        e.name in changes ? { ...e, enabled: changes[e.name] } : e,
+      )
+      return { ...prev, tools: updatedTools, catalog: updatedCatalog }
     })
-  }
-
-  function revertOptimisticTool(toolName: string, enabled: boolean) {
-    applyOptimisticTool(toolName, !enabled)
+    setToolPending({})
+    try {
+      await setPolicyTools(changes, '')
+      sileo.success({ title: 'Cambios guardados' })
+      await load()
+    } catch (err) {
+      await load()
+      sileo.error({ title: `No se pudo guardar: ${err instanceof Error ? err.message : err}` })
+    } finally {
+      setBusy(false)
+    }
   }
 
   // Handle MFA sign callback from the modal
@@ -403,53 +401,37 @@ function GovernanceSection() {
     setBusy(true)
     try {
       if (pendingAction.kind === 'preset') {
-        await setPolicyPreset(
-          pendingAction.preset,
-          factors.totp,
-          factors.riddle_answer ?? null,
-        )
+        await setPolicyPreset(pendingAction.preset, factors.totp)
         sileo.success({ title: `Preset «${pendingAction.preset}» aplicado` })
         setPendingPreset(null)
         setPendingAction(null)
         await load()
 
-      } else if (pendingAction.kind === 'tool') {
-        applyOptimisticTool(pendingAction.tool, pendingAction.enabled)
+      } else if (pendingAction.kind === 'batch') {
+        // Optimistic: apply locally first
+        setPol(prev => {
+          if (!prev) return prev
+          const updatedTools = { ...prev.tools, ...pendingAction.changes }
+          const updatedCatalog = prev.catalog?.map(e =>
+            e.name in pendingAction.changes ? { ...e, enabled: pendingAction.changes[e.name] } : e,
+          )
+          return { ...prev, tools: updatedTools, catalog: updatedCatalog }
+        })
+        setToolPending({})
         try {
-          await setPolicyTool(pendingAction.tool, pendingAction.enabled, factors.totp, factors.riddle_answer ?? null)
-          sileo.success({ title: `${pendingAction.tool}: ${pendingAction.enabled ? 'activado' : 'desactivado'}` })
+          await setPolicyTools(pendingAction.changes, factors.totp)
+          sileo.success({ title: 'Cambios guardados' })
           setPendingAction(null)
-        } catch (err) {
-          revertOptimisticTool(pendingAction.tool, pendingAction.enabled)
-          sileo.error({ title: `No se pudo cambiar: ${err instanceof Error ? err.message : err}` })
-          // Modal stays open on error (we set pendingAction=null only on success above)
-          return
-        }
-
-      } else if (pendingAction.kind === 'section') {
-        const toChange = pendingAction.entries.filter(e => e.enabled !== pendingAction.enabled)
-        let firstError: string | null = null
-        for (const entry of toChange) {
-          try {
-            await setPolicyTool(entry.name, pendingAction.enabled, factors.totp, factors.riddle_answer ?? null)
-            applyOptimisticTool(entry.name, pendingAction.enabled)
-          } catch (err) {
-            firstError = err instanceof Error ? err.message : String(err)
-            break
-          }
-        }
-        if (firstError) {
-          sileo.error({ title: `Error al cambiar la categoría: ${firstError}` })
           await load()
+        } catch (err) {
+          // Revert optimistic update
+          await load()
+          sileo.error({ title: `No se pudo guardar: ${err instanceof Error ? err.message : err}` })
           return
         }
-        if (toChange.length > 0) {
-          sileo.success({ title: `Categoría ${pendingAction.enabled ? 'activada' : 'desactivada'}` })
-        }
-        setPendingAction(null)
 
       } else if (pendingAction.kind === 'mfa_dangers') {
-        await setMfaOnDangers(pendingAction.enabled, factors.totp, factors.riddle_answer ?? null)
+        await setMfaOnDangers(pendingAction.enabled, factors.totp)
         sileo.success({
           title: pendingAction.enabled
             ? 'Verificación en peligrosos: activa'
@@ -460,73 +442,70 @@ function GovernanceSection() {
       }
     } catch (err) {
       sileo.error({ title: `No se pudo aplicar: ${err instanceof Error ? err.message : err}` })
-      // Leave modal open so user can retry with corrected TOTP
       return
     } finally {
       setBusy(false)
     }
   }
 
-  // ── Handler wrappers that decide whether to open MFA modal or fire directly ──
+  // ── Handler wrappers ─────────────────────────────────────────────────────────
 
   function requestPresetSave() {
     if (!pendingPreset) return
     if (mfaDisabled) {
-      // Can't actually call setPolicyPreset without MFA — this path only exists
-      // when mfa_on_dangers is false. Presets still need MFA (they're NORMAL+).
-      // But per spec: when mfaDisabled, go direct. We'll let the server enforce.
-      void handleSign({ totp: '' })
+      // No MFA required: persist directly without opening the modal
+      setBusy(true)
+      void setPolicyPreset(pendingPreset, '')
+        .then(() => {
+          sileo.success({ title: `Preset «${pendingPreset}» aplicado` })
+          setPendingPreset(null)
+          return load()
+        })
+        .catch(err => {
+          sileo.error({ title: `No se pudo aplicar: ${err instanceof Error ? err.message : err}` })
+        })
+        .finally(() => setBusy(false))
     } else {
       setPendingAction({ kind: 'preset', preset: pendingPreset })
     }
   }
 
+  // Individual tool toggle: update local pending only (no immediate API call)
   function requestToolToggle(tool: string, enabled: boolean) {
-    if (mfaDisabled) {
-      // MFA globally off — fire immediately with empty totp
-      void (async () => {
-        applyOptimisticTool(tool, enabled)
-        try {
-          await setPolicyTool(tool, enabled, '', null)
-          sileo.success({ title: `${tool}: ${enabled ? 'activado' : 'desactivado'}` })
-        } catch (err) {
-          revertOptimisticTool(tool, enabled)
-          sileo.error({ title: `No se pudo cambiar: ${err instanceof Error ? err.message : err}` })
-        }
-      })()
-    } else {
-      setPendingAction({ kind: 'tool', tool, enabled })
+    setToolPending(prev => ({ ...prev, [tool]: enabled }))
+  }
+
+  // Category toggle: batch-update all tools in the category locally
+  function requestSectionToggle(_category: string, enabled: boolean, entries: PolicyCatalogEntry[]) {
+    const updates: Record<string, boolean> = {}
+    for (const entry of entries) {
+      if (entry.enabled !== enabled) {
+        updates[entry.name] = enabled
+      }
+    }
+    if (Object.keys(updates).length > 0) {
+      setToolPending(prev => ({ ...prev, ...updates }))
     }
   }
 
-  function requestSectionToggle(category: string, enabled: boolean, entries: PolicyCatalogEntry[]) {
+  // Commit the batch of pending tool changes.
+  // MFA enabled → open one MfaModal which calls handleSign on confirm.
+  // MFA disabled → persist directly, no modal.
+  function handleSaveToolChanges() {
+    if (!hasPendingTools) return
     if (mfaDisabled) {
-      void (async () => {
-        const toChange = entries.filter(e => e.enabled !== enabled)
-        for (const entry of toChange) {
-          try {
-            await setPolicyTool(entry.name, enabled, '', null)
-            applyOptimisticTool(entry.name, enabled)
-          } catch (err) {
-            sileo.error({ title: `No se pudo cambiar ${entry.name}: ${err instanceof Error ? err.message : err}` })
-            await load()
-            return
-          }
-        }
-        if (toChange.length > 0) sileo.success({ title: `Categoría ${enabled ? 'activada' : 'desactivada'}` })
-      })()
+      void persistBatchDirect({ ...toolPending })
     } else {
-      setPendingAction({ kind: 'section', category, enabled, entries })
+      setPendingAction({ kind: 'batch', changes: { ...toolPending } })
     }
   }
 
   function requestMfaDangersToggle(checked: boolean) {
     if (checked) {
-      // Turning ON is free (no MFA needed)
       void (async () => {
         setBusy(true)
         try {
-          await setMfaOnDangers(true, '', null)
+          await setMfaOnDangers(true, '')
           sileo.success({ title: 'Verificación en peligrosos: activa' })
           setPol(prev => prev ? { ...prev, mfa_on_dangers: true } : prev)
         } catch (err) {
@@ -536,42 +515,13 @@ function GovernanceSection() {
         }
       })()
     } else {
-      // Turning OFF requires MFA
       setPendingAction({ kind: 'mfa_dangers', enabled: false })
-    }
-  }
-
-  async function handleRiddleSave() {
-    if (!riddleQ.trim() || !riddleA.trim() || !riddleTotp.trim()) {
-      sileo.error({ title: 'Rellena pregunta, respuesta y código MFA' })
-      return
-    }
-    try {
-      await mfaSetRiddle(riddleTotp, riddleQ, riddleA)
-      sileo.success({ title: 'Acertijo guardado' })
-      setRiddleQ(''); setRiddleA(''); setRiddleTotp('')
-      await load()
-    } catch (err) {
-      sileo.error({ title: `No se pudo guardar: ${err instanceof Error ? err.message : err}` })
     }
   }
 
   // Legacy tool toggle (flat tools map, no catalog)
   function requestLegacyToolToggle(toolName: string, enabled: boolean) {
-    if (mfaDisabled) {
-      void (async () => {
-        try {
-          await setPolicyTool(toolName, enabled, '', null)
-          sileo.success({ title: `${toolName}: ${enabled ? 'activado' : 'desactivado'}` })
-          setPol(prev => prev ? { ...prev, tools: { ...prev.tools, [toolName]: enabled } } : prev)
-        } catch (err) {
-          sileo.error({ title: `No se pudo cambiar: ${err instanceof Error ? err.message : err}` })
-          setPol(prev => prev ? { ...prev, tools: { ...prev.tools, [toolName]: !enabled } } : prev)
-        }
-      })()
-    } else {
-      setPendingAction({ kind: 'tool', tool: toolName, enabled })
-    }
+    setToolPending(prev => ({ ...prev, [toolName]: enabled }))
   }
 
   if (loading) return <div className="cv-skeleton" aria-busy="true" aria-label="Cargando gobernanza…" />
@@ -581,24 +531,29 @@ function GovernanceSection() {
   const currentPreset = pendingPreset ?? pol.preset
   const hasPendingPreset = pendingPreset !== null && pendingPreset !== pol.preset
 
+  // When batch modal is open, use the already-captured changes snapshot
+  const batchChanges = pendingAction?.kind === 'batch' ? pendingAction.changes : toolPending
+
   return (
     <>
       {/* ── MFA Modal ── */}
       {pendingAction && (
         <MfaModal
-          tier={tierForAction(pendingAction)}
           title={
             pendingAction.kind === 'preset'
               ? `Aplicar preset «${pendingAction.preset}»`
               : pendingAction.kind === 'mfa_dangers'
               ? 'Desactivar verificación en peligrosos'
-              : pendingAction.kind === 'section'
-              ? `${pendingAction.enabled ? 'Activar' : 'Desactivar'} categoría`
-              : `${pendingAction.enabled ? 'Activar' : 'Desactivar'} herramienta`
+              : 'Guardar cambios de capacidades'
           }
-          riddleQuestion={mfa.riddle_question}
           onSign={handleSign}
-          onCancel={() => setPendingAction(null)}
+          onCancel={() => {
+            setPendingAction(null)
+            // Restore toolPending from batch snapshot so user can adjust before retrying
+            if (pendingAction?.kind === 'batch') {
+              setToolPending(batchChanges)
+            }
+          }}
         />
       )}
 
@@ -610,45 +565,9 @@ function GovernanceSection() {
             {mfa.enrolled
               ? 'MFA activo. Aprobar acciones peligrosas y cambiar políticas requiere tu código.'
               : 'Sin MFA no puedes aprobar acciones peligrosas. Actívalo con tu app de autenticación.'}
-            {mfa.enrolled && (mfa.riddle_set
-              ? ' Acertijo configurado.'
-              : ' Falta tu acertijo (necesario para lo más delicado).')}
           </p>
 
           {!mfa.enrolled && <MfaEnroll onEnrolled={load} />}
-
-          {mfa.enrolled && (
-            <details className="seg-details">
-              <summary>{mfa.riddle_set ? 'Cambiar' : 'Configurar'} acertijo personal</summary>
-              <div className="seg-details__body">
-                <input
-                  className="cv-input"
-                  placeholder="Pregunta (ej. ciudad donde nací)"
-                  aria-label="Pregunta del acertijo"
-                  value={riddleQ}
-                  onChange={e => setRiddleQ(e.target.value)}
-                />
-                <input
-                  className="cv-input"
-                  placeholder="Respuesta"
-                  aria-label="Respuesta del acertijo"
-                  value={riddleA}
-                  onChange={e => setRiddleA(e.target.value)}
-                />
-                <input
-                  className="cv-input"
-                  inputMode="numeric"
-                  placeholder="Tu código MFA actual"
-                  aria-label="Código MFA para guardar acertijo"
-                  value={riddleTotp}
-                  onChange={e => setRiddleTotp(e.target.value)}
-                />
-                <button className="cv-btn cv-btn--primary" onClick={handleRiddleSave} type="button">
-                  Guardar acertijo
-                </button>
-              </div>
-            </details>
-          )}
         </div>
       </section>
 
@@ -734,12 +653,38 @@ function GovernanceSection() {
                     key={cat}
                     category={cat}
                     entries={entries}
+                    pendingChanges={toolPending}
                     busy={busy}
                     onToggleTool={requestToolToggle}
                     onToggleAll={requestSectionToggle}
                   />
                 ))}
               </div>
+              {hasPendingTools && (
+                <div className="seg-pol-preset-save-row" aria-live="polite">
+                  <span className="seg-pol-preset-hint">
+                    {Object.keys(toolPending).length} cambio{Object.keys(toolPending).length !== 1 ? 's' : ''} pendiente{Object.keys(toolPending).length !== 1 ? 's' : ''}.
+                  </span>
+                  <button
+                    type="button"
+                    className="cv-btn cv-btn--primary cv-btn--sm"
+                    onClick={handleSaveToolChanges}
+                    disabled={busy}
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--sp-1)' }}
+                  >
+                    <Save size={14} aria-hidden="true" />
+                    Guardar cambios
+                  </button>
+                  <button
+                    type="button"
+                    className="cv-btn cv-btn--ghost cv-btn--sm"
+                    onClick={() => setToolPending({})}
+                    disabled={busy}
+                  >
+                    Descartar
+                  </button>
+                </div>
+              )}
             </div>
           )}
 
@@ -756,6 +701,7 @@ function GovernanceSection() {
                     key={cat}
                     category={cat}
                     entries={entries}
+                    pendingChanges={toolPending}
                     busy={busy}
                     onToggleTool={requestToolToggle}
                     onToggleAll={requestSectionToggle}
@@ -767,22 +713,52 @@ function GovernanceSection() {
 
           {/* Legacy flat list — shown only when catalog is absent */}
           {!hasCatalog && legacyToolNames.length > 0 && (
-            <details className="seg-details" style={{ marginTop: 12 }}>
-              <summary>Comandos uno a uno ({legacyToolNames.length})</summary>
-              <div className="seg-tool-list">
-                {legacyToolNames.map(name => (
-                  <label key={name} className="seg-tool-row">
-                    <input
-                      type="checkbox"
-                      checked={pol.tools?.[name] ?? false}
-                      onChange={e => requestLegacyToolToggle(name, e.target.checked)}
-                      aria-label={`Permiso para ${name}`}
-                    />
-                    <span>{name}</span>
-                  </label>
-                ))}
-              </div>
-            </details>
+            <>
+              <details className="seg-details" style={{ marginTop: 12 }}>
+                <summary>Comandos uno a uno ({legacyToolNames.length})</summary>
+                <div className="seg-tool-list">
+                  {legacyToolNames.map(name => {
+                    const effective = name in toolPending ? toolPending[name] : (pol.tools?.[name] ?? false)
+                    return (
+                      <label key={name} className="seg-tool-row">
+                        <input
+                          type="checkbox"
+                          checked={effective}
+                          onChange={e => requestLegacyToolToggle(name, e.target.checked)}
+                          aria-label={`Permiso para ${name}`}
+                        />
+                        <span>{name}</span>
+                      </label>
+                    )
+                  })}
+                </div>
+              </details>
+              {hasPendingTools && (
+                <div className="seg-pol-preset-save-row" aria-live="polite">
+                  <span className="seg-pol-preset-hint">
+                    {Object.keys(toolPending).length} cambio{Object.keys(toolPending).length !== 1 ? 's' : ''} pendiente{Object.keys(toolPending).length !== 1 ? 's' : ''}.
+                  </span>
+                  <button
+                    type="button"
+                    className="cv-btn cv-btn--primary cv-btn--sm"
+                    onClick={handleSaveToolChanges}
+                    disabled={busy}
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--sp-1)' }}
+                  >
+                    <Save size={14} aria-hidden="true" />
+                    Guardar cambios
+                  </button>
+                  <button
+                    type="button"
+                    className="cv-btn cv-btn--ghost cv-btn--sm"
+                    onClick={() => setToolPending({})}
+                    disabled={busy}
+                  >
+                    Descartar
+                  </button>
+                </div>
+              )}
+            </>
           )}
         </div>
       </section>
@@ -934,14 +910,12 @@ function ScanRow({ scan }: { scan: SecurityScan }) {
         verdict: verdict || '',
         risks_json: '[]',
         totp: factors.totp.trim(),
-        riddle_answer: factors.riddle_answer?.trim() ?? null,
       })
       sileo.success({ title: 'Instalación permitida (decisión soberana, auditada). Reinténtala.' })
       setAllowed(true)
       setShowModal(false)
     } catch (err) {
       sileo.error({ title: `No se pudo permitir: ${err instanceof Error ? err.message : err}` })
-      // Leave modal open for retry
     } finally {
       setBusy(false)
     }
@@ -977,7 +951,6 @@ function ScanRow({ scan }: { scan: SecurityScan }) {
 
       {showModal && (
         <MfaModal
-          tier="mfa_riddle"
           title="Permitir instalación"
           onSign={handleAllow}
           onCancel={() => setShowModal(false)}
@@ -1063,8 +1036,6 @@ function SecurityCenterSection() {
 // ── SeguridadView ─────────────────────────────────────────────────────────────
 
 export default function SeguridadView() {
-  // mfa_on_dangers state is needed both by GovernanceSection (toggle)
-  // and ApprovalsSection (pass-through). We lift it here so both share it.
   const [mfaDisabled, setMfaDisabled] = useState(false)
 
   useEffect(() => {

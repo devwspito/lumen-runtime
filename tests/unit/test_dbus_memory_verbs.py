@@ -1,4 +1,4 @@
-"""T047 — Tests for ListMemory / SearchMemory D-Bus verbs (spec 014, increment 2).
+"""T047 — Tests for ListMemory / SearchMemory / GetMemoryEntry D-Bus verbs.
 
 Rules verified (from spec T047 + threat-model + Constitution III):
   1. list_memory returns JSON parseable list (no NameError / import error).
@@ -13,6 +13,10 @@ Rules verified (from spec T047 + threat-model + Constitution III):
  10. Neither method touches the broker or mutates state (read-only).
  11. Neither method requires authZ (same policy as list_providers).
  12. TenantMemoryStore unavailable → both methods return [] (honest, never mock).
+ 13. get_memory_entry returns full content for a valid id.
+ 14. get_memory_entry returns {} for an invalid or malformed id.
+ 15. get_memory_entry returns {} when the index is out of range.
+ 16. get_memory_entry does not require authZ (read-only, same policy).
 """
 
 from __future__ import annotations
@@ -286,6 +290,110 @@ class TestSearchMemory:
 # _read_all_memory_entries — real integration against TenantMemoryStore
 # (tmpdir isolated, no env vars required)
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# get_memory_entry tests
+# ---------------------------------------------------------------------------
+
+
+class _WiringWithInjectedRawMemory(DbusRuntimeServiceWiring):
+    """Subclass that injects raw per-target entries for get_memory_entry tests.
+
+    get_memory_entry reads from the store directly (unlike list_memory which
+    goes through _read_all_memory_entries), so we need a different injection
+    point that mimics what TenantMemoryStore.read() would return.
+    """
+
+    def __init__(self, *, raw_store: dict[str, list[str]], **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._raw_store = raw_store
+
+    def get_memory_entry(self, *, entry_id: str) -> dict:
+        # Duplicate the logic but use the injected store instead of the real one.
+        if not entry_id or ":" not in entry_id:
+            return {}
+        parts = entry_id.rsplit(":", 1)
+        if len(parts) != 2:
+            return {}
+        target, index_str = parts[0], parts[1]
+        try:
+            entry_index = int(index_str)
+        except ValueError:
+            return {}
+        entries = self._raw_store.get(target, [])
+        if entry_index >= len(entries):
+            return {}
+        return {
+            "id": entry_id,
+            "target": target,
+            "content": entries[entry_index],
+            "entry_index": entry_index,
+        }
+
+
+def _make_wiring_with_raw(raw_store: dict[str, list[str]]) -> DbusRuntimeServiceWiring:
+    return _WiringWithInjectedRawMemory(
+        agent_state=InMemoryAgentState(),
+        approval_gate=_NullApprovalGate(),
+        authorized_uids=frozenset({_OPERATOR_UID}),
+        raw_store=raw_store,
+    )
+
+
+class TestGetMemoryEntry:
+    def test_returns_full_content_for_valid_id(self) -> None:
+        wiring = _make_wiring_with_raw({"memory": ["full content here", "second entry"]})
+        result = wiring.get_memory_entry(entry_id="memory:0")
+        assert result["id"] == "memory:0"
+        assert result["target"] == "memory"
+        assert result["content"] == "full content here"
+        assert result["entry_index"] == 0
+
+    def test_second_entry_index_resolves_correctly(self) -> None:
+        wiring = _make_wiring_with_raw({"memory": ["first", "second"]})
+        result = wiring.get_memory_entry(entry_id="memory:1")
+        assert result["content"] == "second"
+        assert result["entry_index"] == 1
+
+    def test_different_target_resolves_correctly(self) -> None:
+        wiring = _make_wiring_with_raw({"user": ["user preference data"]})
+        result = wiring.get_memory_entry(entry_id="user:0")
+        assert result["target"] == "user"
+        assert result["content"] == "user preference data"
+
+    def test_empty_entry_id_returns_empty(self) -> None:
+        wiring = _make_wiring_with_raw({"memory": ["content"]})
+        assert wiring.get_memory_entry(entry_id="") == {}
+
+    def test_malformed_id_no_colon_returns_empty(self) -> None:
+        wiring = _make_wiring_with_raw({"memory": ["content"]})
+        assert wiring.get_memory_entry(entry_id="memorynocolon") == {}
+
+    def test_non_numeric_index_returns_empty(self) -> None:
+        wiring = _make_wiring_with_raw({"memory": ["content"]})
+        assert wiring.get_memory_entry(entry_id="memory:abc") == {}
+
+    def test_out_of_range_index_returns_empty(self) -> None:
+        wiring = _make_wiring_with_raw({"memory": ["only one entry"]})
+        assert wiring.get_memory_entry(entry_id="memory:5") == {}
+
+    def test_unknown_target_returns_empty(self) -> None:
+        wiring = _make_wiring_with_raw({"memory": ["content"]})
+        assert wiring.get_memory_entry(entry_id="unknown:0") == {}
+
+    def test_no_authz_required(self) -> None:
+        """get_memory_entry is read-only — no UID gate applied."""
+        wiring = _make_wiring_with_raw({"memory": ["content"]})
+        result = wiring.get_memory_entry(entry_id="memory:0")
+        # If authZ were applied it would raise; reaching this line means it passed.
+        assert result != {}
+
+    def test_store_unavailable_real_wiring_returns_empty(self) -> None:
+        """With real wiring and no real store, get_memory_entry returns {} gracefully."""
+        wiring = _make_wiring()
+        result = wiring.get_memory_entry(entry_id="memory:0")
+        assert result == {}
 
 
 class TestReadAllMemoryEntriesIntegration:

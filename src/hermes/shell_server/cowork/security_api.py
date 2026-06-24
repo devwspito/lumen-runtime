@@ -29,7 +29,6 @@ Owner-approval flow (Part 2 contract):
          scan_id: str,        # from step 1
          decision: "approve", # or "allow" / "allow_once" / "installed"
          totp: str,           # owner TOTP code (required for override)
-         riddle_answer: str   # riddle answer if MFA riddle is configured
        }
      Response: { ok: true } on success, or 401/403 on MFA failure.
   4. After a successful decision the ScanService gate records decision=ALLOWED
@@ -50,27 +49,26 @@ from hermes.tasks.control_plane.domain.ports import AgentUnavailable
 logger = logging.getLogger("hermes.shell_server.cowork.security_api")
 
 # Decisions that ELEVATE an install past a FAIL/WARN scan verdict (sovereign owner
-# override, modelo "todo elevable"). These are MOST-DELICATE → require owner MFA+riddle,
+# override, modelo "todo elevable"). These require the owner's TOTP (TOTP-only model),
 # same bar as changing a security policy. A plain "deny"/"block" needs no MFA.
 _OVERRIDE_DECISIONS = frozenset({"allow", "approve", "allowed", "allow_once", "install", "installed"})
 
 
-def _require_owner_mfa(mfa_store: MfaStore, totp: str, riddle_answer: str | None) -> None:
-    """Verify owner MFA+riddle for a sovereign install override. 401 on failure."""
+def _require_owner_mfa(mfa_store: MfaStore, totp: str) -> None:
+    """Verify owner TOTP for a sovereign install override. 401 on failure.
+
+    TOTP-only model (owner decision 2026-06-24): same bar as every other gated action.
+    The caged agent cannot mint the TOTP (owner-only 0600 secret), so it cannot override
+    the antivirus verdict on its own."""
     if not mfa_store.is_enrolled():
         raise HTTPException(status_code=403, detail={"code": "mfa_not_enrolled",
             "message": "Configura el MFA antes de permitir una instalación que el "
             "antivirus marcó (es una acción soberana del dueño)."})
-    # Eleva a MFA_RIDDLE (lo más delicado, igual que cambiar una política) SI el dueño
-    # tiene acertijo configurado; si solo tiene TOTP, exige al menos el TOTP. Nunca
-    # menos que MFA para una acción que salta el veredicto del antivirus.
-    level = ProtectionLevel.MFA_RIDDLE if mfa_store.state().riddle_question else ProtectionLevel.MFA
-    ok, reason = mfa_store.verify(level=level, totp=totp or "", riddle_answer=riddle_answer)
+    ok, reason = mfa_store.verify(level=ProtectionLevel.MFA, totp=totp or "")
     if not ok:
         raise HTTPException(status_code=401, detail={"code": reason,
-            "message": "Permitir un paquete con veredicto FAIL exige tu código MFA"
-            + (" y la respuesta del acertijo" if level == ProtectionLevel.MFA_RIDDLE else "")
-            + ". Quedará auditado."})
+            "message": "Permitir un paquete con veredicto FAIL exige tu código MFA. "
+            "Quedará auditado."})
 
 
 # ------------------------------------------------------------------
@@ -92,7 +90,6 @@ class RecordInstallDecisionRequest(BaseModel):
     verdict: str = ""
     risks_json: str = "[]"
     totp: str | None = None          # required to ALLOW a FAIL/WARN scan (owner MFA)
-    riddle_answer: str | None = None
 
 
 # ------------------------------------------------------------------
@@ -184,11 +181,11 @@ def create_security_router() -> APIRouter:
     ) -> dict:
         """Record an operator decision on a security scan (approve/allow or deny).
 
-        ALLOW/APPROVE on a non-PASS scan is a SOVEREIGN override → requires owner
-        MFA+riddle (audited). Plain deny needs none. fail-hard on daemon unavailable.
+        ALLOW/APPROVE on a non-PASS scan is a SOVEREIGN override → requires the owner's
+        TOTP (audited). Plain deny needs none. fail-hard on daemon unavailable.
         """
         if body.decision.strip().lower() in _OVERRIDE_DECISIONS:
-            _require_owner_mfa(MfaStore(), body.totp, body.riddle_answer)
+            _require_owner_mfa(MfaStore(), body.totp)
         proxy = request.app.state.dbus_proxy
         try:
             return await proxy.call_mutator(

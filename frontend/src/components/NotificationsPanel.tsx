@@ -12,6 +12,7 @@ import { createPortal } from 'react-dom'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { sileo } from 'sileo'
+import { Circle } from 'lucide-react'
 import {
   listNotifications,
   getUnreadCount,
@@ -232,7 +233,7 @@ export default function NotificationsPanel({ loadConversation }: NotificationsPa
                 onClick={() => handleNotificationClick(n)}
               >
                 <div className="notif-item__left">
-                  <Badge variant={STATUS_VARIANT[n.status]}>●</Badge>
+                  <Badge variant={STATUS_VARIANT[n.status]}><Circle size={8} aria-hidden="true" style={{ display: 'block', fill: 'currentColor' }} /></Badge>
                 </div>
                 <div className="notif-item__body">
                   <div className="notif-item__title">{n.title}</div>

@@ -83,6 +83,12 @@ export interface WorkspaceFile {
   name: string
   path: string
   size: number
+  /** Whether the entry is a directory (new folder-browser API) */
+  is_dir?: boolean
+  /** Human-readable kind: 'directory', 'text', 'code', 'image', 'spreadsheet', etc. */
+  kind?: string
+  /** ISO-8601 modification timestamp */
+  modified?: string
 }
 
 // ── Chat ──────────────────────────────────────────────────────────────────────
@@ -325,18 +331,14 @@ export interface PendingApproval {
   parameters?: Record<string, unknown>
   /** task_id from the pre_tool_call hook; null for rows written before migration */
   conversation_id?: string | null
-  /** MFA tier required to approve: 'mfa' | 'mfa_humanity' | 'mfa_riddle' */
+  /** Always 'mfa' in the TOTP-only model */
   required_level?: string
   /** Whether the owner has enrolled a TOTP secret */
   mfa_enrolled?: boolean
-  /** Whether the owner has configured a personal riddle */
-  riddle_set?: boolean
 }
 
 export interface MfaStatus {
   enrolled: boolean
-  riddle_set?: boolean
-  riddle_question?: string
 }
 
 export interface PolicyCatalogEntry {
@@ -365,7 +367,6 @@ export interface InstallDecisionPayload {
   verdict: string
   risks_json: string
   totp: string
-  riddle_answer: string | null
 }
 
 // ── Notifications ─────────────────────────────────────────────────────────────
@@ -418,7 +419,6 @@ export interface SecurityDecisionPayload {
   verdict: string
   risks_json: string
   totp: string
-  riddle_answer: string | null
 }
 
 // ── Skill details ──────────────────────────────────────────────────────────────
@@ -455,6 +455,13 @@ export interface MemoryItem {
   entry_index?: number
   created_at?: string
   [key: string]: unknown
+}
+
+export interface MemoryEntryDetail {
+  id: string
+  target: string
+  content: string
+  entry_index: number
 }
 
 // Frames emitted by the WebSocket stream — discriminated by `kind`.
