@@ -18,6 +18,23 @@ browser at a per-boot unique token. The model, Composio, Brave, agents and skill
 configured in the UI. Requires **podman** or **docker** (on macOS, a **rootful** podman
 machine). Windows: experimental via WSL2.
 
+## Control it from the terminal — the `lumen` command
+
+The installer also drops a `lumen` command on your PATH. If you close the browser tab and
+forget the URL, just run `lumen` to get it back:
+
+```sh
+lumen            # open Lumen in the browser (starts it if stopped)
+lumen stop       # stop Lumen
+lumen update     # pull the latest version and apply it (keeps your config)
+lumen status     # is it running? on which port?
+lumen restart    # restart it
+lumen logs       # follow the container journal
+```
+
+`lumen update` re-pulls the published image and recreates the container; your keystore,
+MFA enrollment and provider settings persist in the `lumen-data` volume.
+
 ## What's inside (the whole product, one container)
 
 - **Daemon** — the Lumen runtime + the **Nous** reasoning engine.

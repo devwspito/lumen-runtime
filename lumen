@@ -1,0 +1,209 @@
+#!/bin/sh
+# lumen — controla el contenedor local de Lumen desde la terminal.
+#
+#   lumen            abre Lumen en el navegador (lo arranca si hace falta)
+#   lumen open       igual que `lumen`
+#   lumen stop       para Lumen
+#   lumen start      arranca Lumen (sin abrir el navegador)
+#   lumen restart    reinicia Lumen
+#   lumen update     baja la última imagen y recrea el contenedor
+#   lumen status     muestra si está corriendo y en qué puerto
+#   lumen logs       sigue el journal del contenedor
+#
+# La jaula de seguridad (Landlock/netns/seccomp + loopback) es la misma que usa
+# get-lumen.sh. El modelo, Composio, Brave, agentes y skills se configuran EN LA UI.
+set -eu
+
+IMAGE="${LUMEN_IMAGE:-ghcr.io/devwspito/lumen:latest}"
+NAME="${LUMEN_NAME:-lumen}"
+PORT_PIN="${LUMEN_PORT:-}"
+SECCOMP_URL="${LUMEN_SECCOMP_URL:-https://raw.githubusercontent.com/devwspito/lumen-runtime/main/ops/container/seccomp/lumen.json}"
+SECCOMP_DIR="${HOME:-/tmp}/.lumen"
+SECCOMP="$SECCOMP_DIR/lumen-seccomp.json"
+
+RT="$(command -v podman 2>/dev/null || command -v docker 2>/dev/null || true)"
+[ -n "$RT" ] || { echo "✗ Necesitas podman o docker.  →  https://podman.io/get-started"; exit 1; }
+RTN="$(basename "$RT")"
+OS="$(uname -s 2>/dev/null || echo unknown)"
+
+# ── helpers ─────────────────────────────────────────────────────────────────
+
+_exists()  { "$RT" inspect "$NAME" >/dev/null 2>&1; }
+_running() { [ "$("$RT" inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null || echo false)" = true ]; }
+
+# macOS: la jaula corre dentro de una podman machine, que DEBE ser rootful.
+_ensure_machine() {
+  [ "$RTN" = podman ] && [ "$OS" = Darwin ] || return 0
+  name="$(podman machine list -q 2>/dev/null | head -1)"
+  if [ -z "$name" ]; then
+    echo "▸ No hay podman machine — creando una rootful (solo la 1ª vez, tarda un poco)…"
+    podman machine init --rootful --cpus 4 --memory 8192 --disk-size 60 \
+      && podman machine start \
+      || { echo "✗ No se pudo crear/arrancar la podman machine."; exit 1; }
+    name="$(podman machine list -q 2>/dev/null | head -1)"
+  fi
+  rootful="$(podman machine inspect "$name" --format '{{.Rootful}}' 2>/dev/null | head -1)"
+  if [ "$rootful" != "true" ]; then
+    echo "✗ La podman machine '$name' es rootless; la jaula necesita rootful. Conviértela:"
+    echo "    podman machine stop '$name' && podman machine set --rootful '$name' && podman machine start '$name'"
+    exit 1
+  fi
+  podman info >/dev/null 2>&1 || podman machine start "$name" >/dev/null 2>&1 || true
+}
+
+# Perfil seccomp bajo $HOME (en macOS la VM monta $HOME pero NO /tmp).
+_ensure_seccomp() {
+  mkdir -p "$SECCOMP_DIR" 2>/dev/null || true
+  if ! curl -fsSL "$SECCOMP_URL" -o "$SECCOMP" 2>/dev/null; then
+    echo "✗ No se pudo descargar el perfil seccomp ($SECCOMP_URL)."
+    echo "  Exporta LUMEN_SECCOMP_URL a una URL accesible si el repo no es público."
+    exit 1
+  fi
+}
+
+# Recrea el contenedor con la jaula endurecida (loopback + caps mínimos + seccomp).
+_run() {
+  _ensure_machine
+  _ensure_seccomp
+  "$RT" rm -f "$NAME" >/dev/null 2>&1 || true
+  if [ -n "$PORT_PIN" ]; then publish="127.0.0.1:${PORT_PIN}:7517"; else publish="127.0.0.1::7517"; fi
+  "$RT" run -d --name "$NAME" --systemd=always \
+    -p "$publish" \
+    --cap-add NET_ADMIN --cap-add SYS_ADMIN --cap-add AUDIT_READ \
+    --security-opt seccomp="$SECCOMP" \
+    --security-opt unmask=/sys/kernel/security \
+    --security-opt label=disable \
+    -v /sys/kernel/security:/sys/kernel/security:ro \
+    -v lumen-data:/var/lib/hermes \
+    --shm-size=1g \
+    "$IMAGE" >/dev/null
+}
+
+_port() {
+  if [ -n "$PORT_PIN" ]; then echo "$PORT_PIN"; return; fi
+  p="$("$RT" port "$NAME" 7517 2>/dev/null | head -1 | sed 's/.*:\([0-9][0-9]*\)$/\1/')"
+  [ -n "$p" ] && echo "$p" || echo 17517
+}
+
+# Espera a que el runtime esté activo y devuelve la URL con el handshake ?k=.
+_url() {
+  secret=""
+  i=0
+  while [ "$i" -lt 48 ]; do
+    a="$("$RT" exec "$NAME" systemctl is-active hermes-runtime 2>/dev/null || true)"
+    if [ "$a" = active ]; then
+      secret="$("$RT" exec "$NAME" cat /var/lib/hermes-bootstrap/bootstrap/webui-bootstrap 2>/dev/null | tr -d '\r\n' || true)"
+      [ -n "$secret" ] && break
+    fi
+    [ "$a" = failed ] && break
+    sleep 5
+    i=$((i + 1))
+  done
+  [ -n "$secret" ] || { echo ""; return 1; }
+  echo "http://localhost:$(_port)/?k=${secret}"
+}
+
+_open_browser() {
+  url="$1"
+  if command -v open >/dev/null 2>&1; then open "$url" >/dev/null 2>&1 || true
+  elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$url" >/dev/null 2>&1 || true
+  fi
+}
+
+_open_and_print() {
+  echo "▸ Esperando a Lumen…"
+  if url="$(_url)" && [ -n "$url" ]; then
+    echo ""
+    echo "  ✅ Lumen está listo:"
+    echo "     $url"
+    echo ""
+    _open_browser "$url"
+  else
+    echo "  ⚠ Lumen arrancó pero no obtuve el token. Mira:  lumen logs"
+    exit 1
+  fi
+}
+
+# ── subcomandos ───────────────────────────────────────────────────────────────
+
+cmd_open() {
+  _ensure_machine
+  if _exists; then
+    _running || { echo "▸ Arrancando Lumen…"; "$RT" start "$NAME" >/dev/null 2>&1 || true; }
+  else
+    echo "▸ Primera vez — descargando y arrancando Lumen…"
+    "$RT" pull "$IMAGE" >/dev/null 2>&1 || true
+    _run
+  fi
+  _open_and_print
+}
+
+cmd_start() {
+  _ensure_machine
+  if _exists; then
+    _running && { echo "✓ Lumen ya está corriendo (lumen → para abrirlo)."; return; }
+    "$RT" start "$NAME" >/dev/null 2>&1 || true
+    echo "✓ Lumen arrancado. Abre con:  lumen"
+  else
+    "$RT" pull "$IMAGE" >/dev/null 2>&1 || true
+    _run
+    echo "✓ Lumen arrancado. Abre con:  lumen"
+  fi
+}
+
+cmd_stop() {
+  if _exists && _running; then
+    "$RT" stop "$NAME" >/dev/null 2>&1 && echo "✓ Lumen parado." || echo "✗ No se pudo parar."
+  else
+    echo "✓ Lumen ya estaba parado."
+  fi
+}
+
+cmd_restart() { cmd_stop; cmd_open; }
+
+cmd_update() {
+  echo "▸ Buscando la última versión de Lumen…"
+  _ensure_machine
+  "$RT" pull "$IMAGE"
+  echo "▸ Recreando el contenedor con la nueva imagen…"
+  _run   # -v lumen-data conserva tu configuración (keystore, MFA, proveedores)
+  _open_and_print
+}
+
+cmd_status() {
+  if _exists && _running; then
+    echo "✓ Lumen corriendo en  http://localhost:$(_port)/   (abre con: lumen)"
+  elif _exists; then
+    echo "• Lumen está parado.  Arranca con: lumen"
+  else
+    echo "• Lumen no está instalado.  Instálalo con: lumen update   (o el curl de get-lumen.sh)"
+  fi
+}
+
+cmd_logs() { "$RT" logs -f "$NAME"; }
+
+usage() {
+  cat <<'EOF'
+lumen — controla tu Lumen local
+
+  lumen            abre Lumen en el navegador (lo arranca si hace falta)
+  lumen stop       para Lumen
+  lumen start      arranca Lumen sin abrir el navegador
+  lumen restart    reinicia Lumen
+  lumen update     baja la última versión y la aplica (conserva tu config)
+  lumen status     ¿está corriendo? ¿en qué puerto?
+  lumen logs       sigue el journal del contenedor
+EOF
+}
+
+case "${1:-open}" in
+  ""|open|abrir)       cmd_open ;;
+  start|arranca)       cmd_start ;;
+  stop|para|parar)     cmd_stop ;;
+  restart|reinicia)    cmd_restart ;;
+  update|actualiza|actualizar) cmd_update ;;
+  status|estado)       cmd_status ;;
+  logs|log)            cmd_logs ;;
+  -h|--help|help|ayuda) usage ;;
+  *) echo "Comando desconocido: $1"; echo; usage; exit 1 ;;
+esac
