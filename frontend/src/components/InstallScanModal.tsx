@@ -9,6 +9,7 @@
 
 import { createPortal } from 'react-dom'
 import { useEffect, useRef, useState } from 'react'
+import { X } from 'lucide-react'
 import type { InstallScanResponse, InstallRisk } from '../api/types'
 import Badge, { type BadgeVariant } from './Badge'
 import MfaModal, { type MfaFactors } from './MfaModal'
@@ -100,7 +101,7 @@ export default function InstallScanModal({
               aria-label="Cerrar"
               onClick={onCancel}
             >
-              ✕
+              <X size={16} aria-hidden="true" />
             </button>
           </div>
 
@@ -174,7 +175,6 @@ export default function InstallScanModal({
 
       {showMfa && (
         <MfaModal
-          tier="mfa"
           title="Confirmar instalación"
           onSign={factors => {
             setShowMfa(false)

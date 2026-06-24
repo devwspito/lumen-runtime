@@ -62,9 +62,9 @@ class _FakeApprovalGate:
         self.approve_calls: list[dict] = []
         self.reject_calls: list[dict] = []
 
-    async def approve(self, *, proposal_id: UUID, approved_by: UUID) -> str:
+    async def approve(self, *, proposal_id: UUID, approved_by: UUID, mfa_factors=None) -> str:
         self.approve_calls.append(
-            {"proposal_id": proposal_id, "approved_by": approved_by}
+            {"proposal_id": proposal_id, "approved_by": approved_by, "mfa_factors": mfa_factors}
         )
         return f"token-{proposal_id}"
 

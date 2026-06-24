@@ -299,6 +299,24 @@ export class OfficeState {
         this.bubbles.delete(id)
       }
     }
+
+    // ── A2A delegation edges ────────────────────────────────────────────────
+    // When the orchestrator (active_agent_id) delegates to specialist agents
+    // (activity entries with a different agent_id), draw a green connection line
+    // between them. The edge is keyed "<fromId>-><toId>" for dedup.
+    this._activeA2A.clear()
+    const orchestratorId = status.active_agent_id
+    if (orchestratorId) {
+      for (const entry of status.activity ?? []) {
+        const specialistId = entry.agent_id
+        // Only draw the edge when the specialist differs from the orchestrator
+        // (to avoid a self-loop when the orchestrator is the only active agent)
+        if (specialistId && specialistId !== orchestratorId) {
+          const edgeKey = `${orchestratorId}->${specialistId}`
+          this._activeA2A.set(edgeKey, { fromId: orchestratorId, toId: specialistId })
+        }
+      }
+    }
   }
 
   update(dt: number): void {

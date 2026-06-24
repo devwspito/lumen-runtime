@@ -1,5 +1,6 @@
 import { useEffect, useReducer, useRef, useState } from 'react'
 import { sileo } from 'sileo'
+import { X, Cpu } from 'lucide-react'
 import {
   listProviders, listNativeProviders, addProvider, setActiveProvider,
   testProvider, deleteProvider, startProviderOAuth, getProviderOAuthStatus,
@@ -8,6 +9,9 @@ import {
 import type { Provider } from '../api/types'
 import { useConfirmDialog } from '../components/ConfirmDialog'
 import Badge from '../components/Badge'
+import { PageHeader } from '../components/ui/PageHeader'
+import { EmptyState } from '../components/ui/EmptyState'
+import { Button } from '../components/ui/Button'
 
 // Mirrors vanilla providers.js: badge colours per kind/auth-type
 const KIND_COLORS: Record<string, string> = {
@@ -97,22 +101,22 @@ export default function ProvidersView() {
   return (
     <>
       {ConfirmDialogNode}
-      <header className="view-header">
-        <h1 className="view-title">Proveedores</h1>
-        <p className="view-subtitle">Conecta modelos de IA. Activa el que Lumen usará por defecto.</p>
-      </header>
+      <PageHeader
+        title="Proveedores"
+        subtitle="Conecta modelos de IA. Activa el que Lumen usará por defecto."
+      />
 
       <div className="view-body cv-view-body">
         {state.status === 'loading' && (
-          <div className="state-container" aria-busy="true" aria-live="polite">
-            <p className="state-label">Cargando proveedores…</p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }} aria-busy="true">
+            {[...Array(3)].map((_, i) => <div key={i} className="cv-skeleton" style={{ height: 52 }} />)}
           </div>
         )}
 
         {state.status === 'error' && (
           <div className="state-container" role="alert">
             <p className="state-error">{state.message}</p>
-            <button className="cv-btn cv-btn--secondary" onClick={load}>Reintentar</button>
+            <Button variant="secondary" onClick={load}>Reintentar</Button>
           </div>
         )}
 
@@ -121,11 +125,17 @@ export default function ProvidersView() {
             <section className="cv-section" aria-label="Proveedores configurados">
               <h2 className="cv-section-label">Configurados</h2>
               {state.configured.length === 0
-                ? <p className="cv-empty">Sin proveedores configurados. Añade uno del catálogo.</p>
+                ? (
+                  <EmptyState
+                    icon={<Cpu size={36} />}
+                    title="Sin proveedores configurados"
+                    description="Añade uno del catálogo para empezar a chatear."
+                  />
+                )
                 : (
                   <ul className="cv-list" role="list">
                     {state.configured.map(p => (
-                      <li key={p.provider_id}>
+                      <li key={p.provider_id} className="ds-list-item-enter">
                         <ProviderRow
                           provider={p}
                           isConfigured
@@ -154,7 +164,7 @@ export default function ProvidersView() {
                     {state.native
                       .filter(p => !configuredIds.has(p.provider_id))
                       .map(p => (
-                        <li key={p.provider_id}>
+                        <li key={p.provider_id} className="ds-list-item-enter">
                           <ProviderRow
                             provider={p}
                             isConfigured={false}
@@ -395,7 +405,7 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
               onClick={handleDelete}
               aria-label={`Eliminar proveedor ${name}`}
             >
-              ✕
+              <X size={14} aria-hidden="true" />
             </button>
           </>
         ) : isOAuthProvider(provider) ? (
@@ -519,9 +529,9 @@ function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
         Conecta cualquier servidor compatible: vLLM, LM Studio, Ollama o uno propio.
       </p>
       {!open ? (
-        <button className="cv-btn cv-btn--secondary cv-btn--sm" onClick={() => setOpen(true)}>
-          + Añadir modelo propio
-        </button>
+        <Button variant="secondary" size="sm" onClick={() => setOpen(true)}>
+          Añadir modelo propio
+        </Button>
       ) : (
         <div className="cv-form-stack">
           <label className="cv-label" htmlFor="pv-c-alias">Nombre</label>

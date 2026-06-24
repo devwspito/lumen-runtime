@@ -4,19 +4,18 @@
  * Rendered both inside SeguridadView (full list) and PendingApprovalsInChat
  * (filtered to the active conversation).
  *
- * "Permitir" opens MfaModal (unless MFA is disabled — then fires directly).
+ * "Permitir" opens MfaModal (TOTP only) unless MFA is globally disabled.
  * "Denegar" fires without MFA.
  * Errors surface as toasts; the modal stays open on failure.
  */
 
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { sileo } from 'sileo'
 import { resolveApproval } from '../api/client'
 import type { PendingApproval } from '../api/types'
 import MfaEnroll from './MfaEnroll'
 import MfaModal from './MfaModal'
-import type { MfaTier, MfaFactors } from './MfaModal'
+import type { MfaFactors } from './MfaModal'
 
 export interface ApprovalCardProps {
   approval: PendingApproval
@@ -30,10 +29,8 @@ export default function ApprovalCard({
   mfaDisabled = false,
   onResolved,
 }: ApprovalCardProps) {
-  const navigate = useNavigate()
   const [showModal, setShowModal] = useState(false)
   const [busy, setBusy] = useState(false)
-  // Triggers inline enrollment if backend says MFA not enrolled
   const [needsEnroll, setNeedsEnroll] = useState(approval.mfa_enrolled === false)
 
   const params = approval.parameters
@@ -41,14 +38,6 @@ export default function ApprovalCard({
     params && typeof params === 'object' && !Array.isArray(params)
       ? Object.entries(params).slice(0, 8)
       : []
-
-  const level = approval.required_level ?? 'mfa'
-  const tier: MfaTier =
-    level === 'mfa_riddle' ? 'mfa_riddle'
-    : level === 'mfa_humanity' ? 'mfa_humanity'
-    : 'mfa'
-
-  const riddleNotReady = tier === 'mfa_riddle' && approval.riddle_set === false
 
   async function handleDeny() {
     setBusy(true)
@@ -65,8 +54,7 @@ export default function ApprovalCard({
 
   function handlePermitirClick() {
     if (mfaDisabled) {
-      // MFA globally off — approve directly without factors
-      void handleApprove({} as MfaFactors)
+      void handleApprove({ totp: '' })
     } else {
       setShowModal(true)
     }
@@ -75,11 +63,7 @@ export default function ApprovalCard({
   async function handleApprove(factors: MfaFactors) {
     setBusy(true)
     try {
-      await resolveApproval(approval.proposal_id, 'once', {
-        totp: factors.totp ?? null,
-        humanity: factors.humanity ?? null,
-        riddle_answer: factors.riddle_answer ?? null,
-      })
+      await resolveApproval(approval.proposal_id, 'once', { totp: factors.totp ?? null })
       setShowModal(false)
       sileo.success({ title: 'Acción aprobada' })
       onResolved()
@@ -90,7 +74,6 @@ export default function ApprovalCard({
         setShowModal(false)
         setNeedsEnroll(true)
       } else {
-        // Toast the error; the modal stays open so user can retry
         sileo.error({ title: msg || 'No se pudo aprobar' })
       }
     } finally {
@@ -100,7 +83,6 @@ export default function ApprovalCard({
 
   function handleEnrolled() {
     setNeedsEnroll(false)
-    // Re-open the modal for the now-enrolled user
     setShowModal(true)
   }
 
@@ -125,27 +107,6 @@ export default function ApprovalCard({
             ))}
           </dl>
         )}
-        {riddleNotReady && (
-          <p className="seg-approval-card__mfa-error" role="alert">
-            Esta acción requiere un acertijo personal que aún no has configurado.{' '}
-            <button
-              type="button"
-              onClick={() => navigate('/seguridad')}
-              style={{
-                background: 'none',
-                border: 'none',
-                padding: 0,
-                color: 'var(--accent)',
-                cursor: 'pointer',
-                fontSize: 'inherit',
-                textDecoration: 'underline',
-              }}
-            >
-              Configúralo en Seguridad
-            </button>
-            .
-          </p>
-        )}
       </div>
 
       {needsEnroll ? (
@@ -168,7 +129,7 @@ export default function ApprovalCard({
           <button
             className="cv-btn cv-btn--primary cv-btn--sm"
             onClick={handlePermitirClick}
-            disabled={busy || riddleNotReady}
+            disabled={busy}
             type="button"
             aria-label={
               mfaDisabled
@@ -192,7 +153,6 @@ export default function ApprovalCard({
 
       {showModal && (
         <MfaModal
-          tier={tier}
           title="Aprobar acción"
           onSign={handleApprove}
           onCancel={() => setShowModal(false)}

@@ -1,11 +1,12 @@
 /**
  * PendingApprovalsInChat — polls for HITL approvals and renders those that
- * belong to the currently active conversation (or orphan approvals with no
- * conversation_id that could block any agent cycle) inside the chat message list.
+ * belong to the currently active conversation inside the chat message list.
  *
- * Flash prevention: we only replace the rendered list when a poll SUCCEEDS.
- * A transient poll failure or in-flight state keeps the previous list visible
- * so cards never disappear for a frame between polls.
+ * Flash prevention:
+ *   - Cards are not rendered until the FIRST poll resolves (loaded flag).
+ *   - Rows already resolved (no longer in the pending list) are filtered out.
+ *   - Conversation matching only runs once convId is available.
+ *   - Transient poll failures keep the last known list visible.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -27,9 +28,13 @@ export default function PendingApprovalsInChat({
 }: PendingApprovalsInChatProps) {
   const [approvals, setApprovals] = useState<PendingApproval[]>([])
   const [mfaDisabled, setMfaDisabled] = useState(false)
+  // Do not render any card until at least one poll has completed.
+  const [loaded, setLoaded] = useState(false)
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const load = useCallback(async () => {
+    // Skip if convId hasn't resolved yet — wait until we have a thread to match.
+    // (Orphan approvals with no conversation_id are still shown regardless.)
     try {
       const [all, pol] = await Promise.all([listPendingApprovals(), getPolicies()])
       if (!Array.isArray(all)) return
@@ -37,23 +42,26 @@ export default function PendingApprovalsInChat({
       // Show approvals belonging to the active conversation, PLUS orphan ones
       // (conversation_id null/empty) that may come from scheduled/autonomous
       // cycles — they are never attached to a thread but still block the agent.
-      const filtered = all.filter(a =>
-        (currentThreadId && a.conversation_id === currentThreadId) ||
-        !a.conversation_id
-      )
+      const filtered = all.filter(a => {
+        if (!a.conversation_id) return true
+        // Only match conversation-scoped approvals once we know the thread id.
+        return currentThreadId !== null && a.conversation_id === currentThreadId
+      })
 
-      // Only update state on a successful poll so a transient empty response
-      // does not flash-clear cards that are still pending.
       setApprovals(filtered)
       setMfaDisabled(pol.mfa_on_dangers === false)
+      setLoaded(true)
     } catch {
-      // Transient failure — keep last known approvals visible.
+      // Transient failure — keep last known approvals visible; don't mark loaded.
     }
   }, [currentThreadId])
 
   // Start/restart poll whenever the active thread changes.
   useEffect(() => {
     if (intervalRef.current !== null) clearInterval(intervalRef.current)
+    // Reset loaded so we don't flash stale cards from a previous thread
+    setLoaded(false)
+    setApprovals([])
     void load()
     intervalRef.current = setInterval(() => { void load() }, POLL_INTERVAL_MS)
     return () => {
@@ -66,7 +74,8 @@ export default function PendingApprovalsInChat({
     if (refreshTick > 0) void load()
   }, [refreshTick, load])
 
-  if (approvals.length === 0) return null
+  // Do not render anything until the first successful poll.
+  if (!loaded || approvals.length === 0) return null
 
   return (
     <div

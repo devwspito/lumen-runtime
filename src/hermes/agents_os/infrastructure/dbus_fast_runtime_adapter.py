@@ -234,12 +234,17 @@ class Runtime1ServiceInterface(ServiceInterface):
         return True
 
     @method()
-    async def Approve(self, proposal_id: "s") -> "s":  # noqa: N802,F821,UP037
-        """HITL approve. approved_by = UID del bus. NO dispara run_cycle."""
+    async def Approve(self, proposal_id: "s", totp: "s") -> "s":  # noqa: N802,F821,UP037
+        """HITL approve. approved_by = UID del bus. NO dispara run_cycle.
+
+        `totp` = owner's TOTP code, forwarded to the gate so the gate (the single MFA
+        enforcement point for ALL surfaces — red-team 2026-06-19, finding 3) verifies it.
+        Empty string = no factor (the gate rejects, fail-closed)."""
         sender_uid = await self._resolve_current_sender_uid()
         result = await self._wiring.approve_action(
             proposal_id=UUID(proposal_id),
             sender_uid=sender_uid,
+            totp=totp or None,
         )
         return result.approval_token
 
@@ -1277,6 +1282,17 @@ class Runtime1ServiceInterface(ServiceInterface):
         No authZ: read-only — el caller no muta nada (mismo patrón que list_*).
         """
         return self._wiring.search_memory(query=query, limit=int(limit) or 50)
+
+    @method()
+    async def GetMemoryEntry(self, entry_id: "s") -> "s":  # noqa: N802,F821,UP037
+        """Fetch a single memory entry by its composite id '{target}:{index}'.
+
+        Returns JSON {id, target, content, entry_index} with the full content.
+        Returns JSON {} when the entry does not exist or store is unavailable.
+        No authZ: read-only, same policy as ListMemory.
+        """
+        result = self._wiring.get_memory_entry(entry_id=entry_id)
+        return json.dumps(result)
 
     @method()
     async def ForgetMemoryEntry(self, entry_id: "s") -> "s":  # noqa: N802,F821,UP037

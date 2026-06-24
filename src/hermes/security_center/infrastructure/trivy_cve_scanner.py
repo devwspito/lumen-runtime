@@ -61,11 +61,17 @@ class TriviaCveScanner:
         return None
 
     async def _run_trivy(self, scan_path: str, target: InstallTarget) -> list[Risk]:
+        # --skip-db-update: use the DB baked into the image at TRIVY_CACHE_DIR.
+        # Without this flag trivy attempts a live fetch from ghcr.io/aquasecurity/trivy-db
+        # whenever the DB is older than 24 h, adding latency and an outbound dependency at
+        # scan time. The DB is pre-warmed during the image build; a stale DB is a CI/CD
+        # concern (rebuild the image), not a runtime one.
         cmd = [
             _TRIVY_BIN, "fs",
             "--severity", _TRIVY_SEVERITY,
             "--format", "json",
             "--quiet",
+            "--skip-db-update",
             scan_path,
         ]
         try:

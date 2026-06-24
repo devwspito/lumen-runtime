@@ -203,9 +203,16 @@ class DbusControlPlaneAdapter:
         await self._call_void("call_resume")
 
     async def approve(
-        self, *, channel: AuthenticatedChannel, proposal_id: UUID
+        self,
+        *,
+        channel: AuthenticatedChannel,
+        proposal_id: UUID,
+        mfa_factors: Any | None = None,
     ) -> str:
-        return await self._call_returning("call_approve", str(proposal_id))
+        # Forward the owner's TOTP to the daemon gate (single MFA enforcement point).
+        # Empty string when absent — D-Bus strings can't be None; the gate fails closed.
+        totp = getattr(mfa_factors, "totp", None) or ""
+        return await self._call_returning("call_approve", str(proposal_id), totp)
 
     async def reject(
         self, *, channel: AuthenticatedChannel, proposal_id: UUID, reason: str

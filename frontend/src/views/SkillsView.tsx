@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import { sileo } from 'sileo'
+import { X, Zap, Search as SearchIcon, ChevronRight } from 'lucide-react'
 import {
   listSkills, searchSkillsHub, listHubSkills, installSkill, getHubOpStatus,
   uninstallHubSkill, promoteSkill,
@@ -15,6 +16,9 @@ import Badge, { type BadgeVariant } from '../components/Badge'
 import InstallScanModal from '../components/InstallScanModal'
 import SkillDetailsModal from '../components/SkillDetailsModal'
 import type { MfaFactors } from '../components/MfaModal'
+import { PageHeader } from '../components/ui/PageHeader'
+import { EmptyState } from '../components/ui/EmptyState'
+import { Button } from '../components/ui/Button'
 
 // ── Poll helper ───────────────────────────────────────────────────────────────
 
@@ -176,10 +180,11 @@ export default function SkillsView() {
     const name = item.name ?? identifier
     onBtnUpdate('installing')
 
-    // Scan-first: show approval modal for WARN/FAIL verdicts
+    // Scan-first: WARN and FAIL always route through the approval modal —
+    // no silent toast degradation.
     try {
       const scan = await scanInstall('skill', identifier)
-      if (scan.requires_owner_approval) {
+      if (scan.requires_owner_approval || scan.verdict === 'WARN' || scan.verdict === 'FAIL') {
         setPendingSkillInstall({ scan, item, onBtnUpdate })
         return
       }
@@ -206,7 +211,6 @@ export default function SkillsView() {
         verdict: scan.verdict,
         risks_json: JSON.stringify(scan.risks),
         totp: factors.totp,
-        riddle_answer: factors.riddle_answer ?? null,
       })
       await doInstallSkill(identifier, name, onBtnUpdate, true)
     } catch (e) {
@@ -379,17 +383,16 @@ export default function SkillsView() {
           onClose={() => setSkillDetails(null)}
         />
       )}
-      <header className="view-header">
-        <h1 className="view-title">Habilidades</h1>
-        <p className="view-subtitle">Amplía lo que puede hacer el agente. Busca e instala en segundos.</p>
-      </header>
+      <PageHeader
+        title="Habilidades"
+        subtitle="Amplía lo que puede hacer el agente. Busca e instala en segundos."
+      />
 
       <div className="view-body cv-view-body">
         {/* ── Hub search (first — easiest path to value) ────────────────── */}
         <section className="cv-section" aria-label="Catálogo de habilidades">
           <h2 className="cv-section-label">Catálogo</h2>
 
-          {/* Suggestion chips — visible before any search so the hub is useful immediately */}
           {!hubSearching && hubResults.length === 0 && (
             <div
               style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--sp-2)', marginBottom: 'var(--sp-3)' }}
@@ -410,32 +413,40 @@ export default function SkillsView() {
 
           <div className="cv-search-row">
             <label className="sr-only" htmlFor="hub-search">Buscar en el hub de skills</label>
-            <input
-              id="hub-search"
-              ref={hubInputRef}
-              className="cv-input"
-              type="search"
-              placeholder="Buscar skills…"
-              autoComplete="off"
-              value={hubQuery}
-              onChange={e => setHubQuery(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') runSearch() }}
-            />
-            <button
-              className="cv-btn cv-btn--secondary cv-btn--sm"
+            <div style={{ position: 'relative', flex: 1 }}>
+              <SearchIcon size={14} aria-hidden="true" style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--ink4)', pointerEvents: 'none' }} />
+              <input
+                id="hub-search"
+                ref={hubInputRef}
+                className="cv-input"
+                type="search"
+                placeholder="Buscar skills…"
+                autoComplete="off"
+                value={hubQuery}
+                onChange={e => setHubQuery(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') runSearch() }}
+                style={{ paddingLeft: 30 }}
+              />
+            </div>
+            <Button
+              variant="secondary"
+              size="sm"
               onClick={runSearch}
-              disabled={hubSearching}
+              loading={hubSearching}
             >
-              {hubSearching ? 'Buscando…' : 'Buscar'}
-            </button>
+              Buscar
+            </Button>
           </div>
           {!hubSearching && hubQuery && hubResults.length === 0 && (
-            <p className="cv-empty">Sin resultados para "{hubQuery}"</p>
+            <EmptyState
+              icon={<SearchIcon size={32} />}
+              title={`Sin resultados para "${hubQuery}"`}
+            />
           )}
           {hubResults.length > 0 && (
             <ul className="cv-list" role="list">
               {hubResults.map((item, i) => (
-                <li key={item.identifier ?? item.slug ?? item.name ?? i}>
+                <li key={item.identifier ?? item.slug ?? item.name ?? i} className="ds-list-item-enter" style={{ animationDelay: `${Math.min(i * 20, 200)}ms` }}>
                   <HubResultRow
                     item={item}
                     installedNames={installedHubNames}
@@ -450,34 +461,41 @@ export default function SkillsView() {
         {/* ── Installed skills ──────────────────────────────────────────── */}
         <section className="cv-section" aria-label="Skills instaladas">
           <h2 className="cv-section-label">Instaladas</h2>
-          {state.status === 'loading' && <div className="cv-skeleton" aria-busy="true" />}
+          {state.status === 'loading' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }} aria-busy="true">
+              {[...Array(2)].map((_, i) => <div key={i} className="cv-skeleton" style={{ height: 48 }} />)}
+            </div>
+          )}
           {state.status === 'error' && (
             <div role="alert">
               <p className="state-error">{state.message}</p>
-              <button className="cv-btn cv-btn--secondary cv-btn--sm" onClick={loadInstalled} style={{ marginTop: 8 }}>Reintentar</button>
+              <Button variant="secondary" size="sm" onClick={loadInstalled} style={{ marginTop: 8 }}>Reintentar</Button>
             </div>
           )}
           {state.status === 'success' && (
             state.skills.length === 0
               ? (
-                <div className="cv-empty" style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 'var(--sp-3)' }}>
-                  <span>Sin skills instaladas.</span>
-                  <button
-                    type="button"
-                    className="cv-btn cv-btn--secondary cv-btn--sm"
-                    onClick={() => {
-                      hubInputRef.current?.focus()
-                      hubInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-                    }}
-                  >
-                    Buscar en el catálogo
-                  </button>
-                </div>
+                <EmptyState
+                  icon={<Zap size={36} />}
+                  title="Sin habilidades instaladas"
+                  action={
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => {
+                        hubInputRef.current?.focus()
+                        hubInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+                      }}
+                    >
+                      Buscar en el catálogo
+                    </Button>
+                  }
+                />
               )
               : (
                 <ul className="cv-list" role="list">
                   {state.skills.map((s, i) => (
-                    <li key={s.package_id ?? s.skill_id ?? i}>
+                    <li key={s.package_id ?? s.skill_id ?? i} className="ds-list-item-enter" style={{ animationDelay: `${Math.min(i * 20, 200)}ms` }}>
                       <SkillRow
                         skill={s}
                         loadingDetails={loadingDetailsId === (s.package_id ?? s.skill_id ?? '')}
@@ -537,7 +555,7 @@ export default function SkillsView() {
                 paddingBottom: 'var(--sp-2)',
               }}
             >
-              <span aria-hidden="true" style={{ fontSize: 10 }}>▶</span>
+              <ChevronRight size={13} aria-hidden="true" />
               Enseñar una habilidad (avanzado)
             </summary>
 
@@ -584,7 +602,7 @@ export default function SkillsView() {
               {teachPhase === 'recording' && (
                 <div className="cv-form-stack">
                   <p className="teach-recording-label" role="status" aria-live="polite">
-                    ● Grabando la demostración…
+                    Grabando la demostración…
                   </p>
                   <div className="cv-form-actions">
                     <button
@@ -615,7 +633,7 @@ export default function SkillsView() {
               {teachPhase === 'paused' && (
                 <div className="cv-form-stack">
                   <p className="state-label" role="status" aria-live="polite">
-                    ⏸ Grabación en pausa.
+                    Grabación en pausa.
                   </p>
                   <div className="cv-form-actions">
                     <button
@@ -716,7 +734,7 @@ function SkillRow({ skill, loadingDetails, onView, onPromote, onUninstall }: Ski
           onClick={onUninstall}
           aria-label={`Desinstalar ${name}`}
         >
-          ✕
+          <X size={14} aria-hidden="true" />
         </button>
       </div>
     </div>

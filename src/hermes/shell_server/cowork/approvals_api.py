@@ -1,18 +1,19 @@
 """HITL approvals + owner MFA for the Lumen Cowork web UI (P4 elevation gate).
 
-  GET  /api/v1/approvals/pending          → [{proposal_id, kind, summary, target}]
-  POST /api/v1/approvals/{proposal_id}     body: {decision, totp, humanity?, riddle_answer?}
-  GET  /api/v1/mfa/status                  → {enrolled, riddle_set}
-  POST /api/v1/mfa/enroll                  body: {totp?}  → {otpauth_uri}
-  POST /api/v1/mfa/riddle                  body: {totp, question, answer}
+  GET  /api/v1/approvals/pending          → [{proposal_id, kind, summary, target, required_level}]
+  POST /api/v1/approvals/{proposal_id}     body: {decision, totp}
+  GET  /api/v1/mfa/status                  → {enrolled}
+  POST /api/v1/mfa/enroll                  body: {totp?}  → {otpauth_uri, secret}
 
 Elevation contract (the deterministic gate): an action the agent cannot run is NOT a
 dead end — it surfaces here as a pending proposal. The OWNER approves it. Approval
-requires owner MFA so the AGENT cannot self-approve its own elevation (it has no access
-to the TOTP secret — uid 999, sandboxed, no master.key, egress sealed). Delicacy tiers:
-  - normal   → TOTP
-  - delicate → TOTP + prove-humanity
-  - most delicate (policy/security/install changes) → TOTP + enrolled human riddle
+requires the owner's TOTP so the AGENT cannot self-approve its own elevation (no access
+to the TOTP secret — uid 999, sandboxed, no master.key, egress sealed).
+
+TOTP-only model (owner decision 2026-06-24): every action gates on the TOTP and nothing
+else. A browser-driving agent could read+solve any on-screen humanity/riddle challenge,
+so the only real factor is the secret it cannot reach. The owner's TOTP is forwarded to
+the daemon gate — the single MFA enforcement point for ALL surfaces (web + D-Bus).
 
 Approving requires MFA to be enrolled first (mandatory MFA). Denying never does —
 rejecting is always safe. The operator-token middleware still fronts every mutator.
@@ -31,7 +32,7 @@ from pydantic import BaseModel
 
 from hermes.capabilities.infrastructure.sqlite_approval_gate import ApprovalGateError
 from hermes.shell_server.security.mfa import MfaStore, ProtectionLevel
-from hermes.shell_server.security.mfa_tool_tier import MfaFactors, classify_level
+from hermes.shell_server.security.mfa_tool_tier import MfaFactors
 from hermes.tasks.control_plane.domain.ports import AgentUnavailable, AuthenticatedChannel
 
 logger = logging.getLogger("hermes.shell_server.cowork.approvals_api")
@@ -45,8 +46,6 @@ logger = logging.getLogger("hermes.shell_server.cowork.approvals_api")
 class ApprovalDecision(BaseModel):
     decision: Literal["once", "always", "deny"]
     totp: str | None = None
-    humanity: str | None = None
-    riddle_answer: str | None = None
 
 
 class EnrollBody(BaseModel):
@@ -75,8 +74,7 @@ def create_approvals_router(mfa: MfaStore | None = None) -> APIRouter:
     @router.get("/api/v1/mfa/status")
     async def mfa_status() -> dict:
         st = store.state()
-        return {"enrolled": st.enrolled, "riddle_set": st.riddle_question is not None,
-                "riddle_question": st.riddle_question}
+        return {"enrolled": st.enrolled}
 
     @router.post("/api/v1/mfa/enroll")
     async def mfa_enroll(body: EnrollBody) -> dict:
@@ -114,31 +112,18 @@ def create_approvals_router(mfa: MfaStore | None = None) -> APIRouter:
             except AgentUnavailable as exc:
                 raise _unavailable(proposal_id, exc) from exc
 
-        # APPROVE → VERIFY the owner's MFA factors HERE. The shell-server is the
-        # only component that holds the TOTP secret + riddle; the daemon/gate never
-        # see them. The required tier (TOTP / +humanity / +riddle) depends on the
-        # proposal's tool+risk. Previously this forwarded `mfa_factors` to the
-        # control-plane adapter, whose approve() does NOT accept that kwarg → 500,
-        # AND the factors were never actually verified. Now: verify, then forward
-        # ONLY the proposal_id to mint the token + re-enqueue.
+        # APPROVE → TOTP-only model (owner decision 2026-06-24). The shell-server holds
+        # the TOTP secret, so we pre-verify HERE for an immediate, friendly error; then we
+        # FORWARD the TOTP to the gate, the single MFA enforcement point for ALL surfaces
+        # (web + D-Bus — red-team 2026-06-19, finding 3). Both check the same code.
+        # The previous code forwarded NO factors → the gate verified with None → it always
+        # failed → the error crossed D-Bus as a generic fault and surfaced as
+        # "agente no disponible". MFA must be enrolled first; denying never needs MFA.
         if not store.is_enrolled():
             raise HTTPException(status_code=403, detail={"code": "mfa_not_enrolled",
                 "message": "Configura el MFA antes de aprobar acciones (obligatorio)."})
 
-        try:
-            pending = await request.app.state.control_plane.list_hitl_pending()
-        except AgentUnavailable as exc:
-            raise _unavailable(proposal_id, exc) from exc
-        row = next(
-            (r for r in pending if str(r.get("proposal_id")) == str(parsed_id)), {})
-        level = classify_level(str(row.get("risk", "")), str(row.get("tool_name", "")))
-
-        ok, reason = store.verify(
-            level=level,
-            totp=body.totp or "",
-            humanity=body.humanity,
-            riddle_answer=body.riddle_answer,
-        )
+        ok, reason = store.verify(level=ProtectionLevel.MFA, totp=body.totp or "")
         if not ok:
             logger.warning("hermes.cowork.approvals.mfa_denied proposal=%s reason=%s",
                            proposal_id, reason)
@@ -147,9 +132,9 @@ def create_approvals_router(mfa: MfaStore | None = None) -> APIRouter:
 
         try:
             await request.app.state.control_plane.approve(
-                channel=channel, proposal_id=parsed_id)
-            logger.info("hermes.cowork.approvals.approved proposal=%s tier=%s",
-                        proposal_id, level.value)
+                channel=channel, proposal_id=parsed_id,
+                mfa_factors=MfaFactors(totp=body.totp or ""))
+            logger.info("hermes.cowork.approvals.approved proposal=%s", proposal_id)
             return {"ok": True, "decision": body.decision}
         except ApprovalGateError as exc:
             gate_reason = getattr(exc, "reason", "mfa_denied")
@@ -168,9 +153,6 @@ def create_approvals_router(mfa: MfaStore | None = None) -> APIRouter:
 _MFA_REASON_MESSAGES: dict[str, str] = {
     "mfa_not_enrolled": "No hay MFA configurado. Configúralo antes de aprobar acciones.",
     "invalid_totp": "Código TOTP incorrecto o expirado.",
-    "humanity_required": "Esta acción requiere prueba de humanidad (math challenge).",
-    "riddle_not_enrolled": "Esta acción requiere un acertijo personalizado. Configúralo en Seguridad.",
-    "invalid_riddle": "Respuesta del acertijo incorrecta.",
     "mfa_required": "Se requiere MFA para aprobar esta acción.",
 }
 
@@ -213,8 +195,7 @@ def _to_frontend(row: dict, store: MfaStore) -> dict:
         # C — chat anchor: the REAL chat conversation_id (None for pre-migration
         # rows or non-chat cycles like scheduled/autonomous tasks).
         "conversation_id": row.get("conversation_id") or None,
-        # D — tier + enrollment state so the card can ask only what's required.
-        "required_level": classify_level(risk, tool_name).value,
+        # D — TOTP-only model: every action gates on TOTP (no humanity/riddle tier).
+        "required_level": ProtectionLevel.MFA.value,
         "mfa_enrolled": mfa_state.enrolled,
-        "riddle_set": mfa_state.riddle_question is not None,
     }

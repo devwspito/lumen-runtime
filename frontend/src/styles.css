@@ -1021,6 +1021,26 @@ details[open] .tool-summary-group__chevron { transform: rotate(90deg); }
   font-family: var(--font-mono);
 }
 
+.delegation-step--done {
+  opacity: 0.75;
+}
+
+.delegation-step--active {
+  border-left-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+}
+
+.delegation-step__live {
+  font-size: var(--text-caption);
+  color: var(--ink3);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+  transition: opacity 300ms ease;
+}
+
 /* ── Chat status bar ─────────────────────────────────────────────────────── */
 
 .chat-status {
@@ -3114,6 +3134,22 @@ details[open] .tool-summary-group__chevron { transform: rotate(90deg); }
   min-height: 48px;
 }
 
+.seg-pol-group__header--clickable {
+  cursor: pointer;
+  user-select: none;
+  border-radius: 0;
+  transition: background var(--ease-hover);
+}
+
+.seg-pol-group__header--clickable:hover {
+  background: var(--surface2);
+}
+
+.seg-pol-group__header--clickable:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
 /* Expand/collapse button (▸) */
 .seg-pol-group__expand {
   display: flex;
@@ -4538,5 +4574,483 @@ details[open] .tool-summary-group__chevron { transform: rotate(90deg); }
   color: var(--ink4);
   line-height: 1.6;
   margin: 0;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Design system primitives (C0)
+   Used by ArchivosView, MemoriaView, and all C3 view upgrades.
+   Never conflicts with existing .cv-*, .office-*, .seg-* namespaces.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── PageHeader ──────────────────────────────────────────────────────────── */
+
+.ds-page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  flex-wrap: wrap;
+}
+
+.ds-page-header__left { flex: 1; min-width: 0; }
+
+.ds-page-header__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-shrink: 0;
+  padding-top: 2px;
+}
+
+/* ── EmptyState ──────────────────────────────────────────────────────────── */
+
+.ds-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-10) var(--sp-6);
+  text-align: center;
+}
+
+.ds-empty-state__icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink4);
+  opacity: 0.4;
+}
+
+.ds-empty-state__title {
+  font-size: var(--text-body);
+  font-weight: 500;
+  color: var(--ink3);
+  max-width: 300px;
+  line-height: 1.55;
+  margin: 0;
+}
+
+.ds-empty-state__desc {
+  font-size: var(--text-label);
+  color: var(--ink4);
+  max-width: 280px;
+  line-height: 1.55;
+  margin: 0;
+}
+
+.ds-empty-state__action { margin-top: var(--sp-1); }
+
+/* ── Card ────────────────────────────────────────────────────────────────── */
+
+.ds-card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.ds-card--hoverable:hover {
+  border-color: var(--line2);
+  box-shadow: var(--shadow-raised);
+}
+
+/* ── ListRow ─────────────────────────────────────────────────────────────── */
+
+.ds-list-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  transition: border-color 150ms ease, background 150ms ease;
+}
+
+.ds-list-row--clickable {
+  cursor: pointer;
+}
+
+.ds-list-row--clickable:hover {
+  background: var(--card2);
+  border-color: var(--line2);
+}
+
+.ds-list-row--clickable:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.ds-list-row__icon {
+  flex-shrink: 0;
+  color: var(--ink4);
+  display: flex;
+  align-items: center;
+}
+
+.ds-list-row__body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ds-list-row__title {
+  font-size: var(--text-body);
+  font-weight: 500;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ds-list-row__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  font-size: var(--text-caption);
+  color: var(--ink4);
+}
+
+.ds-list-row__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 150ms ease;
+}
+
+.ds-list-row:hover .ds-list-row__actions,
+.ds-list-row:focus-within .ds-list-row__actions {
+  opacity: 1;
+}
+
+/* ── Drawer slide-in animation ───────────────────────────────────────────── */
+
+.ds-drawer-backdrop {
+  animation: ds-backdrop-in 180ms ease forwards;
+}
+
+.ds-drawer {
+  animation: ds-drawer-in 220ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes ds-backdrop-in {
+  from { background: rgba(0,0,0,0); }
+  to   { background: rgba(0,0,0,.4); }
+}
+
+@keyframes ds-drawer-in {
+  from { transform: translateX(100%); opacity: 0.6; }
+  to   { transform: translateX(0);    opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ds-drawer-backdrop { animation: none; }
+  .ds-drawer          { animation: none; }
+}
+
+/* ── Archivos view — Finder-style file browser ───────────────────────────── */
+
+/* Breadcrumb bar */
+.arch-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-wrap: wrap;
+  padding: var(--sp-2) 0;
+}
+
+.arch-breadcrumb__segment {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.arch-breadcrumb__btn {
+  background: none;
+  border: none;
+  padding: 3px var(--sp-2);
+  border-radius: var(--r-sm);
+  font-size: var(--text-label);
+  font-family: var(--font-ui);
+  color: var(--accent);
+  cursor: pointer;
+  transition: background var(--ease-hover);
+}
+
+.arch-breadcrumb__btn:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+
+.arch-breadcrumb__btn--current {
+  color: var(--ink2);
+  font-weight: 600;
+  cursor: default;
+  pointer-events: none;
+}
+
+.arch-breadcrumb__btn--current:hover { background: none; }
+
+.arch-breadcrumb__sep {
+  font-size: var(--text-caption);
+  color: var(--ink4);
+  padding: 0 1px;
+  user-select: none;
+}
+
+/* Toolbar row: breadcrumb + view toggle */
+.arch-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-3);
+}
+
+/* View toggle (list / grid) */
+.arch-view-toggle {
+  display: flex;
+  background: var(--surface2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: 2px;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.arch-view-toggle__btn {
+  width: 28px;
+  height: 26px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ink4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background var(--ease-hover), color var(--ease-hover);
+}
+
+.arch-view-toggle__btn:hover { color: var(--ink2); }
+.arch-view-toggle__btn.is-active { background: var(--card); color: var(--ink); box-shadow: var(--shadow-raised); }
+
+/* File / folder list entries */
+.arch-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.arch-entry {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-sm);
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+  user-select: none;
+}
+
+.arch-entry:hover {
+  background: var(--card);
+  border-color: var(--line);
+}
+
+.arch-entry:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.arch-entry__icon {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  color: var(--ink4);
+}
+
+.arch-entry__icon--folder { color: #F5B945; }  /* amber for folders */
+.arch-entry__icon--code   { color: #5BC8E0; }  /* teal for code files */
+.arch-entry__icon--image  { color: #34D399; }  /* green for images */
+
+.arch-entry__name {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-body);
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.arch-entry__size {
+  font-size: var(--text-caption);
+  color: var(--ink4);
+  font-family: var(--font-mono);
+  flex-shrink: 0;
+  min-width: 64px;
+  text-align: right;
+}
+
+.arch-entry__date {
+  font-size: var(--text-caption);
+  color: var(--ink4);
+  flex-shrink: 0;
+  min-width: 90px;
+  text-align: right;
+}
+
+/* Grid view */
+.arch-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: var(--sp-2);
+  list-style: none;
+}
+
+.arch-grid-entry {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-2);
+  border-radius: var(--r-sm);
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+  user-select: none;
+  text-align: center;
+}
+
+.arch-grid-entry:hover {
+  background: var(--card);
+  border-color: var(--line);
+}
+
+.arch-grid-entry:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.arch-grid-entry__name {
+  font-size: var(--text-caption);
+  color: var(--ink);
+  word-break: break-word;
+  line-height: 1.4;
+  max-width: 100%;
+}
+
+/* Drawer file preview */
+.arch-file-meta {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.arch-file-meta__row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.arch-file-meta__label {
+  font-size: var(--text-label);
+  font-weight: 600;
+  color: var(--ink3);
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  font-size: var(--text-micro);
+}
+
+.arch-file-meta__value {
+  font-size: var(--text-body);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  word-break: break-all;
+}
+
+.arch-file-preview {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: var(--sp-3);
+  font-family: var(--font-mono);
+  font-size: var(--text-caption);
+  color: var(--ink3);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 280px;
+  overflow-y: auto;
+  line-height: 1.6;
+  margin-top: var(--sp-3);
+}
+
+/* ── Memory entry draw full content ──────────────────────────────────────── */
+
+.mem-drawer-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.mem-drawer-target {
+  font-size: var(--text-caption);
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--ink4);
+}
+
+.mem-drawer-body {
+  font-size: var(--text-body);
+  color: var(--ink2);
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+  flex: 1;
+}
+
+.mem-drawer-actions {
+  display: flex;
+  gap: var(--sp-2);
+  padding-top: var(--sp-4);
+  border-top: 1px solid var(--line);
+  flex-shrink: 0;
+}
+
+/* Memory list item — clickable upgrade */
+.memory-item--clickable {
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.memory-item--clickable:hover {
+  border-color: var(--line2);
+  background: var(--card2);
+}
+
+.memory-item--clickable:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* ── List enter animation for new items ──────────────────────────────────── */
+
+@keyframes ds-item-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.ds-list-item-enter {
+  animation: ds-item-in 200ms ease forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ds-list-item-enter { animation: none; }
 }
 

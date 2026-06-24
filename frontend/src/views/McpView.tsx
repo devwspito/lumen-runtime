@@ -1,11 +1,15 @@
 import { useEffect, useReducer, useRef, useState } from 'react'
 import { sileo } from 'sileo'
+import { X, Terminal, ChevronDown, ChevronRight, Search, Wrench } from 'lucide-react'
 import { listMcpServers, addMcpServer, removeMcpServer, searchMcpRegistry, scanInstall, recordSecurityDecision, ApiError } from '../api/client'
 import type { McpServer, McpRegistryEntry, InstallScanResponse } from '../api/types'
 import { useConfirmDialog } from '../components/ConfirmDialog'
 import Badge from '../components/Badge'
 import InstallScanModal from '../components/InstallScanModal'
 import type { MfaFactors } from '../components/MfaModal'
+import { PageHeader } from '../components/ui/PageHeader'
+import { EmptyState } from '../components/ui/EmptyState'
+import { Button } from '../components/ui/Button'
 
 // Curated catalog — mirrors mcp.js MCP_CATALOG (npx-only verified servers).
 const MCP_CATALOG: McpRegistryEntry[] = [
@@ -174,8 +178,9 @@ export default function McpView() {
 
     try {
       const scan = await scanInstall('mcp', identifier)
-      if (scan.requires_owner_approval) {
-        // Hold the install until the owner approves via the scan modal
+      // WARN and FAIL always route through the approval modal so the owner can
+      // review and confirm with TOTP — no silent toast degradation.
+      if (scan.requires_owner_approval || scan.verdict === 'WARN' || scan.verdict === 'FAIL') {
         setPendingInstall({ scan, entry, collectedEnv, onDone })
         return
       }
@@ -201,7 +206,6 @@ export default function McpView() {
         verdict: scan.verdict,
         risks_json: JSON.stringify(scan.risks),
         totp: factors.totp,
-        riddle_answer: factors.riddle_answer ?? null,
       })
       await doAddMcpServer(entry, collectedEnv, onDone)
     } catch (e) {
@@ -240,29 +244,39 @@ export default function McpView() {
           }}
         />
       )}
-      <header className="view-header">
-        <h1 className="view-title">Herramientas externas</h1>
-        <p className="view-subtitle">Conecta conjuntos de herramientas externos para ampliar las capacidades del agente.</p>
-      </header>
+      <PageHeader
+        title="Herramientas externas"
+        subtitle="Conecta conjuntos de herramientas externos para ampliar las capacidades del agente."
+      />
 
       <div className="view-body cv-view-body">
         {/* ── Active servers ──────────────────────────────────────────────── */}
         <section className="cv-section" aria-label="Herramientas activas">
           <h2 className="cv-section-label">Activas</h2>
-          {state.status === 'loading' && <div className="cv-skeleton" aria-busy="true" />}
+          {state.status === 'loading' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }} aria-busy="true">
+              {[...Array(2)].map((_, i) => <div key={i} className="cv-skeleton" style={{ height: 48 }} />)}
+            </div>
+          )}
           {state.status === 'error' && (
             <div role="alert">
               <p className="state-error">{state.message}</p>
-              <button className="cv-btn cv-btn--secondary cv-btn--sm" onClick={load} style={{ marginTop: 8 }}>Reintentar</button>
+              <Button variant="secondary" size="sm" onClick={load} style={{ marginTop: 8 }}>Reintentar</Button>
             </div>
           )}
           {state.status === 'success' && (
             state.servers.length === 0
-              ? <p className="cv-empty">Sin herramientas conectadas. Añade una.</p>
+              ? (
+                <EmptyState
+                  icon={<Wrench size={36} />}
+                  title="Sin herramientas conectadas"
+                  description="Añade una del catálogo sugerido o busca en el registro."
+                />
+              )
               : (
                 <ul className="cv-list" role="list">
                   {state.servers.map(s => (
-                    <li key={s.server_id ?? s.id}>
+                    <li key={s.server_id ?? s.id} className="ds-list-item-enter">
                       <McpServerRow
                         server={s}
                         onRemove={async () => {
@@ -293,16 +307,17 @@ export default function McpView() {
         {/* ── Suggested catalog ───────────────────────────────────────────── */}
         <section className="cv-section" aria-label="Herramientas sugeridas">
           <h2 className="cv-section-label">Sugeridas</h2>
-          <div className="mcp-cards-grid">
+          <ul className="cv-list" role="list">
             {MCP_CATALOG.map(entry => (
-              <CatalogCard
-                key={entry.server_id}
-                entry={entry}
-                installedIds={installedIds}
-                onInstall={installEntry}
-              />
+              <li key={entry.server_id} className="ds-list-item-enter">
+                <CatalogCard
+                  entry={entry}
+                  installedIds={installedIds}
+                  onInstall={installEntry}
+                />
+              </li>
             ))}
-          </div>
+          </ul>
         </section>
 
         {/* ── Official registry search ─────────────────────────────────── */}
@@ -310,46 +325,56 @@ export default function McpView() {
           <h2 className="cv-section-label">Buscar más herramientas</h2>
           <div className="cv-search-row">
             <label className="sr-only" htmlFor="mcp-registry-input">Buscar herramientas externas</label>
-            <input
-              id="mcp-registry-input"
-              ref={regInputRef}
-              className="cv-input"
-              type="search"
-              placeholder="Buscar (github, slack, postgres…)"
-              autoComplete="off"
-              onKeyDown={e => { if (e.key === 'Enter') searchRegistry() }}
-            />
-            <button
-              className="cv-btn cv-btn--secondary cv-btn--sm"
+            <div style={{ position: 'relative', flex: 1 }}>
+              <Search size={14} aria-hidden="true" style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--ink4)', pointerEvents: 'none' }} />
+              <input
+                id="mcp-registry-input"
+                ref={regInputRef}
+                className="cv-input"
+                type="search"
+                placeholder="github, slack, postgres…"
+                autoComplete="off"
+                onKeyDown={e => { if (e.key === 'Enter') searchRegistry() }}
+                style={{ paddingLeft: 30 }}
+              />
+            </div>
+            <Button
+              variant="secondary"
+              size="sm"
               onClick={searchRegistry}
-              disabled={registryState.status === 'loading'}
+              loading={registryState.status === 'loading'}
             >
-              {registryState.status === 'loading' ? 'Buscando…' : 'Buscar'}
-            </button>
+              Buscar
+            </Button>
           </div>
           <p className="cv-hint">Conectado al registro oficial de herramientas externas</p>
           {registryState.status === 'error' && (
             <div role="alert">
               <p className="state-error">{registryState.message}</p>
-              <button className="cv-btn cv-btn--secondary cv-btn--sm" onClick={searchRegistry} style={{ marginTop: 8 }}>
+              <Button variant="secondary" size="sm" onClick={searchRegistry} style={{ marginTop: 8 }}>
                 Reintentar
-              </button>
+              </Button>
             </div>
           )}
           {registryState.status === 'success' && registryState.results.length > 0 && (
-            <div className="mcp-cards-grid">
+            <ul className="cv-list" role="list">
               {registryState.results.map((entry, i) => (
-                <CatalogCard
-                  key={`${entry.server_id ?? entry.id ?? entry.name ?? i}`}
-                  entry={entry}
-                  installedIds={installedIds}
-                  onInstall={installEntry}
-                />
+                <li key={`${entry.server_id ?? entry.id ?? entry.name ?? i}`} className="ds-list-item-enter">
+                  <CatalogCard
+                    entry={entry}
+                    installedIds={installedIds}
+                    onInstall={installEntry}
+                  />
+                </li>
               ))}
-            </div>
+            </ul>
           )}
           {registryState.status === 'success' && registryState.results.length === 0 && (
-            <p className="cv-empty">Sin resultados.</p>
+            <EmptyState
+              icon={<Search size={32} />}
+              title="Sin resultados"
+              description="Prueba con otro término de búsqueda."
+            />
           )}
         </section>
 
@@ -371,6 +396,7 @@ interface McpServerRowProps {
 }
 
 function McpServerRow({ server, onRemove }: McpServerRowProps) {
+  const [showCmd, setShowCmd] = useState(false)
   const argv = Array.isArray(server.argv) ? server.argv.join(' ') : (server.argv ?? '')
   const healthy = String(server.health ?? '').toLowerCase() === 'healthy'
   const hasHealth = server.health != null && server.health !== ''
@@ -378,25 +404,41 @@ function McpServerRow({ server, onRemove }: McpServerRowProps) {
 
   return (
     <div className="mcp-row">
+      <span style={{ color: 'var(--ink4)', flexShrink: 0, display: 'flex' }} aria-hidden="true">
+        <Terminal size={15} />
+      </span>
       <div className="mcp-row__info">
         <div className="mcp-row__name">
           {server.label ?? server.server_id ?? 'Herramienta externa'}
           {hasHealth && (
             <Badge variant={healthy ? 'ok' : 'danger'}>
-              {healthy ? '●' : '○'} {tools || String(server.health)}
+              {tools || String(server.health)}
             </Badge>
           )}
           {!hasHealth && tools && <Badge variant="neutral">{tools}</Badge>}
         </div>
-        {/* Show the launch command under a technical details toggle */}
         {argv && (
-          <details style={{ marginTop: 2 }}>
-            <summary className="mcp-row__cmd" style={{ cursor: 'pointer', listStyle: 'none', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-              <span style={{ fontSize: 10, opacity: 0.5 }}>▶</span>
-              <span style={{ fontSize: 'var(--text-caption)', opacity: 0.6 }}>Ver detalles técnicos</span>
-            </summary>
-            <div className="mcp-row__cmd" style={{ marginTop: 4 }}>{argv}</div>
-          </details>
+          <button
+            type="button"
+            className="mcp-row__cmd"
+            style={{
+              cursor: 'pointer', background: 'none', border: 'none', padding: '2px 0',
+              display: 'inline-flex', alignItems: 'center', gap: 4, color: 'var(--ink4)',
+              fontFamily: 'inherit',
+            }}
+            onClick={() => setShowCmd(v => !v)}
+            aria-expanded={showCmd}
+          >
+            {showCmd
+              ? <ChevronDown size={11} aria-hidden="true" />
+              : <ChevronRight size={11} aria-hidden="true" />}
+            <span style={{ fontSize: 'var(--text-caption)' }}>Detalles técnicos</span>
+          </button>
+        )}
+        {showCmd && argv && (
+          <div className="mcp-row__cmd" style={{ marginTop: 2, paddingLeft: 16, userSelect: 'all' }}>
+            {argv}
+          </div>
         )}
       </div>
       <button
@@ -404,7 +446,7 @@ function McpServerRow({ server, onRemove }: McpServerRowProps) {
         onClick={onRemove}
         aria-label={`Eliminar ${server.label ?? 'herramienta externa'}`}
       >
-        ✕
+        <X size={14} aria-hidden="true" />
       </button>
     </div>
   )
@@ -427,7 +469,6 @@ function CatalogCard({ entry, installedIds, onInstall }: CatalogCardProps) {
   const runner = getRunner(entry.argv)
   const nonNpx = runner !== '' && runner !== 'npx'
   const unsupported = entry.installable === false || nonNpx
-  const argv = Array.isArray(entry.argv) ? entry.argv.join(' ') : (entry.argv ?? '')
   const envSchema = parseEnvSchema(entry)
   const needsEnv = envSchema.length > 0
   const repo = entry.repository ?? entry.homepage ?? entry.website ?? ''
@@ -455,37 +496,57 @@ function CatalogCard({ entry, installedIds, onInstall }: CatalogCardProps) {
   }
 
   return (
-    <div className="mcp-card">
-      <div className="mcp-card__info">
-        <div className="mcp-card__head">
-          <span className="mcp-card__name">{entry.label ?? entry.name ?? id}</span>
-          {entry.tag && <Badge variant="neutral">{entry.tag}</Badge>}
-          {needsEnv && <Badge variant="warn">Requiere tu clave API</Badge>}
+    <div className="mcp-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 'var(--sp-2)' }}>
+      {/* Main row */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--sp-3)' }}>
+        <span style={{ color: 'var(--ink4)', flexShrink: 0, display: 'flex' }} aria-hidden="true">
+          <Terminal size={15} />
+        </span>
+        <div className="mcp-row__info">
+          <div className="mcp-row__name">
+            {entry.label ?? entry.name ?? id}
+            {entry.tag && <Badge variant="neutral">{entry.tag}</Badge>}
+            {needsEnv && <Badge variant="warn">Requiere clave API</Badge>}
+          </div>
+          {entry.description && (
+            <div className="mcp-row__cmd" style={{ color: 'var(--ink3)', fontFamily: 'var(--font-ui)' }}>
+              {entry.description}
+            </div>
+          )}
+          {unsupported && (entry.unsupported_reason || nonNpx) && (
+            <div className="mcp-row__cmd" style={{ color: 'var(--warn)' }}>
+              {entry.unsupported_reason ?? `Solo se admiten herramientas npx por ahora (esta usa ${runner}).`}
+            </div>
+          )}
         </div>
-        {entry.description && (
-          <div className="mcp-card__desc" title={entry.description}>{entry.description}</div>
-        )}
-        {/* Technical details collapsed by default */}
-        {argv && (
-          <details style={{ marginTop: 4 }}>
-            <summary style={{ cursor: 'pointer', listStyle: 'none', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-              <span style={{ fontSize: 10, opacity: 0.5 }}>▶</span>
-              <span className="mcp-card__cmd" style={{ opacity: 0.6 }}>Ver detalles técnicos</span>
-            </summary>
-            <div className="mcp-card__cmd" style={{ marginTop: 2 }}>{argv}</div>
-          </details>
-        )}
-        {unsupported && entry.unsupported_reason && (
-          <div className="mcp-card__cmd">{entry.unsupported_reason}</div>
-        )}
-        {unsupported && nonNpx && !entry.unsupported_reason && (
-          <div className="mcp-card__cmd">Solo se admiten herramientas npx por ahora (esta usa {runner}).</div>
-        )}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--sp-2)', flexShrink: 0 }}>
+          {repo && (
+            <a
+              href={repo}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="cv-link cv-btn--sm"
+            >
+              Docs
+            </a>
+          )}
+          {!showEnvForm && (
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={already || unsupported}
+              loading={installing}
+              onClick={handleInstallClick}
+            >
+              {already ? 'Añadida' : unsupported ? 'No disponible' : 'Añadir'}
+            </Button>
+          )}
+        </div>
       </div>
 
-      {/* Inline key-entry form — shown when the entry requires configuration */}
+      {/* Inline key-entry form */}
       {showEnvForm && (
-        <div className="cv-form-stack" style={{ marginTop: 'var(--sp-3)' }}>
+        <div className="cv-form-stack" style={{ paddingLeft: 27 }}>
           {envSchema.map(field => (
             <div key={field.key}>
               <label className="cv-label" htmlFor={`mcp-env-${id}-${field.key}`}>
@@ -502,41 +563,20 @@ function CatalogCard({ entry, installedIds, onInstall }: CatalogCardProps) {
             </div>
           ))}
           <div className="cv-form-actions">
-            <button className="cv-btn cv-btn--primary cv-btn--sm" type="button" onClick={handleEnvSubmit}>
+            <Button variant="primary" size="sm" type="button" onClick={handleEnvSubmit}>
               Añadir
-            </button>
-            <button
-              className="cv-btn cv-btn--ghost cv-btn--sm"
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
               type="button"
               onClick={() => { setShowEnvForm(false); setEnvValues({}) }}
             >
               Cancelar
-            </button>
+            </Button>
           </div>
         </div>
       )}
-
-      <div className="mcp-card__actions">
-        {repo && (
-          <a
-            href={repo}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="cv-link cv-btn--sm"
-          >
-            Docs
-          </a>
-        )}
-        {!showEnvForm && (
-          <button
-            className="cv-btn cv-btn--secondary cv-btn--sm"
-            disabled={already || unsupported || installing}
-            onClick={handleInstallClick}
-          >
-            {already ? 'Añadida' : unsupported ? 'No disponible' : installing ? 'Añadiendo…' : 'Añadir'}
-          </button>
-        )}
-      </div>
     </div>
   )
 }
