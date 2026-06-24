@@ -17,6 +17,16 @@ import { EmptyState } from '../components/ui/EmptyState'
 import { PageHeader } from '../components/ui/PageHeader'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
+import {
+  AnimatePresence,
+  AnimatedListItem,
+  FadeIn,
+  Stagger,
+  StaggerItem,
+  HoverRow,
+  motion,
+  TWEEN,
+} from '../components/ui/motion'
 
 // ── State machine ─────────────────────────────────────────────────────────────
 
@@ -63,18 +73,17 @@ function MemoryRow({ item, index, onClick }: MemoryRowProps) {
   const time = formatDate(item.created_at)
 
   return (
-    <li
-      className="memory-item memory-item--clickable ds-list-item-enter"
+    <HoverRow
+      className="memory-item memory-item--clickable"
       role="button"
       tabIndex={0}
       onClick={onClick}
       onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick() } }}
       aria-label={`Entrada de memoria ${index + 1}${item.target ? ` — ${item.target}` : ''}`}
-      style={{ animationDelay: `${Math.min(index * 30, 300)}ms` }}
     >
       <div className="memory-item__content">{content}</div>
       {time && <div className="memory-item__time">{time}</div>}
-    </li>
+    </HoverRow>
   )
 }
 
@@ -153,6 +162,10 @@ export default function MemoriaView() {
   const isSuccess = state.status === 'success'
   const activeQuery = isSuccess ? state.query : ''
 
+  // The list key changes when the query changes so AnimatePresence fires a
+  // cross-fade between the old and new result sets.
+  const listKey = isSuccess ? `q:${state.query}` : '__loading__'
+
   return (
     <>
       <PageHeader
@@ -161,95 +174,121 @@ export default function MemoriaView() {
       />
 
       <div className="view-body cv-view-body">
-        {/* Search */}
-        <section className="cv-section" aria-label="Buscar en memoria">
-          <div className="cv-search-row">
-            <label className="sr-only" htmlFor="memory-search">Buscar en memoria</label>
-            <div style={{ position: 'relative', flex: 1 }}>
-              <Search
-                size={14}
-                aria-hidden="true"
-                style={{
-                  position: 'absolute', left: 10, top: '50%',
-                  transform: 'translateY(-50%)', color: 'var(--ink4)',
-                  pointerEvents: 'none',
-                }}
-              />
-              <input
-                id="memory-search"
-                ref={inputRef}
-                className="cv-input"
-                type="search"
-                placeholder="Buscar en memoria…"
-                autoComplete="off"
-                value={searchInput}
-                onChange={e => setSearchInput(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter') handleSearch() }}
-                style={{ paddingLeft: 30 }}
-              />
-            </div>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={handleSearch}
-              loading={state.status === 'loading'}
-            >
-              Buscar
-            </Button>
-          </div>
-        </section>
+        <Stagger style={{ display: 'flex', flexDirection: 'column', gap: 'var(--sp-8)' }}>
 
-        {/* Results */}
-        <section className="cv-section" aria-label="Entradas de memoria">
-          <h2 className="cv-section-label">
-            {activeQuery ? `Resultados para "${activeQuery}"` : 'Entradas recientes'}
-          </h2>
+          {/* Search */}
+          <StaggerItem>
+            <section className="cv-section" aria-label="Buscar en memoria">
+              <div className="cv-search-row">
+                <label className="sr-only" htmlFor="memory-search">Buscar en memoria</label>
+                <div style={{ position: 'relative', flex: 1 }}>
+                  <Search
+                    size={14}
+                    aria-hidden="true"
+                    style={{
+                      position: 'absolute', left: 10, top: '50%',
+                      transform: 'translateY(-50%)', color: 'var(--ink4)',
+                      pointerEvents: 'none',
+                    }}
+                  />
+                  <input
+                    id="memory-search"
+                    ref={inputRef}
+                    className="cv-input"
+                    type="search"
+                    placeholder="Buscar en memoria…"
+                    autoComplete="off"
+                    value={searchInput}
+                    onChange={e => setSearchInput(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') handleSearch() }}
+                    style={{ paddingLeft: 30 }}
+                  />
+                </div>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={handleSearch}
+                  loading={state.status === 'loading'}
+                >
+                  Buscar
+                </Button>
+              </div>
+            </section>
+          </StaggerItem>
 
-          {state.status === 'loading' && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }} aria-busy="true">
-              {[...Array(4)].map((_, i) => (
-                <div key={i} className="cv-skeleton" style={{ height: 52 }} />
-              ))}
-            </div>
-          )}
+          {/* Results */}
+          <StaggerItem>
+            <section className="cv-section" aria-label="Entradas de memoria">
+              <h2 className="cv-section-label">
+                {activeQuery ? `Resultados para "${activeQuery}"` : 'Entradas recientes'}
+              </h2>
 
-          {state.status === 'error' && (
-            <div role="alert">
-              <p className="state-error">{state.message}</p>
-              <Button variant="secondary" size="sm" onClick={handleRetry} style={{ marginTop: 8 }}>
-                Reintentar
-              </Button>
-            </div>
-          )}
+              {state.status === 'loading' && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }} aria-busy="true">
+                  {[...Array(4)].map((_, i) => (
+                    <div key={i} className="cv-skeleton" style={{ height: 52 }} />
+                  ))}
+                </div>
+              )}
 
-          {isSuccess && state.items.length === 0 && (
-            <EmptyState
-              icon={<Brain size={40} />}
-              title={activeQuery
-                ? `Sin resultados para "${activeQuery}"`
-                : 'Aún no hay recuerdos'}
-              description={activeQuery
-                ? undefined
-                : 'Lumen irá guardando lo importante de tus conversaciones automáticamente.'}
-            />
-          )}
+              {state.status === 'error' && (
+                <FadeIn>
+                  <div role="alert">
+                    <p className="state-error">{state.message}</p>
+                    <Button variant="secondary" size="sm" onClick={handleRetry} style={{ marginTop: 8 }}>
+                      Reintentar
+                    </Button>
+                  </div>
+                </FadeIn>
+              )}
 
-          {isSuccess && state.items.length > 0 && (
-            <ul className="cv-list memory-list" role="list">
-              {state.items.map((item, i) => (
-                <MemoryRow
-                  key={item.id ?? i}
-                  item={item}
-                  index={i}
-                  onClick={() => void openDrawer(item)}
-                />
-              ))}
-            </ul>
-          )}
-        </section>
+              {/* AnimatePresence mode="wait" cross-fades between search result sets */}
+              <AnimatePresence mode="wait">
+                {isSuccess && (
+                  <motion.div
+                    key={listKey}
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    transition={TWEEN}
+                  >
+                    {state.items.length === 0 && (
+                      <EmptyState
+                        icon={<Brain size={40} />}
+                        title={activeQuery
+                          ? `Sin resultados para "${activeQuery}"`
+                          : 'Aún no hay recuerdos'}
+                        description={activeQuery
+                          ? undefined
+                          : 'Lumen irá guardando lo importante de tus conversaciones automáticamente.'}
+                      />
+                    )}
+
+                    {state.items.length > 0 && (
+                      <ul className="cv-list memory-list" role="list">
+                        <AnimatePresence initial={false}>
+                          {state.items.map((item, i) => (
+                            <AnimatedListItem key={item.id ?? i}>
+                              <MemoryRow
+                                item={item}
+                                index={i}
+                                onClick={() => void openDrawer(item)}
+                              />
+                            </AnimatedListItem>
+                          ))}
+                        </AnimatePresence>
+                      </ul>
+                    )}
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </section>
+          </StaggerItem>
+
+        </Stagger>
       </div>
 
-      {/* Full-content drawer */}
+      {/* Full-content drawer (Drawer uses AnimatedDrawer internally) */}
       <Drawer
         open={drawer.open}
         title={drawer.open && drawer.item.target ? drawer.item.target : 'Detalle'}

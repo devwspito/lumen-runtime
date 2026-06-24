@@ -7,6 +7,16 @@ import { useConfirmDialog } from '../components/ConfirmDialog'
 import { PageHeader } from '../components/ui/PageHeader'
 import { Button } from '../components/ui/Button'
 import { EmptyState } from '../components/ui/EmptyState'
+import { Drawer } from '../components/ui/Drawer'
+import {
+  AnimatePresence,
+  AnimatedListItem,
+  Stagger,
+  StaggerItem,
+  HoverRow,
+  motion,
+  SPRING,
+} from '../components/ui/motion'
 
 // ── Cron parsing (mirrors tasks-view.js exactly) ──────────────────────────────
 
@@ -281,121 +291,133 @@ export default function CalendarView() {
       />
 
       <div className="view-body cv-view-body">
-        {/* ── Scheduled tasks section ─────────────────────────────────────── */}
-        <section className="cv-section" aria-label="Tareas programadas">
-          <div className="cv-section-head">
-            <h2 className="cv-section-label">Programadas</h2>
-            <div className="cv-section-head__right">
-              <div className="seg-toggle" role="tablist" aria-label="Vista">
-                <button
-                  className={`seg-toggle__btn${viewMode === 'board' ? ' is-active' : ''}`}
-                  role="tab"
-                  aria-selected={viewMode === 'board'}
-                  onClick={() => setViewMode('board')}
-                >
-                  Calendario
-                </button>
-                <button
-                  className={`seg-toggle__btn${viewMode === 'list' ? ' is-active' : ''}`}
-                  role="tab"
-                  aria-selected={viewMode === 'list'}
-                  onClick={() => setViewMode('list')}
-                >
-                  Lista
-                </button>
+        <Stagger style={{ display: 'flex', flexDirection: 'column', gap: 'var(--sp-8)' }}>
+
+          {/* ── Scheduled tasks section ─────────────────────────────────────── */}
+          <StaggerItem>
+            <section className="cv-section" aria-label="Tareas programadas">
+              <div className="cv-section-head">
+                <h2 className="cv-section-label">Programadas</h2>
+                <div className="cv-section-head__right">
+                  <div className="seg-toggle" role="tablist" aria-label="Vista">
+                    <button
+                      className={`seg-toggle__btn${viewMode === 'board' ? ' is-active' : ''}`}
+                      role="tab"
+                      aria-selected={viewMode === 'board'}
+                      onClick={() => setViewMode('board')}
+                    >
+                      Calendario
+                    </button>
+                    <button
+                      className={`seg-toggle__btn${viewMode === 'list' ? ' is-active' : ''}`}
+                      role="tab"
+                      aria-selected={viewMode === 'list'}
+                      onClick={() => setViewMode('list')}
+                    >
+                      Lista
+                    </button>
+                  </div>
+                </div>
               </div>
-            </div>
-          </div>
 
-          {state.loading && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }} aria-busy="true">
-              {[...Array(3)].map((_, i) => <div key={i} className="cv-skeleton" style={{ height: 48 }} />)}
-            </div>
-          )}
-          {state.error && (
-            <div role="alert">
-              <p className="state-error">{state.error}</p>
-              <Button variant="secondary" size="sm" onClick={loadAll} style={{ marginTop: 8 }}>Reintentar</Button>
-            </div>
-          )}
+              {state.loading && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }} aria-busy="true">
+                  {[...Array(3)].map((_, i) => <div key={i} className="cv-skeleton" style={{ height: 48 }} />)}
+                </div>
+              )}
+              {state.error && (
+                <div role="alert">
+                  <p className="state-error">{state.error}</p>
+                  <Button variant="secondary" size="sm" onClick={loadAll} style={{ marginTop: 8 }}>Reintentar</Button>
+                </div>
+              )}
 
-          {!state.loading && !state.error && (
-            <>
-              {/* ── Month calendar ── */}
-              {viewMode === 'board' && (
+              {!state.loading && !state.error && (
                 <>
-                  <MonthCalendar
-                    tasks={state.tasks}
-                    calRef={calRef}
-                    onChangeMonth={setCalRef}
-                    agentLabel={agentLabel}
-                    onDayClick={(date) => openModal(date)}
-                    onTaskClick={setDetailTask}
-                  />
-                  {state.tasks.length === 0 && (
-                    <EmptyState
-                      icon={<Calendar size={36} />}
-                      title="Sin tareas programadas"
-                      description="Haz clic en un día del calendario para crear una."
-                    />
+                  {/* ── Month calendar ── */}
+                  {viewMode === 'board' && (
+                    <>
+                      <MonthCalendar
+                        tasks={state.tasks}
+                        calRef={calRef}
+                        onChangeMonth={setCalRef}
+                        agentLabel={agentLabel}
+                        onDayClick={(date) => openModal(date)}
+                        onTaskClick={setDetailTask}
+                      />
+                      {state.tasks.length === 0 && (
+                        <EmptyState
+                          icon={<Calendar size={36} />}
+                          title="Sin tareas programadas"
+                          description="Haz clic en un día del calendario para crear una."
+                        />
+                      )}
+                    </>
+                  )}
+
+                  {/* ── List view ─────────────────────────────────────────────── */}
+                  {viewMode === 'list' && (
+                    state.tasks.length === 0
+                      ? (
+                        <EmptyState
+                          icon={<Calendar size={36} />}
+                          title="Sin tareas programadas"
+                          action={
+                            <Button variant="primary" size="sm" onClick={() => openModal()}>
+                              Crear primera tarea
+                            </Button>
+                          }
+                        />
+                      )
+                      : (
+                        <ul className="cv-list" role="list">
+                          <AnimatePresence initial={false}>
+                            {state.tasks.map(task => (
+                              <AnimatedListItem key={task.trigger_id ?? task.task_id ?? task.id}>
+                                <ConfiguredTaskRow
+                                  task={task}
+                                  onViewDetail={setDetailTask}
+                                  onToggle={handleToggle}
+                                  onDelete={handleDelete}
+                                />
+                              </AnimatedListItem>
+                            ))}
+                          </AnimatePresence>
+                        </ul>
+                      )
                   )}
                 </>
               )}
+            </section>
+          </StaggerItem>
 
-              {/* ── List view ─────────────────────────────────────────────── */}
-              {viewMode === 'list' && (
-                state.tasks.length === 0
-                  ? (
-                    <EmptyState
-                      icon={<Calendar size={36} />}
-                      title="Sin tareas programadas"
-                      action={
-                        <Button variant="primary" size="sm" onClick={() => openModal()}>
-                          Crear primera tarea
-                        </Button>
-                      }
-                    />
-                  )
-                  : (
-                    <ul className="cv-list" role="list">
-                      {state.tasks.map((task, i) => (
-                        <li key={task.trigger_id ?? task.task_id ?? i} className="ds-list-item-enter" style={{ animationDelay: `${Math.min(i * 20, 200)}ms` }}>
-                          <ConfiguredTaskRow
-                            task={task}
-                            onViewDetail={setDetailTask}
-                            onToggle={handleToggle}
-                            onDelete={handleDelete}
-                          />
-                        </li>
+          {/* ── Recent runs ─────────────────────────────────────────────────── */}
+          <StaggerItem>
+            <section className="cv-section" aria-label="Ejecuciones recientes">
+              <h2 className="cv-section-label">Ejecuciones recientes</h2>
+              {state.recentTasks.length === 0
+                ? (
+                  <EmptyState
+                    icon={<Calendar size={28} />}
+                    title="Sin ejecuciones recientes"
+                  />
+                )
+                : (
+                  <ul className="cv-list" role="list">
+                    <AnimatePresence initial={false}>
+                      {state.recentTasks.map(task => (
+                        <AnimatedListItem key={task.task_id}>
+                          <RecentTaskRow task={task} />
+                        </AnimatedListItem>
                       ))}
-                    </ul>
-                  )
-              )}
-            </>
-          )}
-        </section>
+                    </AnimatePresence>
+                  </ul>
+                )
+              }
+            </section>
+          </StaggerItem>
 
-        {/* ── Recent runs ─────────────────────────────────────────────────── */}
-        <section className="cv-section" aria-label="Ejecuciones recientes">
-          <h2 className="cv-section-label">Ejecuciones recientes</h2>
-          {state.recentTasks.length === 0
-            ? (
-              <EmptyState
-                icon={<Calendar size={28} />}
-                title="Sin ejecuciones recientes"
-              />
-            )
-            : (
-              <ul className="cv-list" role="list">
-                {state.recentTasks.map((task, i) => (
-                  <li key={task.task_id ?? i} className="ds-list-item-enter" style={{ animationDelay: `${Math.min(i * 20, 200)}ms` }}>
-                    <RecentTaskRow task={task} />
-                  </li>
-                ))}
-              </ul>
-            )
-          }
-        </section>
+        </Stagger>
       </div>
 
       {/* ── Create task modal ─────────────────────────────────────────────── */}
@@ -417,14 +439,12 @@ export default function CalendarView() {
         />
       )}
 
-      {/* ── Task detail drawer ────────────────────────────────────────────── */}
-      {detailTask && (
-        <TaskDetailDrawer
-          task={detailTask}
-          agentLabel={agentLabel}
-          onClose={() => setDetailTask(null)}
-        />
-      )}
+      {/* ── Task detail drawer (Drawer already uses AnimatedDrawer internally) */}
+      <TaskDetailDrawer
+        task={detailTask}
+        agentLabel={agentLabel}
+        onClose={() => setDetailTask(null)}
+      />
     </>
   )
 }
@@ -571,7 +591,7 @@ function ConfiguredTaskRow({ task, onViewDetail, onToggle, onDelete }: Configure
     : ''
 
   return (
-    <div
+    <HoverRow
       className={`task-row${!isEnabled ? ' task-row--disabled' : ''}`}
       style={{ cursor: 'pointer' }}
       role="button"
@@ -612,7 +632,7 @@ function ConfiguredTaskRow({ task, onViewDetail, onToggle, onDelete }: Configure
           <Trash2 size={13} aria-hidden="true" />
         </button>
       </div>
-    </div>
+    </HoverRow>
   )
 }
 
@@ -623,67 +643,42 @@ function RecentTaskRow({ task }: { task: RecentTask }) {
   const when = task.claimed_at ?? task.enqueued_at ?? task.started_at
 
   return (
-    <div className="recent-task-row">
+    <HoverRow className="recent-task-row">
       <div className="recent-task-row__info">
         <div className="recent-task-row__name">{task.label ?? task.name ?? task.task_id ?? 'Tarea'}</div>
         {when && <div className="recent-task-row__time">{relativeTime(when)}</div>}
       </div>
       <span className="task-status-chip">{meta.label}</span>
-    </div>
+    </HoverRow>
   )
 }
 
 // ── Task detail drawer ────────────────────────────────────────────────────────
 
 interface TaskDetailDrawerProps {
-  task: ConfiguredTask
+  task: ConfiguredTask | null
   agentLabel: (task: ConfiguredTask) => string
   onClose: () => void
 }
 
 function TaskDetailDrawer({ task, agentLabel, onClose }: TaskDetailDrawerProps) {
-  const titleId = 'task-detail-title'
-  const name = task.label ?? task.title ?? task.name ?? 'Tarea'
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
-  }, [onClose])
-
-  const recurrence = recurrenceLabel(task)
-  const nextRun = task.next_run_at
+  const recurrence = task ? recurrenceLabel(task) : ''
+  const nextRun = task?.next_run_at
     ? new Date(task.next_run_at).toLocaleString('es')
     : null
-  const riskLabel = task.risk_ceiling === 'high' ? 'Alto' : 'Bajo'
+  const riskLabel = task?.risk_ceiling === 'high' ? 'Alto' : 'Bajo'
 
   return (
-    <div
-      className="office-drawer-backdrop"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby={titleId}
-      onClick={(e) => { if (e.target === e.currentTarget) onClose() }}
-    >
-      <div className="office-drawer">
-        <div className="office-drawer-header">
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <h2 id={titleId} className="office-drawer-title">{name}</h2>
-            {task.one_shot && (
-              <p className="agent-role" style={{ margin: 0 }}>Una sola vez</p>
-            )}
-          </div>
-          {task.enabled === false && (
-            <span className="task-meta-chip" style={{ marginRight: 'var(--sp-2)', flexShrink: 0 }}>
-              Pausada
-            </span>
+    <Drawer open={task !== null} title={task?.label ?? task?.title ?? task?.name ?? 'Tarea'} onClose={onClose}>
+      {task && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--sp-4)' }}>
+          {task.one_shot && (
+            <p className="agent-role" style={{ margin: 0 }}>Una sola vez</p>
           )}
-          <button type="button" className="office-modal-close" onClick={onClose} aria-label="Cerrar">
-            <X size={16} aria-hidden="true" />
-          </button>
-        </div>
+          {task.enabled === false && (
+            <span className="task-meta-chip" style={{ alignSelf: 'flex-start' }}>Pausada</span>
+          )}
 
-        <div className="office-drawer-body" style={{ gap: 'var(--sp-4)' }}>
           {task.instruction && (
             <div>
               <p style={{ fontSize: 'var(--text-label)', color: 'var(--ink4)', marginBottom: 'var(--sp-1)' }}>
@@ -724,8 +719,8 @@ function TaskDetailDrawer({ task, agentLabel, onClose }: TaskDetailDrawerProps) 
             <Button variant="ghost" size="sm" onClick={onClose}>Cerrar</Button>
           </div>
         </div>
-      </div>
-    </div>
+      )}
+    </Drawer>
   )
 }
 
@@ -825,16 +820,23 @@ function TaskModal({ agents, presetDate, onClose, onCreate }: TaskModalProps) {
   const customAgents = agents.filter(a => !a.is_default)
 
   return (
-    <div
+    <motion.div
       className="modal-overlay"
       ref={overlayRef}
       onClick={e => { if (e.target === overlayRef.current) onClose() }}
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
     >
-      <div
+      <motion.div
         className="modal-card"
         role="dialog"
         aria-modal="true"
         aria-label="Programar una tarea"
+        initial={{ opacity: 0, y: 16 }}
+        animate={{ opacity: 1, y: 0 }}
+        exit={{ opacity: 0, y: 16 }}
+        transition={SPRING}
       >
         <div className="modal-card__head">
           <h3 className="modal-card__title">Programar una tarea</h3>
@@ -971,8 +973,7 @@ function TaskModal({ agents, presetDate, onClose, onCreate }: TaskModalProps) {
             Crear tarea
           </Button>
         </div>
-      </div>
-    </div>
+      </motion.div>
+    </motion.div>
   )
 }
-

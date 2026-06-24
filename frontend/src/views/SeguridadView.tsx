@@ -37,6 +37,19 @@ import ApprovalCard from '../components/ApprovalCard'
 import MfaEnroll from '../components/MfaEnroll'
 import MfaModal from '../components/MfaModal'
 import type { MfaFactors } from '../components/MfaModal'
+import {
+  AnimatePresence,
+  AnimatedListItem,
+  AnimatedExpanderContent,
+  AnimatedChevron,
+  FadeIn,
+  Stagger,
+  StaggerItem,
+  HoverRow,
+  motion,
+  SPRING,
+  TWEEN,
+} from '../components/ui/motion'
 
 // ── Approvals section ─────────────────────────────────────────────────────────
 
@@ -67,14 +80,17 @@ function ApprovalsSection({ mfaDisabled }: { mfaDisabled: boolean }) {
         <div className="cv-empty">Sin aprobaciones pendientes.</div>
       ) : (
         <div className="cv-list">
-          {approvals.map(a => (
-            <ApprovalCard
-              key={a.proposal_id}
-              approval={a}
-              mfaDisabled={mfaDisabled}
-              onResolved={load}
-            />
-          ))}
+          <AnimatePresence initial={false}>
+            {approvals.map(a => (
+              <AnimatedListItem key={a.proposal_id}>
+                <ApprovalCard
+                  approval={a}
+                  mfaDisabled={mfaDisabled}
+                  onResolved={load}
+                />
+              </AnimatedListItem>
+            ))}
+          </AnimatePresence>
         </div>
       )}
     </section>
@@ -201,7 +217,7 @@ function CategoryGroup({
   return (
     <div className="seg-pol-group">
       {/* Entire header row is clickable to toggle expand/collapse */}
-      <div
+      <HoverRow
         className="seg-pol-group__header seg-pol-group__header--clickable"
         role="button"
         tabIndex={0}
@@ -210,12 +226,7 @@ function CategoryGroup({
         onClick={() => setExpanded(v => !v)}
         onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded(v => !v) } }}
       >
-        <span
-          className={`seg-pol-chevron ${expanded ? 'seg-pol-chevron--open' : ''}`}
-          aria-hidden="true"
-        >
-          ▸
-        </span>
+        <AnimatedChevron open={expanded} size={13} />
 
         <span className="seg-pol-group__name">{categoryLabel(category)}</span>
         <span className="seg-pol-group__count" aria-label={`${entries.length} herramientas`}>{entries.length}</span>
@@ -242,9 +253,10 @@ function CategoryGroup({
             onChange={v => onToggleAll(category, v, effectiveEntries)}
           />
         </div>
-      </div>
+      </HoverRow>
 
-      {expanded && (
+      {/* AnimatedExpanderContent replaces the conditional render — smooth height transition */}
+      <AnimatedExpanderContent open={expanded}>
         <ul
           id={bodyId}
           className="seg-pol-tool-list"
@@ -259,7 +271,7 @@ function CategoryGroup({
             />
           ))}
         </ul>
-      )}
+      </AnimatedExpanderContent>
     </div>
   )
 }
@@ -278,7 +290,11 @@ function ToolRow({ entry, busy, onToggle }: ToolRowProps) {
   const notVisible = !entry.llm_visible
 
   return (
-    <li className={`seg-pol-tool-row ${notVisible ? 'seg-pol-tool-row--muted' : ''}`}>
+    <motion.li
+      className={`seg-pol-tool-row ${notVisible ? 'seg-pol-tool-row--muted' : ''}`}
+      whileHover={{ x: 2 }}
+      transition={SPRING}
+    >
       <input
         type="checkbox"
         id={checkId}
@@ -303,7 +319,7 @@ function ToolRow({ entry, busy, onToggle }: ToolRowProps) {
           nativo
         </span>
       )}
-    </li>
+    </motion.li>
   )
 }
 
@@ -536,7 +552,7 @@ function GovernanceSection() {
 
   return (
     <>
-      {/* ── MFA Modal ── */}
+      {/* ── MFA Modal — kept outside Stagger so it renders above all sections */}
       {pendingAction && (
         <MfaModal
           title={
@@ -618,73 +634,96 @@ function GovernanceSection() {
                 </button>
               ))}
             </div>
-            {hasPendingPreset && (
-              <div className="seg-pol-preset-save-row" aria-live="polite">
-                <span className="seg-pol-preset-hint">
-                  Vista previa: «{pendingPreset}». Guarda para aplicarlo.
-                </span>
-                <button
-                  type="button"
-                  className="cv-btn cv-btn--primary cv-btn--sm"
-                  onClick={requestPresetSave}
-                  disabled={busy}
-                >
-                  Guardar
-                </button>
-                <button
-                  type="button"
-                  className="cv-btn cv-btn--ghost cv-btn--sm"
-                  onClick={() => setPendingPreset(null)}
-                  disabled={busy}
-                >
-                  Cancelar
-                </button>
-              </div>
-            )}
-          </div>
 
-          {/* Capability accordion groups */}
-          {hasCatalog && capabilityGroups.size > 0 && (
-            <div>
-              <div className="seg-pol-sub-label">Capacidades del agente</div>
-              <div className="seg-pol-catalog">
-                {[...capabilityGroups.entries()].map(([cat, entries]) => (
-                  <CategoryGroup
-                    key={cat}
-                    category={cat}
-                    entries={entries}
-                    pendingChanges={toolPending}
-                    busy={busy}
-                    onToggleTool={requestToolToggle}
-                    onToggleAll={requestSectionToggle}
-                  />
-                ))}
-              </div>
-              {hasPendingTools && (
-                <div className="seg-pol-preset-save-row" aria-live="polite">
+            {/* Animated preset-save bar — slides in when a preset is pending */}
+            <AnimatePresence initial={false}>
+              {hasPendingPreset && (
+                <motion.div
+                  className="seg-pol-preset-save-row"
+                  aria-live="polite"
+                  initial={{ opacity: 0, y: -6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -6 }}
+                  transition={TWEEN}
+                >
                   <span className="seg-pol-preset-hint">
-                    {Object.keys(toolPending).length} cambio{Object.keys(toolPending).length !== 1 ? 's' : ''} pendiente{Object.keys(toolPending).length !== 1 ? 's' : ''}.
+                    Vista previa: «{pendingPreset}». Guarda para aplicarlo.
                   </span>
                   <button
                     type="button"
                     className="cv-btn cv-btn--primary cv-btn--sm"
-                    onClick={handleSaveToolChanges}
+                    onClick={requestPresetSave}
                     disabled={busy}
-                    style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--sp-1)' }}
                   >
-                    <Save size={14} aria-hidden="true" />
-                    Guardar cambios
+                    Guardar
                   </button>
                   <button
                     type="button"
                     className="cv-btn cv-btn--ghost cv-btn--sm"
-                    onClick={() => setToolPending({})}
+                    onClick={() => setPendingPreset(null)}
                     disabled={busy}
                   >
-                    Descartar
+                    Cancelar
                   </button>
-                </div>
+                </motion.div>
               )}
+            </AnimatePresence>
+          </div>
+
+          {/* Capability accordion groups — staggered entrance */}
+          {hasCatalog && capabilityGroups.size > 0 && (
+            <div>
+              <div className="seg-pol-sub-label">Capacidades del agente</div>
+              <Stagger className="seg-pol-catalog">
+                {[...capabilityGroups.entries()].map(([cat, entries]) => (
+                  <StaggerItem key={cat}>
+                    <CategoryGroup
+                      category={cat}
+                      entries={entries}
+                      pendingChanges={toolPending}
+                      busy={busy}
+                      onToggleTool={requestToolToggle}
+                      onToggleAll={requestSectionToggle}
+                    />
+                  </StaggerItem>
+                ))}
+              </Stagger>
+
+              {/* Animated "Guardar cambios" bar — slides in when tools are pending */}
+              <AnimatePresence initial={false}>
+                {hasPendingTools && (
+                  <motion.div
+                    className="seg-pol-preset-save-row"
+                    aria-live="polite"
+                    initial={{ opacity: 0, y: -6 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -6 }}
+                    transition={TWEEN}
+                  >
+                    <span className="seg-pol-preset-hint">
+                      {Object.keys(toolPending).length} cambio{Object.keys(toolPending).length !== 1 ? 's' : ''} pendiente{Object.keys(toolPending).length !== 1 ? 's' : ''}.
+                    </span>
+                    <button
+                      type="button"
+                      className="cv-btn cv-btn--primary cv-btn--sm"
+                      onClick={handleSaveToolChanges}
+                      disabled={busy}
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--sp-1)' }}
+                    >
+                      <Save size={14} aria-hidden="true" />
+                      Guardar cambios
+                    </button>
+                    <button
+                      type="button"
+                      className="cv-btn cv-btn--ghost cv-btn--sm"
+                      onClick={() => setToolPending({})}
+                      disabled={busy}
+                    >
+                      Descartar
+                    </button>
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </div>
           )}
 
@@ -695,19 +734,20 @@ function GovernanceSection() {
               <p className="seg-card__intro" style={{ marginTop: 0, marginBottom: 8 }}>
                 Estas herramientas protegen el sistema. No son capacidades del agente — no las invoca directamente.
               </p>
-              <div className="seg-pol-catalog">
+              <Stagger className="seg-pol-catalog">
                 {[...defenseGroups.entries()].map(([cat, entries]) => (
-                  <CategoryGroup
-                    key={cat}
-                    category={cat}
-                    entries={entries}
-                    pendingChanges={toolPending}
-                    busy={busy}
-                    onToggleTool={requestToolToggle}
-                    onToggleAll={requestSectionToggle}
-                  />
+                  <StaggerItem key={cat}>
+                    <CategoryGroup
+                      category={cat}
+                      entries={entries}
+                      pendingChanges={toolPending}
+                      busy={busy}
+                      onToggleTool={requestToolToggle}
+                      onToggleAll={requestSectionToggle}
+                    />
+                  </StaggerItem>
                 ))}
-              </div>
+              </Stagger>
             </div>
           )}
 
@@ -733,31 +773,42 @@ function GovernanceSection() {
                   })}
                 </div>
               </details>
-              {hasPendingTools && (
-                <div className="seg-pol-preset-save-row" aria-live="polite">
-                  <span className="seg-pol-preset-hint">
-                    {Object.keys(toolPending).length} cambio{Object.keys(toolPending).length !== 1 ? 's' : ''} pendiente{Object.keys(toolPending).length !== 1 ? 's' : ''}.
-                  </span>
-                  <button
-                    type="button"
-                    className="cv-btn cv-btn--primary cv-btn--sm"
-                    onClick={handleSaveToolChanges}
-                    disabled={busy}
-                    style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--sp-1)' }}
+
+              {/* Animated "Guardar cambios" bar for legacy flat list */}
+              <AnimatePresence initial={false}>
+                {hasPendingTools && (
+                  <motion.div
+                    className="seg-pol-preset-save-row"
+                    aria-live="polite"
+                    initial={{ opacity: 0, y: -6 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -6 }}
+                    transition={TWEEN}
                   >
-                    <Save size={14} aria-hidden="true" />
-                    Guardar cambios
-                  </button>
-                  <button
-                    type="button"
-                    className="cv-btn cv-btn--ghost cv-btn--sm"
-                    onClick={() => setToolPending({})}
-                    disabled={busy}
-                  >
-                    Descartar
-                  </button>
-                </div>
-              )}
+                    <span className="seg-pol-preset-hint">
+                      {Object.keys(toolPending).length} cambio{Object.keys(toolPending).length !== 1 ? 's' : ''} pendiente{Object.keys(toolPending).length !== 1 ? 's' : ''}.
+                    </span>
+                    <button
+                      type="button"
+                      className="cv-btn cv-btn--primary cv-btn--sm"
+                      onClick={handleSaveToolChanges}
+                      disabled={busy}
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--sp-1)' }}
+                    >
+                      <Save size={14} aria-hidden="true" />
+                      Guardar cambios
+                    </button>
+                    <button
+                      type="button"
+                      className="cv-btn cv-btn--ghost cv-btn--sm"
+                      onClick={() => setToolPending({})}
+                      disabled={busy}
+                    >
+                      Descartar
+                    </button>
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </>
           )}
         </div>
@@ -840,19 +891,21 @@ function EgressSection() {
           <p className="cv-empty">Ningún dominio autorizado — el agente no accede a la red.</p>
         ) : (
           <ul className="cv-list" aria-label="Dominios autorizados">
-            {domains.map(d => (
-              <li key={d} className="seg-egress-row">
-                <code className="seg-egress-row__domain">{d}</code>
-                <button
-                  className="cv-btn cv-btn--ghost cv-btn--sm"
-                  onClick={() => handleRevoke(d)}
-                  type="button"
-                  aria-label={`Revocar dominio ${d}`}
-                >
-                  Revocar
-                </button>
-              </li>
-            ))}
+            <AnimatePresence initial={false}>
+              {domains.map(d => (
+                <AnimatedListItem key={d} className="seg-egress-row">
+                  <code className="seg-egress-row__domain">{d}</code>
+                  <button
+                    className="cv-btn cv-btn--ghost cv-btn--sm"
+                    onClick={() => handleRevoke(d)}
+                    type="button"
+                    aria-label={`Revocar dominio ${d}`}
+                  >
+                    Revocar
+                  </button>
+                </AnimatedListItem>
+              ))}
+            </AnimatePresence>
           </ul>
         )}
       </div>
@@ -922,7 +975,7 @@ function ScanRow({ scan }: { scan: SecurityScan }) {
   }
 
   return (
-    <div className="seg-scan-row">
+    <HoverRow className="seg-scan-row">
       <div className="seg-scan-row__left">
         <div className="seg-scan-row__name">{name}</div>
         {target && <div className="seg-scan-row__target">{target}</div>}
@@ -956,7 +1009,7 @@ function ScanRow({ scan }: { scan: SecurityScan }) {
           onCancel={() => setShowModal(false)}
         />
       )}
-    </div>
+    </HoverRow>
   )
 }
 
@@ -990,16 +1043,18 @@ function SecurityCenterSection() {
           {!auditHead ? (
             <p className="cv-empty">Sin datos de cadena de auditoría.</p>
           ) : (
-            <div className="seg-audit-head">
-              <code className="seg-audit-head__hash">
-                {auditHead.hash ?? auditHead.head ?? '—'}
-              </code>
-              {auditHead.timestamp && (
-                <span className="seg-audit-head__time">
-                  {new Date(auditHead.timestamp).toLocaleString('es')}
-                </span>
-              )}
-            </div>
+            <FadeIn>
+              <div className="seg-audit-head">
+                <code className="seg-audit-head__hash">
+                  {auditHead.hash ?? auditHead.head ?? '—'}
+                </code>
+                {auditHead.timestamp && (
+                  <span className="seg-audit-head__time">
+                    {new Date(auditHead.timestamp).toLocaleString('es')}
+                  </span>
+                )}
+              </div>
+            </FadeIn>
           )}
         </div>
       </section>
@@ -1010,9 +1065,13 @@ function SecurityCenterSection() {
           <p className="cv-empty">Sin escaneos recientes.</p>
         ) : (
           <div className="cv-list">
-            {scans.map((s, i) => (
-              <ScanRow key={s.scan_id ?? s.id ?? i} scan={s} />
-            ))}
+            <AnimatePresence initial={false}>
+              {scans.map((s, i) => (
+                <AnimatedListItem key={s.scan_id ?? s.id ?? i}>
+                  <ScanRow scan={s} />
+                </AnimatedListItem>
+              ))}
+            </AnimatePresence>
           </div>
         )}
       </section>
