@@ -74,6 +74,28 @@ function Welcome({ onSuggestion }: WelcomeProps) {
   )
 }
 
+// ── Delegation step (first-class element for delegate_task / mixture_of_agents) ───
+
+const DELEGATION_NAMES = new Set(['delegate_task', 'mixture_of_agents'])
+
+interface DelegationStepProps {
+  step: ToolStep
+}
+
+function DelegationStep({ step }: DelegationStepProps) {
+  const specialist = step.target || step.label || 'especialista'
+  return (
+    <div className="delegation-step" role="status" aria-label={`Delegado a ${specialist}`}>
+      <span className="delegation-step__icon" aria-hidden="true">🤝</span>
+      <div className="delegation-step__body">
+        <div className="delegation-step__label">
+          Delegado a <span className="delegation-step__specialist">{specialist}</span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── Tool summary block ────────────────────────────────────────────────────────
 
 interface ToolSummaryProps {
@@ -83,36 +105,55 @@ interface ToolSummaryProps {
 
 function ToolSummary({ steps, isStreaming }: ToolSummaryProps) {
   if (steps.length === 0) return null
-  const count = steps.length
+
+  // Partition: delegation steps rendered as first-class cards; the rest go in the collapsible
+  const delegations = steps.filter(s => DELEGATION_NAMES.has(s.name))
+  const regular = steps.filter(s => !DELEGATION_NAMES.has(s.name))
+  const count = regular.length
   const last = steps[steps.length - 1]
-  const label = isStreaming
+
+  // During streaming we always show the last step label as the live indicator.
+  // After stream completes, delegation steps are already expanded above.
+  const streamLabel = isStreaming
     ? `${last.label}${last.target ? ` — ${last.target.slice(0, 48)}` : ''}`
-    : `Usó ${count} herramienta${count > 1 ? 's' : ''}`
+    : null
 
   return (
-    <details className="tool-summary-group">
-      <summary className="tool-summary-group__summary">
-        <span className="tool-summary-group__label">{label}</span>
-        {!isStreaming && (
-          <span className="tool-summary-group__count" aria-label={`${count} herramientas`}>
-            {count}
-          </span>
-        )}
-        <span className="tool-summary-group__chevron" aria-hidden="true">
-          <ChevronIcon />
-        </span>
-      </summary>
-      <div className="tool-summary-group__body">
-        {steps.map((step, i) => (
-          <div key={i} className="tool-step-item">
-            <span className="tool-step-item__label">{step.label}</span>
-            {step.target && (
-              <span className="tool-step-item__target">{step.target}</span>
+    <>
+      {/* Delegation cards — always visible, never collapsed */}
+      {delegations.map((step, i) => (
+        <DelegationStep key={i} step={step} />
+      ))}
+
+      {/* Regular tools — collapsed summary (only if any exist) */}
+      {(regular.length > 0 || (isStreaming && !DELEGATION_NAMES.has(last.name))) && (
+        <details className="tool-summary-group">
+          <summary className="tool-summary-group__summary">
+            <span className="tool-summary-group__label">
+              {streamLabel ?? `Usó ${count} herramienta${count !== 1 ? 's' : ''}`}
+            </span>
+            {!isStreaming && count > 0 && (
+              <span className="tool-summary-group__count" aria-label={`${count} herramientas`}>
+                {count}
+              </span>
             )}
+            <span className="tool-summary-group__chevron" aria-hidden="true">
+              <ChevronIcon />
+            </span>
+          </summary>
+          <div className="tool-summary-group__body">
+            {regular.map((step, i) => (
+              <div key={i} className="tool-step-item">
+                <span className="tool-step-item__label">{step.label}</span>
+                {step.target && (
+                  <span className="tool-step-item__target">{step.target}</span>
+                )}
+              </div>
+            ))}
           </div>
-        ))}
-      </div>
-    </details>
+        </details>
+      )}
+    </>
   )
 }
 
@@ -621,7 +662,9 @@ export default function ChatView() {
   // All chat state comes from Layout via outlet context — no duplicate useChat instance.
   const { convId, messages, status, sendMessage, stopStream, approvalRefreshTick } = useOutletContext<ChatOutletContext>()
   const [composerText, setComposerText] = useState('')
-  const [panelOpen, setPanelOpen] = useState(false)
+  // Open by default so the workspace folder (Carpeta de Trabajo) is visible —
+  // the owner didn't even know it existed when it was collapsed.
+  const [panelOpen, setPanelOpen] = useState(true)
   const [showNoModel, setShowNoModel] = useState(false)
   const [noProvider, setNoProvider] = useState(false)
   const bodyRef = useRef<HTMLDivElement>(null)

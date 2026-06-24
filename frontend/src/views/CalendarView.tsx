@@ -64,11 +64,11 @@ function buildCron({ mode, days, date, time }: {
   const min = parseInt(mm, 10) || 0
   const hour = parseInt(hh, 10) || 0
   if (mode === 'once') {
-    // Carry yyyy-mm-dd in full so tasksForDate can match the exact year.
-    // Store as "min hour dd mo yyyy" (non-standard 6-field) — tasksForDate
-    // and the backend use next_run_at for scheduling; this is only for the UI.
-    const [yyyy, mo, dd] = (date || '').split('-')
-    return `${min} ${hour} ${parseInt(dd, 10)} ${parseInt(mo, 10)} * ${parseInt(yyyy, 10)}`
+    // Emit standard 5-field cron "min hour dd mo *" — the backend uses
+    // next_run_at for the actual scheduling date; the year is NOT encoded here.
+    // one_shot:true in the payload tells the backend not to repeat.
+    const [, mo, dd] = (date || '').split('-')
+    return `${min} ${hour} ${parseInt(dd, 10)} ${parseInt(mo, 10)} *`
   }
   if (days.length === 0 || days.length === 7) return `${min} ${hour} * * *`
   const dow = days.map(d => (d === 6 ? 0 : d + 1)).sort((a, b) => a - b).join(',')
@@ -189,7 +189,7 @@ export default function CalendarView() {
   const [state, dispatch] = useReducer(calReducer, {
     tasks: [], recentTasks: [], agents: [], loading: true, error: null,
   })
-  const [viewMode, setViewMode] = useState<ViewMode>('board')
+  const [viewMode, setViewMode] = useState<ViewMode>('board') // calendar is the default
   const [calRef, setCalRef] = useState<Date>(() => { const n = new Date(); return new Date(n.getFullYear(), n.getMonth(), 1) })
   const [modalOpen, setModalOpen] = useState(false)
   const [modalPresetDate, setModalPresetDate] = useState<string | null>(null)
@@ -304,47 +304,59 @@ export default function CalendarView() {
           {state.loading && <div className="cv-skeleton" aria-busy="true" />}
           {state.error && <p className="state-error" role="alert">{state.error}</p>}
 
-          {!state.loading && !state.error && state.tasks.length === 0 && (
-            <div style={{ textAlign: 'center', padding: 'var(--sp-8) 0' }}>
-              <p className="cv-empty">Sin tareas programadas.</p>
-              <button
-                className="cv-btn cv-btn--primary cv-btn--sm"
-                style={{ marginTop: 'var(--sp-4)' }}
-                onClick={() => openModal()}
-              >
-                + Crear primera tarea
-              </button>
-            </div>
-          )}
-
-          {!state.loading && !state.error && state.tasks.length > 0 && (
+          {!state.loading && !state.error && (
             <>
-              {/* ── Month calendar ─────────────────────────────────────────── */}
+              {/* ── Month calendar — always visible; clicking a day opens the modal ── */}
               {viewMode === 'board' && (
-                <MonthCalendar
-                  tasks={state.tasks}
-                  calRef={calRef}
-                  onChangeMonth={setCalRef}
-                  agentLabel={agentLabel}
-                  onDayClick={(date) => openModal(date)}
-                  onTaskClick={setDetailTask}
-                />
+                <>
+                  <MonthCalendar
+                    tasks={state.tasks}
+                    calRef={calRef}
+                    onChangeMonth={setCalRef}
+                    agentLabel={agentLabel}
+                    onDayClick={(date) => openModal(date)}
+                    onTaskClick={setDetailTask}
+                  />
+                  {state.tasks.length === 0 && (
+                    <p
+                      className="cv-empty"
+                      style={{ textAlign: 'center', marginTop: 'var(--sp-4)' }}
+                    >
+                      Sin tareas programadas — haz clic en un día para crear una.
+                    </p>
+                  )}
+                </>
               )}
 
               {/* ── List view ─────────────────────────────────────────────── */}
               {viewMode === 'list' && (
-                <ul className="cv-list" role="list">
-                  {state.tasks.map((task, i) => (
-                    <li key={task.trigger_id ?? task.task_id ?? i}>
-                      <ConfiguredTaskRow
-                        task={task}
-                        onViewDetail={setDetailTask}
-                        onToggle={handleToggle}
-                        onDelete={handleDelete}
-                      />
-                    </li>
-                  ))}
-                </ul>
+                state.tasks.length === 0
+                  ? (
+                    <div style={{ textAlign: 'center', padding: 'var(--sp-8) 0' }}>
+                      <p className="cv-empty">Sin tareas programadas.</p>
+                      <button
+                        className="cv-btn cv-btn--primary cv-btn--sm"
+                        style={{ marginTop: 'var(--sp-4)' }}
+                        onClick={() => openModal()}
+                      >
+                        + Crear primera tarea
+                      </button>
+                    </div>
+                  )
+                  : (
+                    <ul className="cv-list" role="list">
+                      {state.tasks.map((task, i) => (
+                        <li key={task.trigger_id ?? task.task_id ?? i}>
+                          <ConfiguredTaskRow
+                            task={task}
+                            onViewDetail={setDetailTask}
+                            onToggle={handleToggle}
+                            onDelete={handleDelete}
+                          />
+                        </li>
+                      ))}
+                    </ul>
+                  )
               )}
             </>
           )}

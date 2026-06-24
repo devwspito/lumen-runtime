@@ -3,6 +3,7 @@ import { sileo } from 'sileo'
 import { listMcpServers, addMcpServer, removeMcpServer, searchMcpRegistry, ApiError } from '../api/client'
 import type { McpServer, McpRegistryEntry } from '../api/types'
 import { useConfirmDialog } from '../components/ConfirmDialog'
+import Badge from '../components/Badge'
 
 // Curated catalog — mirrors mcp.js MCP_CATALOG (npx-only verified servers).
 const MCP_CATALOG: McpRegistryEntry[] = [
@@ -318,11 +319,11 @@ function McpServerRow({ server, onRemove }: McpServerRowProps) {
         <div className="mcp-row__name">
           {server.label ?? server.server_id ?? 'Herramienta externa'}
           {hasHealth && (
-            <span className={`mcp-health-chip${healthy ? ' is-ok' : ' is-down'}`}>
+            <Badge variant={healthy ? 'ok' : 'danger'}>
               {healthy ? '●' : '○'} {tools || String(server.health)}
-            </span>
+            </Badge>
           )}
-          {!hasHealth && tools && <span className="mcp-health-chip">{tools}</span>}
+          {!hasHealth && tools && <Badge variant="neutral">{tools}</Badge>}
         </div>
         {/* Show the launch command under a technical details toggle */}
         {argv && (
@@ -395,10 +396,12 @@ function CatalogCard({ entry, installedIds, onInstall }: CatalogCardProps) {
       <div className="mcp-card__info">
         <div className="mcp-card__head">
           <span className="mcp-card__name">{entry.label ?? entry.name ?? id}</span>
-          {entry.tag && <span className="mcp-card__tag">{entry.tag}</span>}
-          {needsEnv && <span className="mcp-card__tag">Requiere tu clave API</span>}
+          {entry.tag && <Badge variant="neutral">{entry.tag}</Badge>}
+          {needsEnv && <Badge variant="warn">Requiere tu clave API</Badge>}
         </div>
-        {entry.description && <div className="mcp-card__desc">{entry.description}</div>}
+        {entry.description && (
+          <div className="mcp-card__desc" title={entry.description}>{entry.description}</div>
+        )}
         {/* Technical details collapsed by default */}
         {argv && (
           <details style={{ marginTop: 4 }}>

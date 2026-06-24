@@ -2,53 +2,39 @@
  * ApprovalCard — HITL approval widget.
  *
  * Rendered both inside SeguridadView (full list) and PendingApprovalsInChat
- * (filtered to the active conversation). The card is self-contained: it
- * handles deny, the tiered MFA/humanity/riddle form, and the "no MFA enrolled"
- * inline recovery flow.
+ * (filtered to the active conversation).
+ *
+ * "Permitir" opens MfaModal (unless MFA is disabled — then fires directly).
+ * "Denegar" fires without MFA.
+ * Errors surface as toasts; the modal stays open on failure.
  */
 
-import { useRef, useState } from 'react'
+import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { sileo } from 'sileo'
 import { resolveApproval } from '../api/client'
 import type { PendingApproval } from '../api/types'
 import MfaEnroll from './MfaEnroll'
-
-// Map backend error codes / messages to user-friendly strings.
-function mapApproveError(err: unknown): { userMessage: string; isNotEnrolled: boolean } {
-  const raw = err instanceof Error ? err.message : String(err)
-  const lower = raw.toLowerCase()
-
-  if (lower.includes('mfa_not_enrolled') || lower.includes('not enrolled')) {
-    return { userMessage: '', isNotEnrolled: true }
-  }
-  if (lower.includes('invalid_totp') || lower.includes('invalid totp')) {
-    return { userMessage: 'Código incorrecto o caducado — genera uno nuevo en tu app.', isNotEnrolled: false }
-  }
-  if (lower.includes('mfa_denied') || lower.includes('mfa denied')) {
-    return { userMessage: 'Verificación denegada — comprueba tu código e inténtalo de nuevo.', isNotEnrolled: false }
-  }
-  if (lower.includes('invalid_riddle') || lower.includes('riddle')) {
-    return { userMessage: 'Respuesta al acertijo incorrecta.', isNotEnrolled: false }
-  }
-  return { userMessage: raw, isNotEnrolled: false }
-}
+import MfaModal from './MfaModal'
+import type { MfaTier, MfaFactors } from './MfaModal'
 
 export interface ApprovalCardProps {
   approval: PendingApproval
+  /** When true, "Permitir" bypasses MFA entirely (mfa_on_dangers is OFF). */
+  mfaDisabled?: boolean
   onResolved(): void
 }
 
-export default function ApprovalCard({ approval, onResolved }: ApprovalCardProps) {
-  const [showMfa, setShowMfa] = useState(false)
-  const [totp, setTotp] = useState('')
-  const [riddle, setRiddle] = useState('')
-  const [humanity, setHumanity] = useState(false)
+export default function ApprovalCard({
+  approval,
+  mfaDisabled = false,
+  onResolved,
+}: ApprovalCardProps) {
+  const navigate = useNavigate()
+  const [showModal, setShowModal] = useState(false)
   const [busy, setBusy] = useState(false)
-  const [errorMessage, setErrorMessage] = useState('')
-  // True when either the approval.mfa_enrolled flag says so, or the backend
-  // returned mfa_not_enrolled. Triggers the inline MfaEnroll recovery flow.
+  // Triggers inline enrollment if backend says MFA not enrolled
   const [needsEnroll, setNeedsEnroll] = useState(approval.mfa_enrolled === false)
-  const totpRef = useRef<HTMLInputElement>(null)
 
   const params = approval.parameters
   const paramEntries =
@@ -56,19 +42,19 @@ export default function ApprovalCard({ approval, onResolved }: ApprovalCardProps
       ? Object.entries(params).slice(0, 8)
       : []
 
-  // Tier flags derived from required_level
   const level = approval.required_level ?? 'mfa'
-  const needsHumanity = level === 'mfa_humanity' || level === 'mfa_riddle'
-  const needsRiddle = level === 'mfa_riddle'
+  const tier: MfaTier =
+    level === 'mfa_riddle' ? 'mfa_riddle'
+    : level === 'mfa_humanity' ? 'mfa_humanity'
+    : 'mfa'
 
-  // If riddle tier is required but no riddle is configured, warn inline.
-  const riddleNotReady = needsRiddle && approval.riddle_set === false
+  const riddleNotReady = tier === 'mfa_riddle' && approval.riddle_set === false
 
   async function handleDeny() {
     setBusy(true)
     try {
       await resolveApproval(approval.proposal_id, 'deny')
-      sileo.success({ title: 'Denegado' })
+      sileo.success({ title: 'Acción denegada' })
       onResolved()
     } catch (err) {
       sileo.error({ title: `No se pudo denegar: ${err instanceof Error ? err.message : err}` })
@@ -77,30 +63,35 @@ export default function ApprovalCard({ approval, onResolved }: ApprovalCardProps
     }
   }
 
-  function openMfa() {
-    setShowMfa(true)
-    setTimeout(() => totpRef.current?.focus(), 50)
+  function handlePermitirClick() {
+    if (mfaDisabled) {
+      // MFA globally off — approve directly without factors
+      void handleApprove({} as MfaFactors)
+    } else {
+      setShowModal(true)
+    }
   }
 
-  async function handleApprove(e: React.FormEvent) {
-    e.preventDefault()
+  async function handleApprove(factors: MfaFactors) {
     setBusy(true)
-    setErrorMessage('')
     try {
       await resolveApproval(approval.proposal_id, 'once', {
-        totp: totp.trim() || null,
-        riddle_answer: needsRiddle ? (riddle.trim() || null) : null,
-        humanity: needsHumanity ? (humanity ? 'confirmado' : null) : null,
+        totp: factors.totp ?? null,
+        humanity: factors.humanity ?? null,
+        riddle_answer: factors.riddle_answer ?? null,
       })
-      sileo.success({ title: 'Aprobado' })
+      setShowModal(false)
+      sileo.success({ title: 'Acción aprobada' })
       onResolved()
     } catch (err) {
-      const { userMessage, isNotEnrolled } = mapApproveError(err)
-      if (isNotEnrolled) {
+      const msg = err instanceof Error ? err.message : String(err)
+      const lower = msg.toLowerCase()
+      if (lower.includes('mfa_not_enrolled') || lower.includes('not enrolled')) {
+        setShowModal(false)
         setNeedsEnroll(true)
       } else {
-        setErrorMessage(userMessage)
-        sileo.error({ title: userMessage || 'No se pudo aprobar' })
+        // Toast the error; the modal stays open so user can retry
+        sileo.error({ title: msg || 'No se pudo aprobar' })
       }
     } finally {
       setBusy(false)
@@ -108,10 +99,9 @@ export default function ApprovalCard({ approval, onResolved }: ApprovalCardProps
   }
 
   function handleEnrolled() {
-    // MFA is now set up; go back to the code form for this same card.
     setNeedsEnroll(false)
-    setShowMfa(true)
-    setTimeout(() => totpRef.current?.focus(), 50)
+    // Re-open the modal for the now-enrolled user
+    setShowModal(true)
   }
 
   return (
@@ -136,20 +126,28 @@ export default function ApprovalCard({ approval, onResolved }: ApprovalCardProps
           </dl>
         )}
         {riddleNotReady && (
-          <p
-            className="seg-approval-card__mfa-error"
-            role="alert"
-          >
+          <p className="seg-approval-card__mfa-error" role="alert">
             Esta acción requiere un acertijo personal que aún no has configurado.{' '}
-            <a href="/seguridad" style={{ color: 'var(--accent)' }}>
+            <button
+              type="button"
+              onClick={() => navigate('/seguridad')}
+              style={{
+                background: 'none',
+                border: 'none',
+                padding: 0,
+                color: 'var(--accent)',
+                cursor: 'pointer',
+                fontSize: 'inherit',
+                textDecoration: 'underline',
+              }}
+            >
               Configúralo en Seguridad
-            </a>
+            </button>
             .
           </p>
         )}
       </div>
 
-      {/* ── Inline MFA enrollment recovery ── */}
       {needsEnroll ? (
         <div className="seg-approval-card__mfa">
           <p
@@ -162,104 +160,43 @@ export default function ApprovalCard({ approval, onResolved }: ApprovalCardProps
           <MfaEnroll onEnrolled={handleEnrolled} />
         </div>
       ) : (
-        <>
-          {/* ── Primary actions ── */}
-          <div
-            className="seg-approval-card__actions"
-            role="group"
-            aria-label="Acciones de aprobación"
+        <div
+          className="seg-approval-card__actions"
+          role="group"
+          aria-label="Acciones de aprobación"
+        >
+          <button
+            className="cv-btn cv-btn--primary cv-btn--sm"
+            onClick={handlePermitirClick}
+            disabled={busy || riddleNotReady}
+            type="button"
+            aria-label={
+              mfaDisabled
+                ? 'Permitir esta acción'
+                : 'Permitir esta acción (requiere tu MFA)'
+            }
           >
-            <button
-              className="cv-btn cv-btn--primary cv-btn--sm"
-              onClick={openMfa}
-              disabled={busy || riddleNotReady}
-              type="button"
-              aria-label="Permitir esta acción (requiere tu MFA)"
-            >
-              Permitir…
-            </button>
-            <button
-              className="cv-btn cv-btn--ghost cv-btn--sm"
-              onClick={handleDeny}
-              disabled={busy}
-              type="button"
-              aria-label="Denegar esta acción"
-            >
-              Denegar
-            </button>
-          </div>
+            Permitir
+          </button>
+          <button
+            className="cv-btn cv-btn--ghost cv-btn--sm"
+            onClick={handleDeny}
+            disabled={busy}
+            type="button"
+            aria-label="Denegar esta acción"
+          >
+            Denegar
+          </button>
+        </div>
+      )}
 
-          {/* ── MFA verification form ── */}
-          {showMfa && (
-            <form
-              className="seg-approval-card__mfa"
-              onSubmit={handleApprove}
-              aria-label="Verificación del dueño"
-            >
-              <input
-                ref={totpRef}
-                className="cv-input"
-                inputMode="numeric"
-                autoComplete="one-time-code"
-                maxLength={8}
-                placeholder="Código MFA (6 dígitos)"
-                aria-label="Código MFA"
-                value={totp}
-                onChange={e => setTotp(e.target.value)}
-              />
-
-              {needsRiddle && (
-                <input
-                  className="cv-input"
-                  type="text"
-                  placeholder="Respuesta de tu acertijo personal"
-                  aria-label="Respuesta del acertijo"
-                  value={riddle}
-                  onChange={e => setRiddle(e.target.value)}
-                />
-              )}
-
-              {needsHumanity && (
-                <label className="seg-approval-card__humanity">
-                  <input
-                    type="checkbox"
-                    checked={humanity}
-                    onChange={e => setHumanity(e.target.checked)}
-                  />
-                  Confirmo que soy yo (presencia humana)
-                </label>
-              )}
-
-              {errorMessage && (
-                <p
-                  className="seg-approval-card__mfa-error"
-                  role="alert"
-                  aria-live="assertive"
-                >
-                  {errorMessage}
-                </p>
-              )}
-
-              <div className="seg-approval-card__mfa-actions">
-                <button
-                  type="submit"
-                  className="cv-btn cv-btn--primary cv-btn--sm"
-                  disabled={busy}
-                >
-                  {busy ? 'Confirmando…' : 'Confirmar'}
-                </button>
-                <button
-                  type="button"
-                  className="cv-btn cv-btn--ghost cv-btn--sm"
-                  onClick={() => { setShowMfa(false); setErrorMessage('') }}
-                  disabled={busy}
-                >
-                  Cancelar
-                </button>
-              </div>
-            </form>
-          )}
-        </>
+      {showModal && (
+        <MfaModal
+          tier={tier}
+          title="Aprobar acción"
+          onSign={handleApprove}
+          onCancel={() => setShowModal(false)}
+        />
       )}
     </div>
   )

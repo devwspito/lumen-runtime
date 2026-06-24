@@ -336,6 +336,7 @@ export interface PendingApproval {
 export interface MfaStatus {
   enrolled: boolean
   riddle_set?: boolean
+  riddle_question?: string
 }
 
 export interface PolicyCatalogEntry {

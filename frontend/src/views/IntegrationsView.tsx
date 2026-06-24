@@ -7,6 +7,7 @@ import {
   ApiError,
 } from '../api/client'
 import type { ComposioStatus, ComposioApp, WebSearchStatus } from '../api/types'
+import Badge from '../components/Badge'
 
 // Mirrors vanilla integrations.js load order: status first → prevents calling
 // connected/apps when Composio has no key (avoids hanging for minutes).
@@ -247,6 +248,7 @@ interface AppRowProps {
 }
 
 function AppRow({ app, isConnected, onConnect }: AppRowProps) {
+  const displayName = app.name ?? (app as unknown as Record<string, unknown>).toolkit_slug as string | undefined ?? app.slug ?? '—'
   return (
     <div className={`integration-row${isConnected ? ' integration-row--connected' : ''}`}>
       <div className="integration-row__icon" aria-hidden="true">
@@ -256,20 +258,18 @@ function AppRow({ app, isConnected, onConnect }: AppRowProps) {
         }
       </div>
       <div className="integration-row__info">
-        <div className="integration-row__name">{app.name ?? app.slug}</div>
+        <div className="integration-row__name">{displayName}</div>
         {app.description && (
-          <div className="integration-row__desc">{app.description}</div>
+          <div className="integration-row__desc" title={app.description}>{app.description}</div>
         )}
       </div>
       <div className="integration-row__status" style={{ display: 'flex', alignItems: 'center', gap: 'var(--sp-2)' }}>
         {isConnected
-          ? (
-            <span className="integration-connected-tag">✓ Conectado</span>
-          )
+          ? <Badge variant="ok">✓ Conectado</Badge>
           : (
             <button
               className="cv-btn cv-btn--secondary cv-btn--sm"
-              aria-label={`Conectar ${app.name ?? app.slug}`}
+              aria-label={`Conectar ${displayName}`}
               onClick={() => onConnect?.(app)}
             >
               Conectar

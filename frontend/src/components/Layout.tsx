@@ -4,10 +4,10 @@ import { listConversations, listPendingApprovals } from '../api/client'
 import { useChat } from '../hooks/useChat'
 import type { ConversationSummary } from '../api/types'
 
-// Layout now receives the provider-check state from the gate in App.tsx
-// so it can show the "Falta conectar un modelo" badge without a second fetch.
+// activeProviderReload lets child views (ProvidersView) trigger a re-check after
+// connecting a model. The "Falta conectar un modelo" nudge was removed — the chat
+// shows its own in-chat no-model alert, so the sidebar nudge is redundant.
 export interface LayoutProps {
-  hasActiveProvider: boolean
   activeProviderReload(): void
 }
 
@@ -109,6 +109,16 @@ function MemoriaIcon() {
   )
 }
 
+function ArchivosIcon() {
+  return (
+    <svg className="nav-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M4 2h5l3 3v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1Z"
+        stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
+      <path d="M9 2v3h3" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
 function PlusIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
@@ -124,6 +134,7 @@ const NAV_ITEMS: NavItem[] = [
   { to: '/skills',       label: 'Habilidades',     icon: <SkillsIcon /> },
   { to: '/integraciones',label: 'Integraciones',   icon: <IntegrationsIcon /> },
   { to: '/mcp',          label: 'Herramientas',    icon: <McpIcon /> },
+  { to: '/archivos',     label: 'Archivos',        icon: <ArchivosIcon /> },
   { to: '/proveedores',  label: 'Proveedores',     icon: <ProvidersIcon /> },
   { to: '/seguridad',    label: 'Seguridad',       icon: <SecurityIcon /> },
   { to: '/memoria',      label: 'Memoria',         icon: <MemoriaIcon /> },
@@ -160,6 +171,10 @@ export interface ChatOutletContext {
   stopStream(): void
   /** Incremented each time the user sends a message — signals PendingApprovalsInChat to poll immediately. */
   approvalRefreshTick: number
+  /** Call after a provider is connected/activated to trigger an immediate re-check of the nudge state. */
+  reloadProvider(): void
+  /** True while re-attaching to a stream that was in-flight before a page refresh. */
+  reconnecting: boolean
 }
 
 interface RecentsSectionProps {
@@ -275,11 +290,11 @@ function RecentsSection({ activeConvId, loadConversation }: RecentsSectionProps)
   )
 }
 
-export default function Layout({ hasActiveProvider, activeProviderReload }: LayoutProps) {
+export default function Layout({ activeProviderReload }: LayoutProps) {
   const navigate = useNavigate()
-  // Silence the unused-var lint for activeProviderReload until a future
-  // feature (auto-reconnect after provider change) uses it.
-  void activeProviderReload
+  // activeProviderReload is exposed on the outlet context so views like
+  // ProvidersView can signal an immediate re-check after connecting a model.
+  // The hook already self-heals via a 5 s poll; this enables instant feedback.
 
   // Chat state lives here, above both the sidebar nav (RecentsSection) and
   // the main content area (ChatView). ChatView receives it via outlet context.
@@ -391,19 +406,6 @@ export default function Layout({ hasActiveProvider, activeProviderReload }: Layo
           </div>
         </div>
 
-        {/* "Connect a model" nudge badge — visible only when no provider is active */}
-        {!hasActiveProvider && (
-          <NavLink
-            to="/proveedores"
-            className="sidebar-setup-badge"
-            aria-label="Conecta un modelo para usar el chat"
-          >
-            <span className="sidebar-setup-badge__dot" aria-hidden="true" />
-            <span className="sidebar-setup-badge__text">Falta conectar un modelo</span>
-            <span className="sidebar-setup-badge__arrow" aria-hidden="true">→</span>
-          </NavLink>
-        )}
-
         {/* User chip */}
         <div className="sidebar-user">
           <div className="user-avatar" aria-hidden="true">U</div>
@@ -422,6 +424,8 @@ export default function Layout({ hasActiveProvider, activeProviderReload }: Layo
           status: chat.status,
           stopStream: chat.stopStream,
           approvalRefreshTick,
+          reloadProvider: activeProviderReload,
+          reconnecting: chat.reconnecting,
         } satisfies ChatOutletContext} />
       </main>
     </div>

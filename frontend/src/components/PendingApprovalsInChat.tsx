@@ -1,18 +1,15 @@
 /**
  * PendingApprovalsInChat — polls for HITL approvals and renders those that
- * belong to the currently active conversation inside the chat message list.
+ * belong to the currently active conversation (or orphan approvals with no
+ * conversation_id that could block any agent cycle) inside the chat message list.
  *
- * Decision — conversation_id === null:
- *   Approvals without a conversation_id were written before the migration that
- *   added that column. Showing them in every chat would be noisy and confusing
- *   (the user wouldn't know which agent triggered them). We therefore show them
- *   only in SeguridadView (the full list), NOT here. Rationale: the Security
- *   view is always one click away and serves as the authoritative HITL queue;
- *   the in-chat widget is a convenience shortcut for the active turn only.
+ * Flash prevention: we only replace the rendered list when a poll SUCCEEDS.
+ * A transient poll failure or in-flight state keeps the previous list visible
+ * so cards never disappear for a frame between polls.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { listPendingApprovals } from '../api/client'
+import { listPendingApprovals, getPolicies } from '../api/client'
 import type { PendingApproval } from '../api/types'
 import ApprovalCard from './ApprovalCard'
 
@@ -29,20 +26,29 @@ export default function PendingApprovalsInChat({
   refreshTick,
 }: PendingApprovalsInChatProps) {
   const [approvals, setApprovals] = useState<PendingApproval[]>([])
+  const [mfaDisabled, setMfaDisabled] = useState(false)
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const load = useCallback(async () => {
-    const all = await listPendingApprovals()
-    if (!Array.isArray(all)) return
+    try {
+      const [all, pol] = await Promise.all([listPendingApprovals(), getPolicies()])
+      if (!Array.isArray(all)) return
 
-    // Keep only approvals that belong to the active conversation.
-    // Approvals with conversation_id === null are intentionally excluded here
-    // (see file-level decision comment above).
-    const filtered = currentThreadId
-      ? all.filter(a => a.conversation_id === currentThreadId)
-      : []
+      // Show approvals belonging to the active conversation, PLUS orphan ones
+      // (conversation_id null/empty) that may come from scheduled/autonomous
+      // cycles — they are never attached to a thread but still block the agent.
+      const filtered = all.filter(a =>
+        (currentThreadId && a.conversation_id === currentThreadId) ||
+        !a.conversation_id
+      )
 
-    setApprovals(filtered)
+      // Only update state on a successful poll so a transient empty response
+      // does not flash-clear cards that are still pending.
+      setApprovals(filtered)
+      setMfaDisabled(pol.mfa_on_dangers === false)
+    } catch {
+      // Transient failure — keep last known approvals visible.
+    }
   }, [currentThreadId])
 
   // Start/restart poll whenever the active thread changes.
@@ -72,6 +78,7 @@ export default function PendingApprovalsInChat({
         <ApprovalCard
           key={a.proposal_id}
           approval={a}
+          mfaDisabled={mfaDisabled}
           onResolved={() => { void load() }}
         />
       ))}

@@ -5,11 +5,14 @@
  * expressed as a React hook with immutable state instead of direct DOM mutation.
  */
 
-import { useCallback, useReducer, useRef } from 'react'
+import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import { postChat, openTaskStream, getConversation } from '../api/client'
 import type { StreamCallbacks } from '../api/client'
 import type { StreamFrame } from '../api/types'
 import { renderMarkdown } from '../lib/markdown'
+
+const SS_CONV_ID = 'lumen:convId'
+const SS_TASK_ID = 'lumen:taskId'
 
 function genUUID(): string {
   try {
@@ -189,6 +192,8 @@ interface UseChatReturn {
   convId: string | null
   messages: ChatMessage[]
   status: ChatStatus
+  /** True while re-attaching to a stream that was in-flight before a page refresh. */
+  reconnecting: boolean
   sendMessage(text: string): Promise<void>
   startNew(): void
   stopStream(): void
@@ -205,6 +210,10 @@ export function useChat(): UseChatReturn {
   const streamRef = useRef<{ close(): void } | null>(null)
   // Stable ref to the assistant message id currently streaming
   const activeAssistantIdRef = useRef<string | null>(null)
+  // Tracks whether the mount-restore has already run
+  const restoredRef = useRef(false)
+  // "reconectando…" status while re-attaching a stream after refresh
+  const [reconnecting, setReconnecting] = useState(false)
 
   const stopStream = useCallback(() => {
     streamRef.current?.close()
@@ -218,12 +227,100 @@ export function useChat(): UseChatReturn {
     } else {
       dispatch({ type: 'STATUS_IDLE' })
     }
+    sessionStorage.removeItem(SS_TASK_ID)
   }, [])
 
   const startNew = useCallback(() => {
     stopStream()
+    sessionStorage.removeItem(SS_CONV_ID)
+    sessionStorage.removeItem(SS_TASK_ID)
     dispatch({ type: 'RESET' })
   }, [stopStream])
+
+  // Persist convId to sessionStorage whenever it changes so a refresh can restore it.
+  useEffect(() => {
+    if (state.convId) {
+      sessionStorage.setItem(SS_CONV_ID, state.convId)
+    }
+  }, [state.convId])
+
+  // On mount: restore the last conversation and, if a task was streaming, re-attach.
+  useEffect(() => {
+    if (restoredRef.current) return
+    restoredRef.current = true
+
+    const savedConvId = sessionStorage.getItem(SS_CONV_ID)
+    const savedTaskId = sessionStorage.getItem(SS_TASK_ID)
+
+    if (!savedConvId) return
+
+    // Load the conversation history first.
+    getConversation(savedConvId)
+      .then(detail => {
+        const messages: ChatMessage[] = detail.messages
+          .filter(m => m.role === 'user' || m.role === 'assistant')
+          .map(m => {
+            if (m.role === 'user') {
+              return { type: 'user' as const, id: genUUID(), text: m.content }
+            }
+            return {
+              type: 'assistant' as const,
+              id: genUUID(),
+              thinkingText: '',
+              thinkingDone: true,
+              toolSteps: [],
+              activityText: '',
+              renderedHtml: renderMarkdown(m.content),
+              isStreaming: false,
+            }
+          })
+        dispatch({ type: 'LOAD_MESSAGES', convId: savedConvId, messages })
+
+        // If a task stream was in-flight, re-attach to receive the rest.
+        if (savedTaskId) {
+          const assistantMsgId = genUUID()
+          dispatch({ type: 'ADD_ASSISTANT', id: assistantMsgId })
+          dispatch({ type: 'STATUS_STREAMING', text: 'Reconectando…' })
+          activeAssistantIdRef.current = assistantMsgId
+          setReconnecting(true)
+
+          const callbacks: StreamCallbacks = {
+            onDelta(chunk) { dispatch({ type: 'DELTA', id: assistantMsgId, chunk }) },
+            onThinking(chunk) { dispatch({ type: 'THINKING', id: assistantMsgId, chunk }) },
+            onToolCall(frame: Extract<StreamFrame, { kind: 'tool_call' }>) {
+              const d = frame.tool_call ?? (frame as Record<string, unknown>)
+              const name = (d.tool as string | undefined) ?? (d.tool_name as string | undefined) ?? 'herramienta'
+              const label = (d.label as string | undefined) ?? String(name).replace(/_/g, ' ')
+              const target = String((d.target as string | undefined) ?? '').slice(0, 80)
+              dispatch({ type: 'TOOL_CALL', id: assistantMsgId, step: { name, label, target } })
+              dispatch({ type: 'THINKING_DONE', id: assistantMsgId })
+            },
+            onStatus(msg) { dispatch({ type: 'STATUS_STREAMING', text: msg }) },
+            onDone() {
+              dispatch({ type: 'STREAM_DONE', id: assistantMsgId })
+              streamRef.current = null
+              activeAssistantIdRef.current = null
+              sessionStorage.removeItem(SS_TASK_ID)
+              setReconnecting(false)
+            },
+            onError(msg) {
+              dispatch({ type: 'STATUS_ERROR', message: msg })
+              streamRef.current = null
+              activeAssistantIdRef.current = null
+              sessionStorage.removeItem(SS_TASK_ID)
+              setReconnecting(false)
+            },
+          }
+          streamRef.current = openTaskStream(savedTaskId, callbacks)
+        }
+      })
+      .catch(() => {
+        // Stale session — clear and start fresh.
+        sessionStorage.removeItem(SS_CONV_ID)
+        sessionStorage.removeItem(SS_TASK_ID)
+      })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const sendMessage = useCallback(async (text: string) => {
     if (!text.trim()) return
@@ -260,6 +357,7 @@ export function useChat(): UseChatReturn {
     dispatch({ type: 'ADD_ASSISTANT', id: assistantMsgId })
     dispatch({ type: 'STATUS_STREAMING', text: 'Procesando…' })
     activeAssistantIdRef.current = assistantMsgId
+    sessionStorage.setItem(SS_TASK_ID, taskId)
 
     const callbacks: StreamCallbacks = {
       onDelta(chunk) {
@@ -288,11 +386,13 @@ export function useChat(): UseChatReturn {
         dispatch({ type: 'STREAM_DONE', id: assistantMsgId })
         streamRef.current = null
         activeAssistantIdRef.current = null
+        sessionStorage.removeItem(SS_TASK_ID)
       },
       onError(msg) {
         dispatch({ type: 'STATUS_ERROR', message: msg })
         streamRef.current = null
         activeAssistantIdRef.current = null
+        sessionStorage.removeItem(SS_TASK_ID)
       },
     }
 
@@ -330,6 +430,7 @@ export function useChat(): UseChatReturn {
     convId: state.convId,
     messages: state.messages,
     status: state.status,
+    reconnecting,
     sendMessage,
     startNew,
     stopStream,

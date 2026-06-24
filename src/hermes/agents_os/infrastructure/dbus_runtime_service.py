@@ -2826,16 +2826,19 @@ class DbusRuntimeServiceWiring:
 
     @staticmethod
     def _validate_cron(cron: str) -> bool:
-        """Validates that `cron` is a 5-field cron expression (basic check).
+        """Validates that `cron` is a 5-field (recurrent) OR 6-field (one-shot) expr.
 
-        Accepts standard 5-field cron: min hr dom mon dow.
+        5 fields: min hr dom mon dow (standard recurrent).
+        6 fields: min hr dom mon dow year — the frontend's one-shot form builds this
+        so a "Una vez" task encodes a specific date+year; one_shot=True means it
+        fires once then disables, so the trailing year is accepted (not rejected as
+        "must be 5 fields" — that was the bug that made one-shot tasks un-creatable).
         Each field may be *, a number, a range (n-m), a step (*/n), or a list.
-        Does NOT validate field ranges — a full parser (croniter) is not required.
         Returns True if the shape is valid, False otherwise.
         """
         import re  # noqa: PLC0415
         _CRON_FIELD = r"(?:\*(?:/\d+)?|\d+(?:-\d+)?(?:/\d+)?(?:,\d+(?:-\d+)?(?:/\d+)?)*)"
-        pattern = rf"^{_CRON_FIELD}(?:\s+{_CRON_FIELD}){{4}}$"
+        pattern = rf"^{_CRON_FIELD}(?:\s+{_CRON_FIELD}){{4,5}}$"
         return bool(re.match(pattern, cron.strip()))
 
     async def create_scheduled_task(

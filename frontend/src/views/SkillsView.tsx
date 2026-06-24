@@ -9,6 +9,7 @@ import {
 } from '../api/client'
 import type { Skill, HubSkillResult, HubInstallResponse } from '../api/types'
 import { useConfirmDialog } from '../components/ConfirmDialog'
+import Badge, { type BadgeVariant } from '../components/Badge'
 
 // ── Poll helper ───────────────────────────────────────────────────────────────
 
@@ -495,12 +496,12 @@ export default function SkillsView() {
 
 // ── Installed skill row ───────────────────────────────────────────────────────
 
-function stateMeta(state: string) {
+function stateMeta(state: string): { label: string; variant: BadgeVariant } {
   const s = state.toLowerCase()
-  if (s.includes('autonom')) return { label: 'Autónoma (sin tu permiso)', cls: 'is-autonomous' }
-  if (s.includes('deprec')) return { label: 'Obsoleta', cls: 'is-deprecated' }
-  if (s.includes('valid')) return { label: 'Validada', cls: 'is-validated' }
-  return { label: state, cls: '' }
+  if (s.includes('autonom')) return { label: 'Autónoma', variant: 'ok' }
+  if (s.includes('deprec'))  return { label: 'Obsoleta', variant: 'neutral' }
+  if (s.includes('valid'))   return { label: 'Validada', variant: 'accent' }
+  return { label: state, variant: 'neutral' }
 }
 
 interface SkillRowProps {
@@ -527,7 +528,7 @@ function SkillRow({ skill, onPromote, onUninstall }: SkillRowProps) {
       </div>
       <div className="skill-row__actions">
         {meta.label && (
-          <span className={`skill-state-chip ${meta.cls}`}>{meta.label}</span>
+          <Badge variant={meta.variant}>{meta.label}</Badge>
         )}
         {isValidated && (
           <button
@@ -552,7 +553,9 @@ function SkillRow({ skill, onPromote, onUninstall }: SkillRowProps) {
 
 // ── Hub result row ────────────────────────────────────────────────────────────
 
-const TRUST_TONE: Record<string, string> = { official: 'ok', verified: 'ok', community: 'warn', unknown: '' }
+const TRUST_VARIANT: Record<string, BadgeVariant> = {
+  official: 'ok', verified: 'ok', community: 'warn',
+}
 
 interface HubResultRowProps {
   item: HubSkillResult
@@ -566,20 +569,18 @@ function HubResultRow({ item, installedNames, onInstall }: HubResultRowProps) {
   const already = installedNames.has(name) || installedNames.has(item.identifier ?? '')
   const docUrl = skillDocUrl(item)
   const trust = item.trust_level ?? ''
-  const tone = TRUST_TONE[trust.toLowerCase()] ?? ''
+  const trustVariant: BadgeVariant = TRUST_VARIANT[trust.toLowerCase()] ?? 'neutral'
 
   return (
     <div className="skill-hub-result">
       <div className="skill-hub-result__info">
         <div className="skill-hub-result__name">
           {name}
-          {trust && (
-            <span className={`hub-badge${tone ? ` hub-badge--${tone}` : ''}`}>{trust}</span>
-          )}
-          {item.source && <span className="hub-badge">{item.source}</span>}
+          {trust && <Badge variant={trustVariant}>{trust}</Badge>}
+          {item.source && <Badge variant="neutral">{item.source}</Badge>}
         </div>
         {item.description && (
-          <div className="skill-hub-result__desc">{item.description}</div>
+          <div className="skill-hub-result__desc" title={item.description}>{item.description}</div>
         )}
       </div>
       <div className="skill-hub-result__actions">

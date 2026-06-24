@@ -114,26 +114,47 @@ def create_approvals_router(mfa: MfaStore | None = None) -> APIRouter:
             except AgentUnavailable as exc:
                 raise _unavailable(proposal_id, exc) from exc
 
-        # APPROVE → forward the owner's raw MFA factors to the GATE, the single
-        # enforcement point. The agent (uid 999, no TOTP secret) cannot mint them.
-        # Light is_enrolled pre-check only for a friendly 403; the gate re-verifies.
+        # APPROVE → VERIFY the owner's MFA factors HERE. The shell-server is the
+        # only component that holds the TOTP secret + riddle; the daemon/gate never
+        # see them. The required tier (TOTP / +humanity / +riddle) depends on the
+        # proposal's tool+risk. Previously this forwarded `mfa_factors` to the
+        # control-plane adapter, whose approve() does NOT accept that kwarg → 500,
+        # AND the factors were never actually verified. Now: verify, then forward
+        # ONLY the proposal_id to mint the token + re-enqueue.
         if not store.is_enrolled():
             raise HTTPException(status_code=403, detail={"code": "mfa_not_enrolled",
                 "message": "Configura el MFA antes de aprobar acciones (obligatorio)."})
 
-        factors = MfaFactors(
-            totp=body.totp, humanity=body.humanity, riddle_answer=body.riddle_answer)
+        try:
+            pending = await request.app.state.control_plane.list_hitl_pending()
+        except AgentUnavailable as exc:
+            raise _unavailable(proposal_id, exc) from exc
+        row = next(
+            (r for r in pending if str(r.get("proposal_id")) == str(parsed_id)), {})
+        level = classify_level(str(row.get("risk", "")), str(row.get("tool_name", "")))
+
+        ok, reason = store.verify(
+            level=level,
+            totp=body.totp or "",
+            humanity=body.humanity,
+            riddle_answer=body.riddle_answer,
+        )
+        if not ok:
+            logger.warning("hermes.cowork.approvals.mfa_denied proposal=%s reason=%s",
+                           proposal_id, reason)
+            raise HTTPException(status_code=401, detail={"code": reason,
+                "message": _mfa_reason_message(reason)})
+
         try:
             await request.app.state.control_plane.approve(
-                channel=channel, proposal_id=parsed_id, mfa_factors=factors)
-            logger.info("hermes.cowork.approvals.approved proposal=%s", proposal_id)
+                channel=channel, proposal_id=parsed_id)
+            logger.info("hermes.cowork.approvals.approved proposal=%s tier=%s",
+                        proposal_id, level.value)
             return {"ok": True, "decision": body.decision}
         except ApprovalGateError as exc:
-            reason = getattr(exc, "reason", "mfa_denied")
-            logger.warning("hermes.cowork.approvals.mfa_denied proposal=%s reason=%s err=%s",
-                           proposal_id, reason, exc)
-            raise HTTPException(status_code=401, detail={"code": reason,
-                "message": _mfa_reason_message(reason)}) from exc
+            gate_reason = getattr(exc, "reason", "mfa_denied")
+            raise HTTPException(status_code=401, detail={"code": gate_reason,
+                "message": _mfa_reason_message(gate_reason)}) from exc
         except AgentUnavailable as exc:
             raise _unavailable(proposal_id, exc) from exc
 

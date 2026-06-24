@@ -7,6 +7,7 @@ import {
 } from '../api/client'
 import type { Provider } from '../api/types'
 import { useConfirmDialog } from '../components/ConfirmDialog'
+import Badge from '../components/Badge'
 
 // Mirrors vanilla providers.js: badge colours per kind/auth-type
 const KIND_COLORS: Record<string, string> = {
@@ -367,16 +368,10 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
             <span className="provider-row__model">{provider.default_model}</span>
           )}
           {isConfigured && provider.is_active && (
-            <span className="provider-row__active-tag">Activo</span>
+            <Badge variant="ok">Activo</Badge>
           )}
           {addConnFailed && (
-            <span
-              className="provider-badge"
-              style={{ background: '#EF444422', color: '#EF4444' }}
-              role="alert"
-            >
-              Conexión fallida — revisa la clave
-            </span>
+            <Badge variant="danger"><span role="alert">Conexión fallida — revisa la clave</span></Badge>
           )}
         </div>
       </div>

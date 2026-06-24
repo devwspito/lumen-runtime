@@ -12,7 +12,7 @@
  * in all versions and the configured list is always present.
  */
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { listProviders } from '../api/client'
 
 type Status = 'loading' | 'ready' | 'error'
@@ -23,28 +23,44 @@ export interface ActiveProviderState {
   reload(): void
 }
 
+const POLL_INTERVAL_MS = 5_000
+
 export function useActiveProvider(): ActiveProviderState {
   const [status, setStatus] = useState<Status>('loading')
   const [hasActive, setHasActive] = useState(false)
+  // Avoid setting state after unmount
+  const alive = useRef(true)
 
-  const reload = useCallback(() => {
-    setStatus('loading')
+  const fetch = useCallback(() => {
     listProviders()
       .then(providers => {
+        if (!alive.current) return
         const active = Array.isArray(providers) && providers.some(p => p.is_active)
         setHasActive(active)
         setStatus('ready')
       })
       .catch(() => {
-        // If the call fails we default to "no active provider" so the gate
-        // doesn't permanently block navigation.  The user can retry from
-        // the onboarding wizard.
-        setHasActive(false)
+        if (!alive.current) return
+        // On error keep last hasActive value so a transient failure doesn't
+        // flash the "no model" nudge while the owner's provider is working.
         setStatus('error')
       })
   }, [])
 
-  useEffect(() => { reload() }, [reload])
+  const reload = useCallback(() => {
+    setStatus('loading')
+    fetch()
+  }, [fetch])
+
+  useEffect(() => {
+    alive.current = true
+    fetch()
+    const id = setInterval(fetch, POLL_INTERVAL_MS)
+    return () => {
+      alive.current = false
+      clearInterval(id)
+    }
+  }, [fetch])
 
   return { status, hasActive, reload }
 }

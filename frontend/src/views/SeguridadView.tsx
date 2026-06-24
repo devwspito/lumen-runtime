@@ -1,10 +1,19 @@
 /**
  * SeguridadView — Security, governance, and HITL approvals.
  *
- * Three sub-areas mirroring vanilla security.js / governance.js / approvals.js:
- *   (a) Pending HITL approvals — polled every 3 s, Approve/Deny with MFA form.
- *   (b) Governance — MFA enrollment + security policy presets + catalog-based toggles.
- *   (c) Security center — egress permissions, audit chain, recent scans, policy JSON.
+ * Three sub-areas:
+ *   (a) Pending HITL approvals — polled every 3 s, Approve/Deny via MfaModal.
+ *   (b) Governance — MFA enrollment + security policy presets + accordion catalog.
+ *   (c) Security center — egress permissions, audit chain, recent scans.
+ *
+ * Design changes vs. previous version:
+ *   - "Configuración avanzada" section REMOVED; capabilities are always an
+ *     accordion (collapsed: name + count + delicacy chip + section toggle;
+ *     expanded: full per-tool checkbox list).
+ *   - Preset buttons show a PREVIEW only; a "Guardar" button triggers MfaModal.
+ *   - All MFA collection goes through MfaModal — no inline input fields.
+ *   - "Pedir mi MFA para los comandos peligrosos" requires MFA to DISABLE (ON is free).
+ *   - When mfa_on_dangers is OFF, approvals and toggles fire directly.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
@@ -35,13 +44,14 @@ import type {
 } from '../api/types'
 import ApprovalCard from '../components/ApprovalCard'
 import MfaEnroll from '../components/MfaEnroll'
-import { useConfirmDialog } from '../components/ConfirmDialog'
+import MfaModal from '../components/MfaModal'
+import type { MfaTier, MfaFactors } from '../components/MfaModal'
 
 // ── Approvals section ─────────────────────────────────────────────────────────
 
 const POLL_INTERVAL_MS = 3000
 
-function ApprovalsSection() {
+function ApprovalsSection({ mfaDisabled }: { mfaDisabled: boolean }) {
   const [approvals, setApprovals] = useState<PendingApproval[]>([])
   const [loading, setLoading] = useState(true)
 
@@ -70,6 +80,7 @@ function ApprovalsSection() {
             <ApprovalCard
               key={a.proposal_id}
               approval={a}
+              mfaDisabled={mfaDisabled}
               onResolved={load}
             />
           ))}
@@ -87,23 +98,29 @@ const PRESETS: Array<[string, string, string]> = [
   ['bloqueado', 'Bloqueado', 'Todo desactivado — el agente no puede ejecutar ninguna acción'],
 ]
 
-// Human-readable names for known category slugs.
 const CATEGORY_LABELS: Record<string, string> = {
-  filesystem:   'Sistema de archivos',
-  network:      'Red',
-  terminal:     'Terminal',
-  browser:      'Navegador',
-  memory:       'Memoria',
-  tasks:        'Tareas programadas',
-  agents:       'Agentes',
-  providers:    'Modelos y proveedores',
-  security:     'Seguridad del sistema',
-  mcp:          'Herramientas externas (MCP)',
-  composio:     'Apps conectadas (Composio)',
+  apps:          'Apps',
+  web:           'Web y navegador',
+  communication: 'Comunicación',
+  screen:        'Pantalla y control',
+  composio:      'Apps conectadas',
+  system:        'Sistema',
+  orchestration: 'Orquestación',
+  terminal:      'Terminal',
+  media:         'Medios',
+  mcp:           'Herramientas externas (MCP)',
+  programming:   'Programación',
+  filesystem:    'Ficheros',
+  memory:        'Memoria',
+  // Legacy / catch-all mappings
+  network:       'Red',
+  browser:       'Navegador',
+  tasks:         'Tareas programadas',
+  agents:        'Agentes',
+  providers:     'Modelos y proveedores',
+  security:      'Seguridad del sistema',
 }
 
-// Categories that are system-defense tools, not LLM capabilities.
-// These get separated into the "Defensas del sistema" block.
 const DEFENSE_CATEGORIES = new Set(['security'])
 
 function categoryLabel(cat: string): string {
@@ -117,8 +134,6 @@ function aggregateDelicacy(entries: PolicyCatalogEntry[]): DelicacyLevel {
   if (entries.some(e => e.delicacy === 'delicate')) return 'delicate'
   return 'normal'
 }
-
-// ── Delicacy badge ────────────────────────────────────────────────────────────
 
 function DelicacyBadge({ level, size = 'normal' }: { level: DelicacyLevel; size?: 'normal' | 'sm' }) {
   if (level === 'normal') return null
@@ -134,8 +149,6 @@ function DelicacyBadge({ level, size = 'normal' }: { level: DelicacyLevel; size?
     </span>
   )
 }
-
-// ── Mini toggle switch ────────────────────────────────────────────────────────
 
 interface ToggleSwitchProps {
   id: string
@@ -161,31 +174,24 @@ function ToggleSwitch({ id, checked, onChange, disabled, indeterminate, 'aria-la
   )
 }
 
-// ── Category group ────────────────────────────────────────────────────────────
+// ── Accordion category group ──────────────────────────────────────────────────
 
 interface CategoryGroupProps {
   category: string
   entries: PolicyCatalogEntry[]
-  polTotp: string
-  polRiddle: string
   busy: boolean
-  onToggleTool: (name: string, enabled: boolean) => Promise<void>
-  onToggleAll: (category: string, enabled: boolean, entries: PolicyCatalogEntry[]) => Promise<void>
-  mode?: 'simple' | 'advanced'
+  onToggleTool: (name: string, enabled: boolean) => void
+  onToggleAll: (category: string, enabled: boolean, entries: PolicyCatalogEntry[]) => void
 }
 
 function CategoryGroup({
   category,
   entries,
-  polTotp,
-  polRiddle,
   busy,
   onToggleTool,
   onToggleAll,
-  mode = 'advanced',
 }: CategoryGroupProps) {
   const [expanded, setExpanded] = useState(false)
-  const isSimple = mode === 'simple'
 
   const allOn = entries.every(e => e.enabled)
   const allOff = entries.every(e => !e.enabled)
@@ -197,20 +203,16 @@ function CategoryGroup({
   return (
     <div className="seg-pol-group">
       <div className="seg-pol-group__header">
-        {isSimple ? (
-          <span className="seg-pol-group__expand" aria-hidden="true" />
-        ) : (
-          <button
-            type="button"
-            className="seg-pol-group__expand"
-            aria-expanded={expanded}
-            aria-controls={bodyId}
-            onClick={() => setExpanded(v => !v)}
-            title={expanded ? 'Contraer' : 'Expandir herramientas'}
-          >
-            <span className={`seg-pol-chevron ${expanded ? 'seg-pol-chevron--open' : ''}`} aria-hidden="true">▸</span>
-          </button>
-        )}
+        <button
+          type="button"
+          className="seg-pol-group__expand"
+          aria-expanded={expanded}
+          aria-controls={bodyId}
+          onClick={() => setExpanded(v => !v)}
+          title={expanded ? 'Contraer' : 'Expandir herramientas'}
+        >
+          <span className={`seg-pol-chevron ${expanded ? 'seg-pol-chevron--open' : ''}`} aria-hidden="true">▸</span>
+        </button>
 
         <span className="seg-pol-group__name">{categoryLabel(category)}</span>
         <span className="seg-pol-group__count" aria-label={`${entries.length} herramientas`}>{entries.length}</span>
@@ -232,7 +234,7 @@ function CategoryGroup({
         />
       </div>
 
-      {!isSimple && expanded && (
+      {expanded && (
         <ul
           id={bodyId}
           className="seg-pol-tool-list"
@@ -243,8 +245,6 @@ function CategoryGroup({
               key={entry.name}
               entry={entry}
               busy={busy}
-              polTotp={polTotp}
-              polRiddle={polRiddle}
               onToggle={onToggleTool}
             />
           ))}
@@ -259,9 +259,7 @@ function CategoryGroup({
 interface ToolRowProps {
   entry: PolicyCatalogEntry
   busy: boolean
-  polTotp: string
-  polRiddle: string
-  onToggle: (name: string, enabled: boolean) => Promise<void>
+  onToggle: (name: string, enabled: boolean) => void
 }
 
 function ToolRow({ entry, busy, onToggle }: ToolRowProps) {
@@ -299,6 +297,15 @@ function ToolRow({ entry, busy, onToggle }: ToolRowProps) {
   )
 }
 
+// ── Pending MFA action ────────────────────────────────────────────────────────
+// Represents an action queued to fire after MFA confirmation.
+
+type PendingAction =
+  | { kind: 'preset'; preset: string }
+  | { kind: 'tool'; tool: string; enabled: boolean }
+  | { kind: 'section'; category: string; enabled: boolean; entries: PolicyCatalogEntry[] }
+  | { kind: 'mfa_dangers'; enabled: boolean }
+
 // ── Governance section ────────────────────────────────────────────────────────
 
 function GovernanceSection() {
@@ -308,11 +315,15 @@ function GovernanceSection() {
   const [riddleQ, setRiddleQ] = useState('')
   const [riddleA, setRiddleA] = useState('')
   const [riddleTotp, setRiddleTotp] = useState('')
-  const [polTotp, setPolTotp] = useState('')
-  const [polRiddle, setPolRiddle] = useState('')
-  const [mfaError, setMfaError] = useState('')
   const [busy, setBusy] = useState(false)
-  const [confirm, ConfirmDialogNode] = useConfirmDialog()
+
+  // Preset preview: which preset is pending save (not yet applied)
+  const [pendingPreset, setPendingPreset] = useState<string | null>(null)
+
+  // MFA modal state: what action is waiting for factors
+  const [pendingAction, setPendingAction] = useState<PendingAction | null>(null)
+
+  const mfaDisabled = pol?.mfa_on_dangers === false
 
   const load = useCallback(async () => {
     const [m, p] = await Promise.all([mfaStatus(), getPolicies()])
@@ -323,7 +334,6 @@ function GovernanceSection() {
 
   useEffect(() => { load() }, [load])
 
-  // Group catalog entries: separate defense-category tools from capability tools.
   const { capabilityGroups, defenseGroups } = useMemo(() => {
     const catalog = pol?.catalog ?? []
     const grouped = new Map<string, PolicyCatalogEntry[]>()
@@ -344,20 +354,191 @@ function GovernanceSection() {
     return { capabilityGroups: capability, defenseGroups: defense }
   }, [pol?.catalog])
 
-  // Fallback: when catalog is absent, fall back to the flat tools map
-  // (pre-catalog backend compatibility).
   const legacyToolNames = useMemo(() => {
     if ((pol?.catalog?.length ?? 0) > 0) return []
     return Object.keys(pol?.tools ?? {}).sort()
   }, [pol?.catalog, pol?.tools])
 
-  function validateMfa(): boolean {
-    if (!polTotp.trim()) {
-      setMfaError('Introduce tu código MFA antes de cambiar una política.')
-      return false
+  // Determine MFA tier needed for the current pending action.
+  // Presets + mfa_dangers switch need riddle if enrolled; tools use mfa tier.
+  function tierForAction(action: PendingAction): MfaTier {
+    if (action.kind === 'preset' || action.kind === 'mfa_dangers') {
+      return mfa?.riddle_set ? 'mfa_riddle' : 'mfa'
     }
-    setMfaError('')
-    return true
+    // Tool / section toggles: use the most delicate tier among the entries
+    if (action.kind === 'tool') {
+      const entry = pol?.catalog?.find(e => e.name === action.tool)
+      if (entry?.delicacy === 'most_delicate') return 'mfa_riddle'
+      if (entry?.delicacy === 'delicate') return mfa?.riddle_set ? 'mfa_riddle' : 'mfa_humanity'
+      return 'mfa'
+    }
+    if (action.kind === 'section') {
+      const delicacy = aggregateDelicacy(action.entries)
+      if (delicacy === 'most_delicate') return 'mfa_riddle'
+      if (delicacy === 'delicate') return mfa?.riddle_set ? 'mfa_riddle' : 'mfa_humanity'
+      return 'mfa'
+    }
+    return 'mfa'
+  }
+
+  // Apply optimistic update for a single tool
+  function applyOptimisticTool(toolName: string, enabled: boolean) {
+    setPol(prev => {
+      if (!prev) return prev
+      return {
+        ...prev,
+        tools: { ...prev.tools, [toolName]: enabled },
+        catalog: prev.catalog?.map(e => e.name === toolName ? { ...e, enabled } : e),
+      }
+    })
+  }
+
+  function revertOptimisticTool(toolName: string, enabled: boolean) {
+    applyOptimisticTool(toolName, !enabled)
+  }
+
+  // Handle MFA sign callback from the modal
+  async function handleSign(factors: MfaFactors) {
+    if (!pendingAction) return
+    setBusy(true)
+    try {
+      if (pendingAction.kind === 'preset') {
+        await setPolicyPreset(
+          pendingAction.preset,
+          factors.totp,
+          factors.riddle_answer ?? null,
+        )
+        sileo.success({ title: `Preset «${pendingAction.preset}» aplicado` })
+        setPendingPreset(null)
+        setPendingAction(null)
+        await load()
+
+      } else if (pendingAction.kind === 'tool') {
+        applyOptimisticTool(pendingAction.tool, pendingAction.enabled)
+        try {
+          await setPolicyTool(pendingAction.tool, pendingAction.enabled, factors.totp, factors.riddle_answer ?? null)
+          sileo.success({ title: `${pendingAction.tool}: ${pendingAction.enabled ? 'activado' : 'desactivado'}` })
+          setPendingAction(null)
+        } catch (err) {
+          revertOptimisticTool(pendingAction.tool, pendingAction.enabled)
+          sileo.error({ title: `No se pudo cambiar: ${err instanceof Error ? err.message : err}` })
+          // Modal stays open on error (we set pendingAction=null only on success above)
+          return
+        }
+
+      } else if (pendingAction.kind === 'section') {
+        const toChange = pendingAction.entries.filter(e => e.enabled !== pendingAction.enabled)
+        let firstError: string | null = null
+        for (const entry of toChange) {
+          try {
+            await setPolicyTool(entry.name, pendingAction.enabled, factors.totp, factors.riddle_answer ?? null)
+            applyOptimisticTool(entry.name, pendingAction.enabled)
+          } catch (err) {
+            firstError = err instanceof Error ? err.message : String(err)
+            break
+          }
+        }
+        if (firstError) {
+          sileo.error({ title: `Error al cambiar la categoría: ${firstError}` })
+          await load()
+          return
+        }
+        if (toChange.length > 0) {
+          sileo.success({ title: `Categoría ${pendingAction.enabled ? 'activada' : 'desactivada'}` })
+        }
+        setPendingAction(null)
+
+      } else if (pendingAction.kind === 'mfa_dangers') {
+        await setMfaOnDangers(pendingAction.enabled, factors.totp, factors.riddle_answer ?? null)
+        sileo.success({
+          title: pendingAction.enabled
+            ? 'Verificación en peligrosos: activa'
+            : 'Verificación en peligrosos: desactivada',
+        })
+        setPol(prev => prev ? { ...prev, mfa_on_dangers: pendingAction.enabled } : prev)
+        setPendingAction(null)
+      }
+    } catch (err) {
+      sileo.error({ title: `No se pudo aplicar: ${err instanceof Error ? err.message : err}` })
+      // Leave modal open so user can retry with corrected TOTP
+      return
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // ── Handler wrappers that decide whether to open MFA modal or fire directly ──
+
+  function requestPresetSave() {
+    if (!pendingPreset) return
+    if (mfaDisabled) {
+      // Can't actually call setPolicyPreset without MFA — this path only exists
+      // when mfa_on_dangers is false. Presets still need MFA (they're NORMAL+).
+      // But per spec: when mfaDisabled, go direct. We'll let the server enforce.
+      void handleSign({ totp: '' })
+    } else {
+      setPendingAction({ kind: 'preset', preset: pendingPreset })
+    }
+  }
+
+  function requestToolToggle(tool: string, enabled: boolean) {
+    if (mfaDisabled) {
+      // MFA globally off — fire immediately with empty totp
+      void (async () => {
+        applyOptimisticTool(tool, enabled)
+        try {
+          await setPolicyTool(tool, enabled, '', null)
+          sileo.success({ title: `${tool}: ${enabled ? 'activado' : 'desactivado'}` })
+        } catch (err) {
+          revertOptimisticTool(tool, enabled)
+          sileo.error({ title: `No se pudo cambiar: ${err instanceof Error ? err.message : err}` })
+        }
+      })()
+    } else {
+      setPendingAction({ kind: 'tool', tool, enabled })
+    }
+  }
+
+  function requestSectionToggle(category: string, enabled: boolean, entries: PolicyCatalogEntry[]) {
+    if (mfaDisabled) {
+      void (async () => {
+        const toChange = entries.filter(e => e.enabled !== enabled)
+        for (const entry of toChange) {
+          try {
+            await setPolicyTool(entry.name, enabled, '', null)
+            applyOptimisticTool(entry.name, enabled)
+          } catch (err) {
+            sileo.error({ title: `No se pudo cambiar ${entry.name}: ${err instanceof Error ? err.message : err}` })
+            await load()
+            return
+          }
+        }
+        if (toChange.length > 0) sileo.success({ title: `Categoría ${enabled ? 'activada' : 'desactivada'}` })
+      })()
+    } else {
+      setPendingAction({ kind: 'section', category, enabled, entries })
+    }
+  }
+
+  function requestMfaDangersToggle(checked: boolean) {
+    if (checked) {
+      // Turning ON is free (no MFA needed)
+      void (async () => {
+        setBusy(true)
+        try {
+          await setMfaOnDangers(true, '', null)
+          sileo.success({ title: 'Verificación en peligrosos: activa' })
+          setPol(prev => prev ? { ...prev, mfa_on_dangers: true } : prev)
+        } catch (err) {
+          sileo.error({ title: `No se pudo activar: ${err instanceof Error ? err.message : err}` })
+        } finally {
+          setBusy(false)
+        }
+      })()
+    } else {
+      // Turning OFF requires MFA
+      setPendingAction({ kind: 'mfa_dangers', enabled: false })
+    }
   }
 
   async function handleRiddleSave() {
@@ -369,134 +550,27 @@ function GovernanceSection() {
       await mfaSetRiddle(riddleTotp, riddleQ, riddleA)
       sileo.success({ title: 'Acertijo guardado' })
       setRiddleQ(''); setRiddleA(''); setRiddleTotp('')
+      await load()
     } catch (err) {
       sileo.error({ title: `No se pudo guardar: ${err instanceof Error ? err.message : err}` })
     }
   }
 
-  async function handlePreset(preset: string) {
-    if (!validateMfa()) return
-    setBusy(true)
-    try {
-      await setPolicyPreset(preset, polTotp, polRiddle || null)
-      sileo.success({ title: `Preset «${preset}» aplicado` })
-      await load()
-    } catch (err) {
-      sileo.error({ title: `No se pudo aplicar: ${err instanceof Error ? err.message : err}` })
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  // Single-tool toggle (used by checkbox rows and master-toggle batches).
-  async function handleToolToggle(toolName: string, enabled: boolean) {
-    if (!validateMfa()) return
-    try {
-      await setPolicyTool(toolName, enabled, polTotp, polRiddle || null)
-      // Optimistic update: keep local state in sync
-      setPol(prev => {
-        if (!prev) return prev
-        const updatedCatalog = prev.catalog?.map(e =>
-          e.name === toolName ? { ...e, enabled } : e
-        )
-        return {
-          ...prev,
-          tools: { ...prev.tools, [toolName]: enabled },
-          catalog: updatedCatalog,
+  // Legacy tool toggle (flat tools map, no catalog)
+  function requestLegacyToolToggle(toolName: string, enabled: boolean) {
+    if (mfaDisabled) {
+      void (async () => {
+        try {
+          await setPolicyTool(toolName, enabled, '', null)
+          sileo.success({ title: `${toolName}: ${enabled ? 'activado' : 'desactivado'}` })
+          setPol(prev => prev ? { ...prev, tools: { ...prev.tools, [toolName]: enabled } } : prev)
+        } catch (err) {
+          sileo.error({ title: `No se pudo cambiar: ${err instanceof Error ? err.message : err}` })
+          setPol(prev => prev ? { ...prev, tools: { ...prev.tools, [toolName]: !enabled } } : prev)
         }
-      })
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      sileo.error({ title: `No se pudo cambiar ${toolName}: ${msg}` })
-      // Revert optimistic update
-      setPol(prev => {
-        if (!prev) return prev
-        const revertedCatalog = prev.catalog?.map(e =>
-          e.name === toolName ? { ...e, enabled: !enabled } : e
-        )
-        return {
-          ...prev,
-          tools: { ...prev.tools, [toolName]: !enabled },
-          catalog: revertedCatalog,
-        }
-      })
-    }
-  }
-
-  // Master-toggle: fires one setPolicyTool per tool in the category sequentially.
-  async function handleToggleAll(
-    _category: string,
-    targetEnabled: boolean,
-    entries: PolicyCatalogEntry[],
-  ) {
-    if (!validateMfa()) return
-    setBusy(true)
-    const toChange = entries.filter(e => e.enabled !== targetEnabled)
-    let firstError: string | null = null
-    for (const entry of toChange) {
-      try {
-        await setPolicyTool(entry.name, targetEnabled, polTotp, polRiddle || null)
-        // Optimistic update each tool as it succeeds
-        setPol(prev => {
-          if (!prev) return prev
-          const updatedCatalog = prev.catalog?.map(e =>
-            e.name === entry.name ? { ...e, enabled: targetEnabled } : e
-          )
-          return {
-            ...prev,
-            tools: { ...prev.tools, [entry.name]: targetEnabled },
-            catalog: updatedCatalog,
-          }
-        })
-      } catch (err) {
-        firstError = err instanceof Error ? err.message : String(err)
-        break
-      }
-    }
-    setBusy(false)
-    if (firstError) {
-      sileo.error({ title: `Error al cambiar la categoría: ${firstError}` })
-      await load() // re-sync from server after partial failure
-    } else if (toChange.length > 0) {
-      sileo.success({ title: `Categoría ${targetEnabled ? 'activada' : 'desactivada'}` })
-    }
-  }
-
-  async function handleMfaDangers(checked: boolean) {
-    if (!validateMfa()) return
-    if (!checked) {
-      const ok = await confirm({
-        title: 'Desactivar verificación en acciones peligrosas',
-        description:
-          'El agente podrá ejecutar acciones de alto riesgo en modo autónomo sin pedirte confirmación. ' +
-          'La protección de la jaula sigue activa, pero tú asumes la responsabilidad. ¿Continuar?',
-        confirmLabel: 'Desactivar',
-        variant: 'danger',
-      })
-      if (!ok) return
-    }
-    setBusy(true)
-    try {
-      await setMfaOnDangers(checked, polTotp, polRiddle || null)
-      sileo.success({ title: checked ? 'Verificación en peligrosos: activa' : 'Verificación en peligrosos: desactivada' })
-      setPol(prev => prev ? { ...prev, mfa_on_dangers: checked } : prev)
-    } catch (err) {
-      sileo.error({ title: `No se pudo cambiar: ${err instanceof Error ? err.message : err}` })
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  // Legacy single-tool toggle (when catalog is absent).
-  async function handleLegacyToolToggle(toolName: string, enabled: boolean) {
-    if (!validateMfa()) return
-    try {
-      await setPolicyTool(toolName, enabled, polTotp, polRiddle || null)
-      sileo.success({ title: `${toolName}: ${enabled ? 'activado' : 'desactivado'}` })
-      setPol(prev => prev ? { ...prev, tools: { ...prev.tools, [toolName]: enabled } } : prev)
-    } catch (err) {
-      sileo.error({ title: `No se pudo cambiar: ${err instanceof Error ? err.message : err}` })
-      setPol(prev => prev ? { ...prev, tools: { ...prev.tools, [toolName]: !enabled } } : prev)
+      })()
+    } else {
+      setPendingAction({ kind: 'tool', tool: toolName, enabled })
     }
   }
 
@@ -504,11 +578,31 @@ function GovernanceSection() {
   if (!mfa || !pol) return null
 
   const hasCatalog = (pol.catalog?.length ?? 0) > 0
+  const currentPreset = pendingPreset ?? pol.preset
+  const hasPendingPreset = pendingPreset !== null && pendingPreset !== pol.preset
 
   return (
     <>
-      {ConfirmDialogNode}
-      {/* MFA enrollment */}
+      {/* ── MFA Modal ── */}
+      {pendingAction && (
+        <MfaModal
+          tier={tierForAction(pendingAction)}
+          title={
+            pendingAction.kind === 'preset'
+              ? `Aplicar preset «${pendingAction.preset}»`
+              : pendingAction.kind === 'mfa_dangers'
+              ? 'Desactivar verificación en peligrosos'
+              : pendingAction.kind === 'section'
+              ? `${pendingAction.enabled ? 'Activar' : 'Desactivar'} categoría`
+              : `${pendingAction.enabled ? 'Activar' : 'Desactivar'} herramienta`
+          }
+          riddleQuestion={mfa.riddle_question}
+          onSign={handleSign}
+          onCancel={() => setPendingAction(null)}
+        />
+      )}
+
+      {/* ── MFA enrollment ── */}
       <section className="cv-section">
         <div className="cv-section-label">Tu verificación (MFA)</div>
         <div className="seg-card">
@@ -558,50 +652,13 @@ function GovernanceSection() {
         </div>
       </section>
 
-      {/* Policies */}
+      {/* ── Policies ── */}
       <section className="cv-section">
         <div className="cv-section-label">Políticas de seguridad — qué puede hacer el agente</div>
         <div className="seg-card">
           <p className="seg-card__intro">
             Cambiar cualquier política requiere tu código MFA (así el agente nunca abre su propia jaula).
           </p>
-
-          {/* Shared MFA input — applies to every toggle below */}
-          <fieldset className="seg-pol-mfa-bar" aria-label="Autenticación para cambiar políticas">
-            <legend className="sr-only">Código MFA para políticas</legend>
-            <div className="seg-pol-inputs">
-              <div className="seg-pol-input-wrap">
-                <label htmlFor="pol-totp" className="cv-label">Código MFA</label>
-                <input
-                  id="pol-totp"
-                  className="cv-input"
-                  inputMode="numeric"
-                  autoComplete="one-time-code"
-                  placeholder="6 dígitos"
-                  aria-describedby={mfaError ? 'pol-mfa-error' : undefined}
-                  aria-invalid={!!mfaError}
-                  value={polTotp}
-                  onChange={e => { setPolTotp(e.target.value); setMfaError('') }}
-                />
-              </div>
-              <div className="seg-pol-input-wrap">
-                <label htmlFor="pol-riddle" className="cv-label">Acertijo (si aplica)</label>
-                <input
-                  id="pol-riddle"
-                  className="cv-input"
-                  placeholder="Respuesta del acertijo"
-                  aria-label="Respuesta del acertijo para políticas"
-                  value={polRiddle}
-                  onChange={e => setPolRiddle(e.target.value)}
-                />
-              </div>
-            </div>
-            {mfaError && (
-              <p id="pol-mfa-error" className="seg-pol-mfa-error" role="alert">
-                {mfaError}
-              </p>
-            )}
-          </fieldset>
 
           {/* MFA on dangers global toggle */}
           <div className="seg-pol-danger-row">
@@ -610,7 +667,9 @@ function GovernanceSection() {
                 Pedir mi MFA para los comandos peligrosos
               </span>
               <span className="seg-pol-danger-row__hint">
-                Si lo desactivas, el agente ejecuta acciones peligrosas en autónomo sin pedírtelo. Recomendado mantenerlo activo.
+                {mfaDisabled
+                  ? 'Desactivado — el agente ejecuta acciones peligrosas sin pedirte confirmación.'
+                  : 'Si lo desactivas, el agente ejecuta acciones peligrosas en autónomo sin pedírtelo. Recomendado mantenerlo activo.'}
               </span>
             </div>
             <ToggleSwitch
@@ -618,31 +677,54 @@ function GovernanceSection() {
               aria-label="Pedir MFA para comandos peligrosos"
               checked={pol.mfa_on_dangers ?? true}
               disabled={busy}
-              onChange={handleMfaDangers}
+              onChange={requestMfaDangersToggle}
             />
           </div>
 
-          {/* Preset quick-access */}
+          {/* Preset quick-access: preview + save */}
           <div>
             <div className="seg-pol-sub-label">Preset rápido</div>
             <div className="seg-presets">
               {PRESETS.map(([id, label, desc]) => (
                 <button
                   key={id}
-                  className={`cv-btn cv-btn--sm ${pol.preset === id ? 'cv-btn--primary' : 'cv-btn--secondary'}`}
+                  className={`cv-btn cv-btn--sm ${currentPreset === id ? 'cv-btn--primary' : 'cv-btn--secondary'}`}
                   title={desc}
-                  onClick={() => handlePreset(id)}
+                  onClick={() => setPendingPreset(id)}
                   type="button"
                   disabled={busy}
-                  aria-pressed={pol.preset === id}
+                  aria-pressed={currentPreset === id}
                 >
                   {label}
                 </button>
               ))}
             </div>
+            {hasPendingPreset && (
+              <div className="seg-pol-preset-save-row" aria-live="polite">
+                <span className="seg-pol-preset-hint">
+                  Vista previa: «{pendingPreset}». Guarda para aplicarlo.
+                </span>
+                <button
+                  type="button"
+                  className="cv-btn cv-btn--primary cv-btn--sm"
+                  onClick={requestPresetSave}
+                  disabled={busy}
+                >
+                  Guardar
+                </button>
+                <button
+                  type="button"
+                  className="cv-btn cv-btn--ghost cv-btn--sm"
+                  onClick={() => setPendingPreset(null)}
+                  disabled={busy}
+                >
+                  Cancelar
+                </button>
+              </div>
+            )}
           </div>
 
-          {/* Vista simple por defecto: capacidades por grupo (master-toggle, sin comandos) */}
+          {/* Capability accordion groups */}
           {hasCatalog && capabilityGroups.size > 0 && (
             <div>
               <div className="seg-pol-sub-label">Capacidades del agente</div>
@@ -650,67 +732,37 @@ function GovernanceSection() {
                 {[...capabilityGroups.entries()].map(([cat, entries]) => (
                   <CategoryGroup
                     key={cat}
-                    mode="simple"
                     category={cat}
                     entries={entries}
-                    polTotp={polTotp}
-                    polRiddle={polRiddle}
                     busy={busy}
-                    onToggleTool={handleToolToggle}
-                    onToggleAll={handleToggleAll}
+                    onToggleTool={requestToolToggle}
+                    onToggleAll={requestSectionToggle}
                   />
                 ))}
               </div>
             </div>
           )}
 
-          {/* Configuración avanzada: comandos uno a uno + defensas del sistema */}
-          {hasCatalog && (capabilityGroups.size > 0 || defenseGroups.size > 0) && (
-            <details className="seg-details seg-pol-advanced" style={{ marginTop: 12 }}>
-              <summary>⚙ Configuración avanzada — activar o desactivar comandos uno a uno</summary>
-              <div className="seg-details__body">
-                {capabilityGroups.size > 0 && (
-                  <div className="seg-pol-catalog">
-                    {[...capabilityGroups.entries()].map(([cat, entries]) => (
-                      <CategoryGroup
-                        key={cat}
-                        mode="advanced"
-                        category={cat}
-                        entries={entries}
-                        polTotp={polTotp}
-                        polRiddle={polRiddle}
-                        busy={busy}
-                        onToggleTool={handleToolToggle}
-                        onToggleAll={handleToggleAll}
-                      />
-                    ))}
-                  </div>
-                )}
-                {defenseGroups.size > 0 && (
-                  <div style={{ marginTop: 12 }}>
-                    <div className="seg-pol-sub-label">Defensas del sistema</div>
-                    <p className="seg-card__intro" style={{ marginTop: 0, marginBottom: 8 }}>
-                      Estas herramientas protegen el sistema. No son capacidades del agente — no las invoca directamente.
-                    </p>
-                    <div className="seg-pol-catalog">
-                      {[...defenseGroups.entries()].map(([cat, entries]) => (
-                        <CategoryGroup
-                          key={cat}
-                          mode="advanced"
-                          category={cat}
-                          entries={entries}
-                          polTotp={polTotp}
-                          polRiddle={polRiddle}
-                          busy={busy}
-                          onToggleTool={handleToolToggle}
-                          onToggleAll={handleToggleAll}
-                        />
-                      ))}
-                    </div>
-                  </div>
-                )}
+          {/* Defense tools accordion groups */}
+          {hasCatalog && defenseGroups.size > 0 && (
+            <div style={{ marginTop: 12 }}>
+              <div className="seg-pol-sub-label">Defensas del sistema</div>
+              <p className="seg-card__intro" style={{ marginTop: 0, marginBottom: 8 }}>
+                Estas herramientas protegen el sistema. No son capacidades del agente — no las invoca directamente.
+              </p>
+              <div className="seg-pol-catalog">
+                {[...defenseGroups.entries()].map(([cat, entries]) => (
+                  <CategoryGroup
+                    key={cat}
+                    category={cat}
+                    entries={entries}
+                    busy={busy}
+                    onToggleTool={requestToolToggle}
+                    onToggleAll={requestSectionToggle}
+                  />
+                ))}
               </div>
-            </details>
+            </div>
           )}
 
           {/* Legacy flat list — shown only when catalog is absent */}
@@ -723,7 +775,7 @@ function GovernanceSection() {
                     <input
                       type="checkbox"
                       checked={pol.tools?.[name] ?? false}
-                      onChange={e => handleLegacyToolToggle(name, e.target.checked)}
+                      onChange={e => requestLegacyToolToggle(name, e.target.checked)}
                       aria-label={`Permiso para ${name}`}
                     />
                     <span>{name}</span>
@@ -744,7 +796,6 @@ function EgressSection() {
   const [domains, setDomains] = useState<string[]>([])
   const [loading, setLoading] = useState(true)
   const [input, setInput] = useState('')
-  const [status, setStatus] = useState<{ msg: string; kind: '' | 'ok' | 'error' }>({ msg: '', kind: '' })
 
   const loadDomains = useCallback(async () => {
     const res = await listEgressDomains()
@@ -757,36 +808,25 @@ function EgressSection() {
   async function handleGrant() {
     const d = input.trim().toLowerCase()
     if (!d) return
-    setStatus({ msg: `Autorizando ${d}…`, kind: '' })
     try {
       await grantEgressDomain(d)
-      setStatus({ msg: `${d} autorizado.`, kind: 'ok' })
       sileo.success({ title: `${d} autorizado` })
       setInput('')
       await loadDomains()
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      setStatus({ msg: `No se pudo autorizar: ${msg}`, kind: 'error' })
-      sileo.error({ title: `No se pudo autorizar: ${msg}` })
+      sileo.error({ title: `No se pudo autorizar: ${err instanceof Error ? err.message : err}` })
     }
   }
 
   async function handleRevoke(d: string) {
-    setStatus({ msg: `Revocando ${d}…`, kind: '' })
     try {
       await revokeEgressDomain(d)
-      setStatus({ msg: `${d} revocado.`, kind: 'ok' })
       sileo.success({ title: `${d} revocado` })
       await loadDomains()
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      setStatus({ msg: `No se pudo revocar: ${msg}`, kind: 'error' })
-      sileo.error({ title: `No se pudo revocar: ${msg}` })
+      sileo.error({ title: `No se pudo revocar: ${err instanceof Error ? err.message : err}` })
     }
   }
-
-  const statusColor = status.kind === 'error' ? 'var(--danger)'
-    : status.kind === 'ok' ? 'var(--ok)' : undefined
 
   return (
     <section className="cv-section">
@@ -818,11 +858,6 @@ function EgressSection() {
             Autorizar
           </button>
         </div>
-        {status.msg && (
-          <p style={{ fontSize: 'var(--text-label)', color: statusColor, marginTop: 4 }}>
-            {status.msg}
-          </p>
-        )}
         {loading ? (
           <div className="cv-skeleton" aria-busy="true" />
         ) : domains.length === 0 ? (
@@ -872,14 +907,8 @@ function SeverityBadge({ severity }: { severity: string }) {
 
 // ── Scan row ──────────────────────────────────────────────────────────────────
 
-interface ScanRowProps {
-  scan: SecurityScan
-}
-
-function ScanRow({ scan }: ScanRowProps) {
-  const [showAllow, setShowAllow] = useState(false)
-  const [totp, setTotp] = useState('')
-  const [riddle, setRiddle] = useState('')
+function ScanRow({ scan }: { scan: SecurityScan }) {
+  const [showModal, setShowModal] = useState(false)
   const [busy, setBusy] = useState(false)
   const [allowed, setAllowed] = useState(
     String(scan.decision ?? '').toUpperCase() === 'ALLOWED'
@@ -893,8 +922,7 @@ function ScanRow({ scan }: ScanRowProps) {
   const name = scan.name ?? scan.identifier ?? scan.scan_id ?? 'Escaneo'
   const target = scan.target ?? scan.identifier
 
-  async function handleAllow(e: React.FormEvent) {
-    e.preventDefault()
+  async function handleAllow(factors: MfaFactors) {
     setBusy(true)
     try {
       await recordInstallDecision({
@@ -905,14 +933,15 @@ function ScanRow({ scan }: ScanRowProps) {
         score: scan.score ?? -1,
         verdict: verdict || '',
         risks_json: '[]',
-        totp: totp.trim(),
-        riddle_answer: riddle.trim() || null,
+        totp: factors.totp.trim(),
+        riddle_answer: factors.riddle_answer?.trim() ?? null,
       })
       sileo.success({ title: 'Instalación permitida (decisión soberana, auditada). Reinténtala.' })
       setAllowed(true)
-      setShowAllow(false)
+      setShowModal(false)
     } catch (err) {
       sileo.error({ title: `No se pudo permitir: ${err instanceof Error ? err.message : err}` })
+      // Leave modal open for retry
     } finally {
       setBusy(false)
     }
@@ -937,39 +966,22 @@ function ScanRow({ scan }: ScanRowProps) {
         {flagged && !allowed && scanId && (
           <button
             className="cv-btn cv-btn--ghost cv-btn--sm"
-            onClick={() => setShowAllow(v => !v)}
+            onClick={() => setShowModal(true)}
             type="button"
+            disabled={busy}
           >
             Permitir igualmente
           </button>
         )}
       </div>
-      {showAllow && (
-        <form className="seg-allow-form" onSubmit={handleAllow}>
-          <input
-            className="cv-input"
-            inputMode="numeric"
-            autoComplete="one-time-code"
-            maxLength={8}
-            placeholder="Código MFA"
-            aria-label="Código MFA para permitir instalación"
-            style={{ width: 130 }}
-            value={totp}
-            onChange={e => setTotp(e.target.value)}
-          />
-          <input
-            className="cv-input"
-            type="text"
-            placeholder="Respuesta del acertijo"
-            aria-label="Respuesta del acertijo"
-            style={{ flex: 1 }}
-            value={riddle}
-            onChange={e => setRiddle(e.target.value)}
-          />
-          <button type="submit" className="cv-btn cv-btn--primary cv-btn--sm" disabled={busy}>
-            Confirmar
-          </button>
-        </form>
+
+      {showModal && (
+        <MfaModal
+          tier="mfa_riddle"
+          title="Permitir instalación"
+          onSign={handleAllow}
+          onCancel={() => setShowModal(false)}
+        />
       )}
     </div>
   )
@@ -1051,6 +1063,14 @@ function SecurityCenterSection() {
 // ── SeguridadView ─────────────────────────────────────────────────────────────
 
 export default function SeguridadView() {
+  // mfa_on_dangers state is needed both by GovernanceSection (toggle)
+  // and ApprovalsSection (pass-through). We lift it here so both share it.
+  const [mfaDisabled, setMfaDisabled] = useState(false)
+
+  useEffect(() => {
+    getPolicies().then(p => setMfaDisabled(p.mfa_on_dangers === false)).catch(() => {})
+  }, [])
+
   return (
     <div className="cv-view-body">
       <div className="view-header" style={{ padding: 0, border: 'none' }}>
@@ -1060,7 +1080,7 @@ export default function SeguridadView() {
         </p>
       </div>
 
-      <ApprovalsSection />
+      <ApprovalsSection mfaDisabled={mfaDisabled} />
       <GovernanceSection />
       <EgressSection />
       <SecurityCenterSection />

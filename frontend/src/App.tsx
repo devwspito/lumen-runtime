@@ -10,6 +10,7 @@ import SkillsView from './views/SkillsView'
 import CalendarView from './views/CalendarView'
 import SeguridadView from './views/SeguridadView'
 import MemoriaView from './views/MemoriaView'
+import ArchivosView from './views/ArchivosView'
 import { useActiveProvider } from './hooks/useActiveProvider'
 
 // Code-split OfficeView at the route boundary; it imports the canvas engine
@@ -24,16 +25,13 @@ function OfficeFallback() {
   )
 }
 
-// Shell: renders the Layout with the active-provider state (only for the subtle
-// "connect a model" nudge in the sidebar). NO onboarding wizard / redirect —
-// first run lands straight on the chat; the chat itself shows the no-model alert.
+// Shell: renders the Layout. The sidebar "connect a model" nudge was removed
+// (redundant + the chat shows its own in-chat no-model alert). We keep
+// useActiveProvider only to expose reload() so ProvidersView can refresh after
+// connecting a model.
 function Shell() {
-  const { status, hasActive, reload } = useActiveProvider()
-  // Only show the nudge when we positively know there is no active provider.
-  // During loading or on a list error we stay silent — a transient failure
-  // must not mislead the owner into thinking no model is connected.
-  const showConnectNudge = status === 'ready' && !hasActive
-  return <Layout activeProviderReload={reload} hasActiveProvider={showConnectNudge} />
+  const { reload } = useActiveProvider()
+  return <Layout activeProviderReload={reload} />
 }
 
 // basename="/app" matches the shell-server mount point and Vite's base: '/app/'
@@ -56,6 +54,7 @@ export default function App() {
           <Route path="skills" element={<SkillsView />} />
           <Route path="integraciones" element={<IntegrationsView />} />
           <Route path="mcp" element={<McpView />} />
+          <Route path="archivos" element={<ArchivosView />} />
           <Route path="proveedores" element={<ProvidersView />} />
           <Route path="seguridad" element={<SeguridadView />} />
           <Route path="memoria" element={<MemoriaView />} />
