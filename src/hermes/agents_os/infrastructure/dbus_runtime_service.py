@@ -1376,9 +1376,14 @@ class DbusRuntimeServiceWiring:
             identifier, scan_id_str,
         )
 
-        # Re-run: cache now shows decision=ALLOWED → scan_service returns the
-        # record without raising ScanBlockedError.
-        scan_result2 = self._scan_hub_target(identifier)
+        # Re-run with allow_warn=True: the owner's sovereign override must clear BOTH
+        # gates — the ScanService FAIL block (via the ALLOWED decision recorded above)
+        # AND the SEPARATE WARN gate in _scan_install_target. Without allow_warn the
+        # re-scan re-blocked every WARN skill even after the owner approved with MFA,
+        # so a WARN skill could NEVER be installed (the bug: "no puedo usar skills").
+        scan_result2 = self._scan_install_target(
+            "skill", identifier, emit_signals=False, allow_warn=True
+        )
         if scan_result2 is not None and scan_result2.get("blocked"):
             # Should not happen after allow_target — surface as error.
             logger.error(
