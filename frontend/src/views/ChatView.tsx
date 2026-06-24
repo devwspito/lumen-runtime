@@ -623,9 +623,24 @@ export default function ChatView() {
   const [composerText, setComposerText] = useState('')
   const [panelOpen, setPanelOpen] = useState(false)
   const [showNoModel, setShowNoModel] = useState(false)
+  const [noProvider, setNoProvider] = useState(false)
   const bodyRef = useRef<HTMLDivElement>(null)
   const userScrolledRef = useRef(false)
   const pinRef = useRef(true)
+
+  // Proactively surface the "connect a model" alert on entering the chat (the
+  // onboarding wizard is gone — the chat itself is the first screen). The owner
+  // sees it immediately, without having to send a message that fails first.
+  useEffect(() => {
+    let alive = true
+    listProviders()
+      .then(data => {
+        const arr = Array.isArray(data) ? data : []
+        if (alive) setNoProvider(arr.length === 0)
+      })
+      .catch(() => { /* transient list error — don't nag; 409 path still covers it */ })
+    return () => { alive = false }
+  }, [])
 
   // Wire the starter-prompt saved by OnboardingView — pre-fill the composer
   // on first mount so the user lands ready to send.
@@ -736,8 +751,9 @@ export default function ChatView() {
             />
           </div>
 
-          {/* No-model CTA replaces the dead error bar */}
-          {showNoModel ? (
+          {/* No-model CTA replaces the dead error bar — shown proactively when no
+              provider is connected, or reactively on a 409 at send time. */}
+          {showNoModel || noProvider ? (
             <NoModelBanner />
           ) : (
             <StatusBar phase={status.phase} text={statusText} />

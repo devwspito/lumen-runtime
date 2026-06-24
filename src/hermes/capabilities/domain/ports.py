@@ -160,8 +160,15 @@ class ApprovalGatePort(Protocol):
         risk: RiskLevel,
         justification: str,
         parameters_redacted: dict[str, Any],
+        tool_name: str = "",
+        action_digest: str = "",
+        conversation_id: str = "",
     ) -> None:
-        """Crea/actualiza la fila pending (idempotente por proposal_id)."""
+        """Crea/actualiza la fila pending (idempotente por proposal_id).
+
+        `conversation_id` ancla la tarjeta al hilo de chat para que el widget
+        in-chat la muestre; `tool_name`/`action_digest` dan contexto y dedup.
+        """
         ...
 
     async def verify_token(self, *, proposal_id: UUID, token: str) -> bool:

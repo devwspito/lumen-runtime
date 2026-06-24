@@ -40,6 +40,7 @@ class FakeApprovalGate:
         parameters_redacted: dict[str, Any],  # noqa: ARG002
         tool_name: str = "",  # noqa: ARG002
         action_digest: str = "",  # noqa: ARG002
+        conversation_id: str = "",  # noqa: ARG002
     ) -> None:
         self.register_calls.append(proposal_id)
         self._pending[proposal_id] = {

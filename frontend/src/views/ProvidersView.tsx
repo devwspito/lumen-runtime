@@ -193,6 +193,9 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
   const [showKeyForm, setShowKeyForm] = useState(false)
   const [apiKeyInput, setApiKeyInput] = useState('')
   const [addingKey, setAddingKey] = useState(false)
+  // Tracks a failed post-add connectivity test so we can show a persistent
+  // inline error. Cleared when the user opens the key form again to retry.
+  const [addConnFailed, setAddConnFailed] = useState(false)
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const label = badgeLabel(provider)
   const color = KIND_COLORS[label.toLowerCase()] ?? '#6B7280'
@@ -249,22 +252,29 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
         api_key: apiKeyInput.trim(),
         kind: provider.kind ?? provider.category,
       })
-      // Activate immediately so the user can chat right away
-      await setActiveProvider(id)
       setShowKeyForm(false)
       setApiKeyInput('')
-      // Test the connection so the user gets clear feedback on key validity
+
+      // Test before activating: only make this model usable when the key works.
+      let testPassed = false
       try {
         const r = await testProvider(id)
-        if (r?.ok) {
-          onToast(`${name} conectado y verificado — pruébalo en el chat`, 'ok')
-        } else {
-          onToast(`${name} añadido, pero la conexión falló. Revisa la clave API.`, 'warn')
-        }
+        testPassed = r?.ok === true
       } catch {
-        onToast(`${name} añadido, pero la conexión falló. Revisa la clave API.`, 'warn')
+        testPassed = false
       }
-      onRefresh()
+
+      if (testPassed) {
+        await setActiveProvider(id)
+        setAddConnFailed(false)
+        onToast(`${name} conectado y verificado — pruébalo en el chat`, 'ok')
+        onRefresh()
+      } else {
+        // Provider was saved but is NOT activated — leave it inactive and surface
+        // a persistent inline error so the owner knows the model is not usable yet.
+        setAddConnFailed(true)
+        onRefresh()
+      }
     } catch (e) {
       onToast(e instanceof Error ? e.message : 'Error', 'error')
     } finally {
@@ -359,6 +369,15 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
           {isConfigured && provider.is_active && (
             <span className="provider-row__active-tag">Activo</span>
           )}
+          {addConnFailed && (
+            <span
+              className="provider-badge"
+              style={{ background: '#EF444422', color: '#EF4444' }}
+              role="alert"
+            >
+              Conexión fallida — revisa la clave
+            </span>
+          )}
         </div>
       </div>
       <div className="provider-row__actions">
@@ -395,9 +414,9 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
         ) : !showKeyForm ? (
           <button
             className="cv-btn cv-btn--secondary cv-btn--sm"
-            onClick={() => setShowKeyForm(true)}
+            onClick={() => { setShowKeyForm(true); setAddConnFailed(false) }}
           >
-            Añadir
+            {addConnFailed ? 'Reintentar clave' : 'Añadir'}
           </button>
         ) : null}
       </div>
@@ -448,6 +467,7 @@ interface CustomProviderCardProps {
 function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
   const [open, setOpen] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [connFailed, setConnFailed] = useState(false)
   const aliasRef = useRef<HTMLInputElement>(null)
   const urlRef = useRef<HTMLInputElement>(null)
   const modelRef = useRef<HTMLInputElement>(null)
@@ -466,14 +486,33 @@ function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
 
     setSaving(true)
     try {
-      await addProvider({ kind: 'openai_compatible', alias, default_model, base_url, api_key, set_active: true })
-      onToast('Modelo propio añadido y activado — pruébalo en el chat', 'ok')
-      setOpen(false)
-      if (aliasRef.current) aliasRef.current.value = ''
-      if (urlRef.current) urlRef.current.value = ''
-      if (modelRef.current) modelRef.current.value = ''
-      if (keyRef.current) keyRef.current.value = ''
-      onAdded()
+      // Add without activating; only activate after the connection test passes.
+      const added = await addProvider({ kind: 'openai_compatible', alias, default_model, base_url, api_key })
+      const newId = (added as { provider_id?: string }).provider_id ?? alias
+
+      let testPassed = false
+      try {
+        const r = await testProvider(newId)
+        testPassed = r?.ok === true
+      } catch {
+        testPassed = false
+      }
+
+      if (testPassed) {
+        await setActiveProvider(newId)
+        setConnFailed(false)
+        setOpen(false)
+        if (aliasRef.current) aliasRef.current.value = ''
+        if (urlRef.current) urlRef.current.value = ''
+        if (modelRef.current) modelRef.current.value = ''
+        if (keyRef.current) keyRef.current.value = ''
+        onToast('Modelo propio añadido y activado — pruébalo en el chat', 'ok')
+        onAdded()
+      } else {
+        // Saved but not activated — leave form open so the user can correct the URL/key.
+        setConnFailed(true)
+        onAdded()
+      }
     } catch (e) {
       onToast(e instanceof Error ? e.message : 'Error', 'error')
     } finally { setSaving(false) }
@@ -528,13 +567,22 @@ function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
             autoComplete="new-password"
           />
           <p className="cv-hint">La URL base debe terminar en /v1. La clave API solo si tu servidor la pide.</p>
+          {connFailed && (
+            <p
+              className="office-field-error"
+              role="alert"
+              style={{ color: '#EF4444', fontWeight: 500 }}
+            >
+              Conexión fallida — el modelo se guardó pero no está activo. Corrige la URL o la clave y vuelve a guardar.
+            </p>
+          )}
           <div className="cv-form-actions">
             <button
               className="cv-btn cv-btn--primary cv-btn--sm"
               onClick={handleSave}
               disabled={saving}
             >
-              {saving ? 'Guardando…' : 'Guardar y activar'}
+              {saving ? 'Guardando…' : (connFailed ? 'Reintentar conexión' : 'Guardar y activar')}
             </button>
             <button
               className="cv-btn cv-btn--ghost cv-btn--sm"

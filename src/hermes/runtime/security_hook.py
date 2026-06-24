@@ -1199,9 +1199,18 @@ def make_pre_tool_call_hook(
                 # and BLOCK with a retry hint. ALL in the hook → covers concurrent AND
                 # sequential paths. FAIL-CLOSED: any error → block (never raise, which
                 # invoke_hook would swallow into ALLOW — red-team finding 2).
+                # Resolve the REAL chat conversation_id for this cycle. The hook
+                # only gets Nous's random per-cycle task_id; the engine bound it to
+                # the conversation in conversation_task_registry. Falling back to
+                # task_id (the old behaviour) anchored the card to a random id, so
+                # the in-chat widget never matched it → no card ever appeared.
+                from hermes.runtime.conversation_task_registry import (  # noqa: PLC0415
+                    get_conversation_for_task,
+                )
+                real_conv_id = get_conversation_for_task(task_id)
                 block_msg = _resolve_native_danger_approval(
                     tool_name, safe_args, broker, engine_loop,
-                    conversation_id=task_id,
+                    conversation_id=real_conv_id,
                 )
                 if block_msg is not None:
                     logger.info(

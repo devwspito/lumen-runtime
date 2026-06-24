@@ -354,7 +354,7 @@ export default function Layout({ hasActiveProvider, activeProviderReload }: Layo
         {/* "Connect a model" nudge badge — visible only when no provider is active */}
         {!hasActiveProvider && (
           <NavLink
-            to="/bienvenida"
+            to="/proveedores"
             className="sidebar-setup-badge"
             aria-label="Conecta un modelo para usar el chat"
           >

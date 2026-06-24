@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import { sileo } from 'sileo'
-import { listConfiguredTasks, listRecentTasks, createTask, updateTask, deleteTask, toggleTask, listAgents, ApiError } from '../api/client'
-import type { ConfiguredTask, RecentTask, Agent, CreateTaskPayload, UpdateTaskPayload } from '../api/types'
+import { listConfiguredTasks, listRecentTasks, createTask, deleteTask, toggleTask, listAgents, ApiError } from '../api/client'
+import type { ConfiguredTask, RecentTask, Agent, CreateTaskPayload } from '../api/types'
 import { useConfirmDialog } from '../components/ConfirmDialog'
 
 // ── Cron parsing (mirrors tasks-view.js exactly) ──────────────────────────────
@@ -194,7 +194,6 @@ export default function CalendarView() {
   const [modalOpen, setModalOpen] = useState(false)
   const [modalPresetDate, setModalPresetDate] = useState<string | null>(null)
   const [detailTask, setDetailTask] = useState<ConfiguredTask | null>(null)
-  const [editTask, setEditTask] = useState<ConfiguredTask | null>(null)
   const [confirm, ConfirmDialogNode] = useConfirmDialog()
 
   const agentsById = Object.fromEntries(state.agents.map(a => [a.id, a]))
@@ -340,7 +339,6 @@ export default function CalendarView() {
                       <ConfiguredTaskRow
                         task={task}
                         onViewDetail={setDetailTask}
-                        onEdit={setEditTask}
                         onToggle={handleToggle}
                         onDelete={handleDelete}
                       />
@@ -389,40 +387,12 @@ export default function CalendarView() {
         />
       )}
 
-      {/* ── Edit task modal ───────────────────────────────────────────────── */}
-      {editTask && (
-        <TaskModal
-          agents={state.agents}
-          presetDate={null}
-          editTask={editTask}
-          onClose={() => setEditTask(null)}
-          onCreate={async (payload) => {
-            const id = editTask.trigger_id ?? editTask.task_id ?? editTask.id ?? ''
-            try {
-              await updateTask(id, payload as UpdateTaskPayload)
-              show('Tarea actualizada', 'ok')
-              setEditTask(null)
-              reloadTasks()
-            } catch (e) {
-              // 404/405 means the PUT endpoint is not yet available — graceful degrade
-              if (e instanceof ApiError && (e.status === 404 || e.status === 405)) {
-                show('La edición de tareas aún no está disponible en el servidor.', 'warn')
-                setEditTask(null)
-              } else {
-                show(e instanceof Error ? e.message : 'Error', 'error')
-              }
-            }
-          }}
-        />
-      )}
-
       {/* ── Task detail drawer ────────────────────────────────────────────── */}
       {detailTask && (
         <TaskDetailDrawer
           task={detailTask}
           agentLabel={agentLabel}
           onClose={() => setDetailTask(null)}
-          onEdit={(t) => { setDetailTask(null); setEditTask(t) }}
         />
       )}
     </>
@@ -557,12 +527,11 @@ function MonthCalendar({ tasks, calRef, onChangeMonth, agentLabel, onDayClick, o
 interface ConfiguredTaskRowProps {
   task: ConfiguredTask
   onViewDetail: (task: ConfiguredTask) => void
-  onEdit: (task: ConfiguredTask) => void
   onToggle: (task: ConfiguredTask) => void
   onDelete: (task: ConfiguredTask) => void
 }
 
-function ConfiguredTaskRow({ task, onViewDetail, onEdit, onToggle, onDelete }: ConfiguredTaskRowProps) {
+function ConfiguredTaskRow({ task, onViewDetail, onToggle, onDelete }: ConfiguredTaskRowProps) {
   const isEnabled = task.enabled !== false
   const sched = task.recurrence_human ?? task.recurrence ?? task.cron ?? task.schedule ?? ''
   const last = task.last_status ? statusMeta(task.last_status) : null
@@ -596,13 +565,6 @@ function ConfiguredTaskRow({ task, onViewDetail, onEdit, onToggle, onDelete }: C
           aria-label="Ver detalle de la tarea"
         >
           Ver
-        </button>
-        <button
-          className="cv-btn cv-btn--ghost cv-btn--sm"
-          onClick={() => onEdit(task)}
-          aria-label="Editar tarea"
-        >
-          Editar
         </button>
         <button
           className="cv-btn cv-btn--ghost cv-btn--sm"
@@ -646,10 +608,9 @@ interface TaskDetailDrawerProps {
   task: ConfiguredTask
   agentLabel: (task: ConfiguredTask) => string
   onClose: () => void
-  onEdit: (task: ConfiguredTask) => void
 }
 
-function TaskDetailDrawer({ task, agentLabel, onClose, onEdit }: TaskDetailDrawerProps) {
+function TaskDetailDrawer({ task, agentLabel, onClose }: TaskDetailDrawerProps) {
   const titleId = 'task-detail-title'
   const name = task.label ?? task.title ?? task.name ?? 'Tarea'
 
@@ -729,13 +690,6 @@ function TaskDetailDrawer({ task, agentLabel, onClose, onEdit }: TaskDetailDrawe
           <div className="office-drawer-actions" style={{ marginTop: 'var(--sp-4)' }}>
             <button
               type="button"
-              className="office-btn office-btn--primary"
-              onClick={() => onEdit(task)}
-            >
-              Editar
-            </button>
-            <button
-              type="button"
               className="office-btn office-btn--ghost"
               onClick={onClose}
             >
@@ -753,23 +707,15 @@ function TaskDetailDrawer({ task, agentLabel, onClose, onEdit }: TaskDetailDrawe
 interface TaskModalProps {
   agents: Agent[]
   presetDate: string | null
-  /** When set the modal runs in edit mode, prefilling all fields */
-  editTask?: ConfiguredTask
   onClose: () => void
   onCreate: (payload: CreateTaskPayload) => void
 }
 
-function TaskModal({ agents, presetDate, editTask, onClose, onCreate }: TaskModalProps) {
-  const isEdit = editTask !== undefined
-  const initialMode: 'recurrent' | 'once' = editTask?.one_shot ? 'once' : (presetDate ? 'once' : 'recurrent')
-
-  // Derive initial cron info from editTask for prefilling time/days
-  const editCronInfo = editTask ? parseCron(taskCron(editTask)) : null
-  const editTimeStr = editCronInfo?.valid ? editCronInfo.time : '09:00'
-  const editInitialDays = editCronInfo && !editCronInfo.daily ? editCronInfo.days : new Set<number>()
+function TaskModal({ agents, presetDate, onClose, onCreate }: TaskModalProps) {
+  const initialMode: 'recurrent' | 'once' = presetDate ? 'once' : 'recurrent'
 
   const [mode, setMode] = useState<'recurrent' | 'once'>(initialMode)
-  const [selectedDays, setSelectedDays] = useState<Set<number>>(editInitialDays)
+  const [selectedDays, setSelectedDays] = useState<Set<number>>(new Set<number>())
   const [creating, setCreating] = useState(false)
   const [fieldErrors, setFieldErrors] = useState<{ name?: string; prompt?: string; date?: string; days?: string }>({})
   const nameRef = useRef<HTMLInputElement>(null)
@@ -783,13 +729,6 @@ function TaskModal({ agents, presetDate, editTask, onClose, onCreate }: TaskModa
 
   useEffect(() => {
     nameRef.current?.focus()
-    // Prefill uncontrolled inputs when editing
-    if (editTask) {
-      if (nameRef.current) nameRef.current.value = editTask.label ?? editTask.title ?? editTask.name ?? ''
-      if (promptRef.current) promptRef.current.value = editTask.instruction ?? ''
-      if (agentRef.current) agentRef.current.value = editTask.target_agent_id ?? editTask.agent_id ?? ''
-      if (riskRef.current) riskRef.current.value = editTask.risk_ceiling ?? 'low'
-    }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   function toggleDay(day: number) {
@@ -871,7 +810,7 @@ function TaskModal({ agents, presetDate, editTask, onClose, onCreate }: TaskModa
         aria-label="Programar una tarea"
       >
         <div className="modal-card__head">
-          <h3 className="modal-card__title">{isEdit ? 'Editar tarea' : 'Programar una tarea'}</h3>
+          <h3 className="modal-card__title">Programar una tarea</h3>
           <button className="cv-icon-btn" onClick={onClose} aria-label="Cerrar">✕</button>
         </div>
 
@@ -883,7 +822,6 @@ function TaskModal({ agents, presetDate, editTask, onClose, onCreate }: TaskModa
               ref={nameRef}
               className="cv-input"
               type="text"
-              defaultValue={editTask?.label ?? editTask?.title ?? editTask?.name ?? ''}
               placeholder="Informe diario de ventas"
               autoComplete="off"
               aria-describedby={fieldErrors.name ? 'tm-name-err' : undefined}
@@ -899,7 +837,6 @@ function TaskModal({ agents, presetDate, editTask, onClose, onCreate }: TaskModa
               ref={promptRef}
               className="cv-textarea"
               rows={3}
-              defaultValue={editTask?.instruction ?? ''}
               placeholder="Qué debe hacer Lumen…"
               aria-describedby={fieldErrors.prompt ? 'tm-prompt-err' : undefined}
               aria-invalid={fieldErrors.prompt ? true : undefined}
@@ -973,7 +910,7 @@ function TaskModal({ agents, presetDate, editTask, onClose, onCreate }: TaskModa
             <div className="task-form-grid">
               <div>
                 <label className="cv-label" htmlFor="tm-time">¿A qué hora?</label>
-                <input id="tm-time" ref={timeRef} className="cv-input" type="time" defaultValue={editTimeStr || '09:00'} />
+                <input id="tm-time" ref={timeRef} className="cv-input" type="time" defaultValue="09:00" />
               </div>
               <div>
                 <label className="cv-label" htmlFor="tm-time-end">Hasta (opcional)</label>
@@ -990,7 +927,7 @@ function TaskModal({ agents, presetDate, editTask, onClose, onCreate }: TaskModa
               </div>
               <div>
                 <label className="cv-label" htmlFor="tm-risk">Riesgo</label>
-                <select id="tm-risk" ref={riskRef} className="cv-input" defaultValue={editTask?.risk_ceiling ?? 'low'}>
+                <select id="tm-risk" ref={riskRef} className="cv-input" defaultValue="low">
                   <option value="low">Bajo</option>
                   <option value="high">Alto</option>
                 </select>
@@ -1006,7 +943,7 @@ function TaskModal({ agents, presetDate, editTask, onClose, onCreate }: TaskModa
             onClick={handleCreate}
             disabled={creating}
           >
-            {creating ? (isEdit ? 'Guardando…' : 'Creando…') : (isEdit ? 'Guardar cambios' : 'Crear tarea')}
+            {creating ? 'Creando…' : 'Crear tarea'}
           </button>
         </div>
       </div>

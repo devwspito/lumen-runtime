@@ -94,6 +94,7 @@ from hermes.domain.proposal import ToolCallProposal
 from hermes.domain.tool_spec import ToolRisk, ToolSpec
 from hermes.prompts.builder import DefaultPromptBuilder, PromptBuilder, _sanitize_untrusted
 from hermes.prompts.persona import PersonaSpec
+from hermes.runtime.conversation_task_registry import get_conversation_for_task
 from hermes.runtime.cycle_cdp_context import cerebro_cdp_scope, install_thread_local_cdp_override
 from hermes.runtime.model_config import ModelConfig, _replace_context
 from hermes.runtime.nous_tool_risk_map import NousRisk, classify_nous_tool
@@ -1182,6 +1183,7 @@ class GovernedAIAgent:
             broker=self._broker,
             consent_context=self._consent_context,
             engine_loop=self._engine_loop,
+            conversation_id=get_conversation_for_task(effective_task_id),
         )
         return self._handle_outcome(proposal, outcome)
 
@@ -1419,6 +1421,7 @@ class GovernedAIAgent:
             broker=self._broker,
             consent_context=self._consent_context,
             engine_loop=self._engine_loop,
+            conversation_id=get_conversation_for_task(effective_task_id),
         )
 
         return self._handle_outcome(proposal, outcome)
@@ -1938,6 +1941,7 @@ class NousReasoningEngine:
             lambda: _run_conversation_with_cdp(
                 agent, user_message, _history, cerebro_cdp_provider,
                 stream_callback=_stream_cb,
+                conversation_id=_conv_id_for_dbus,
             ),
         )
 
@@ -2520,6 +2524,7 @@ def _run_conversation_with_cdp(
     history: Any,
     cdp_provider: Any,
     stream_callback: "Callable[..., None] | None" = None,
+    conversation_id: str = "",
 ) -> dict[str, Any]:
     """Run agent.run_conversation in the current executor thread.
 
@@ -2554,6 +2559,10 @@ def _run_conversation_with_cdp(
     from hermes.runtime.cycle_cdp_context import (  # noqa: PLC0415
         cleanup_thread_browser_session,
     )
+    from hermes.runtime.conversation_task_registry import (  # noqa: PLC0415
+        set_conversation_for_task,
+        clear_conversation_for_task,
+    )
 
     set_session_key_for_thread()
     apply_auto_mode_for_cycle()
@@ -2563,6 +2572,11 @@ def _run_conversation_with_cdp(
     # task_id is None and leaks the session on the happy path (see
     # cleanup_thread_browser_session); owning the id lets us tear it down.
     cycle_task_id = uuid4().hex
+
+    # Anchor this cycle's task_id to the chat conversation so the security hook
+    # can register HITL approvals against the thread the owner is looking at
+    # (the hook only receives this random task_id, not the conversation_id).
+    set_conversation_for_task(cycle_task_id, conversation_id)
 
     try:
         if cdp_provider is not None:
@@ -2577,6 +2591,7 @@ def _run_conversation_with_cdp(
         )
     finally:
         clear_session_key_for_thread()
+        clear_conversation_for_task(cycle_task_id)
         # Reap this cycle's confined-browser session (agent-browser controller
         # daemon + CDP supervisor) so the NEXT cycle attaches to a clean
         # Chromium. No-op when the cycle never touched the browser; only the
@@ -2657,6 +2672,7 @@ def _dispatch_via_bridge(
     broker: CapabilityBrokerPort,
     consent_context: ConsentContext,
     engine_loop: asyncio.AbstractEventLoop,
+    conversation_id: str = "",
 ) -> Any:
     """Puente async → sync thread-safe para llamar broker.dispatch desde el executor.
 
@@ -2673,7 +2689,7 @@ def _dispatch_via_bridge(
 
     try:
         future = asyncio.run_coroutine_threadsafe(
-            broker.dispatch(proposal, consent_context),
+            broker.dispatch(proposal, consent_context, conversation_id=conversation_id),
             engine_loop,
         )
         return future.result(timeout=_BROKER_DISPATCH_TIMEOUT_S)

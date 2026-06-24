@@ -452,6 +452,7 @@ class AgentLoopOrchestrator:
                 hitl_approval_token=hitl_token,
                 work_item_id=item.id,
                 autonomy_level=autonomy_level,
+                conversation_id=(item.payload.get("conversation_id") or ""),
             )
 
             if outcome.status is ExecutionStatus.PENDING_APPROVAL:

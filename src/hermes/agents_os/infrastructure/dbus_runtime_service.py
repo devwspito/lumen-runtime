@@ -74,6 +74,21 @@ if TYPE_CHECKING:
 logger = logging.getLogger("hermes.agents_os.dbus_runtime_service")
 
 
+def _parse_redacted_params(raw: object) -> dict:
+    """Parse the JSON-text parameters_redacted column back to a dict.
+
+    The gate stores it via json.dumps; the approval card needs a dict to render
+    WHAT will run. Defensive: any malformed/empty value → {} (never raises).
+    """
+    if not raw or not isinstance(raw, str):
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 class RuntimeStateError(RuntimeError):
     pass
 
@@ -2396,7 +2411,7 @@ class DbusRuntimeServiceWiring:
             rows = conn.execute(
                 """
                 SELECT proposal_id, risk, tool_name, justification,
-                       created_at, conversation_id
+                       created_at, conversation_id, parameters_redacted
                 FROM pending_approvals
                 WHERE status = 'pending'
                   AND created_at > datetime('now', '-30 minutes')
@@ -2419,9 +2434,14 @@ class DbusRuntimeServiceWiring:
                 "justification": row["justification"] or "",
                 "risk": row["risk"],
                 "created_at": row["created_at"] or "",
-                # task_id from the pre_tool_call hook; None for rows written before
-                # the conversation_id column existed (2026-06-23 migration).
+                # Real chat conversation_id (anchors the card to the thread); None
+                # for rows written before the conversation_id column existed.
                 "conversation_id": row["conversation_id"] or None,
+                # Redacted parameters so the card can show WHAT will run (stored as
+                # JSON text by the gate). Parse back to a dict; {} on any malformed.
+                "parameters_redacted": _parse_redacted_params(
+                    row["parameters_redacted"]
+                ),
             }
             for row in rows
         ]

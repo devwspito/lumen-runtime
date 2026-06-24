@@ -674,6 +674,21 @@ def create_app() -> FastAPI:
     # tokens once an owner proves possession of the bootstrap secret (below).
     app.state.shell_auth_token = _AUTH_TOKEN
 
+    # Stable webui bearer — a SEPARATE HKDF subkey of master.key (NOT the operator
+    # token). Derived deterministically, so it is identical across restarts: the
+    # owner does the ?k= handshake ONCE and the bearer keeps working forever — no
+    # TTL, no refresh, no 401-after-idle (this is a LOCAL single-owner app). The
+    # sandboxed agent (uid 886, jailed netns) cannot derive it (no master.key) and
+    # cannot reach :7517 at all (netns isolation = the real control; verified). The
+    # owner never sees it; the browser caches it. Distinct label from the operator
+    # token so a leaked page exposes only the webui-mutation bearer, not the
+    # daemon↔shell operator key used by internal callers.
+    try:
+        _WEBUI_TOKEN = vault.derive_subkey(label="shell-webui-session").hex()
+    except Exception:  # noqa: BLE001 — master.key absent (dev/CI without baked image)
+        _WEBUI_TOKEN = _secrets_mod.token_hex(32)
+    app.state.shell_webui_token = _WEBUI_TOKEN
+
     # ── Bootstrap commitment (C3 PASS-5, owner-proof, uid-decoupled + unmovable) ─
     # PASS-1 wrote a 0600 plaintext owned by uid 880 (hermes). PASS-2 split it into
     # root:root plaintext + commitment, but BOTH lived in /var/lib/hermes/ (0755
@@ -721,33 +736,20 @@ def create_app() -> FastAPI:
         )
     app.state.shell_bootstrap_commitment = _BOOTSTRAP_COMMITMENT
 
-    # ── Rotating session tokens (C3, option c) ────────────────────────────────
-    # Short-lived bearer tokens minted after a successful bootstrap handshake. The
-    # webui sends one as `Authorization: Bearer` on mutating calls. Each is random,
-    # expires, and is independent of the stable operator token, so a leaked page /
-    # history entry exposes at most a single short-lived credential, not the
-    # install's master mutator key.
-    _SESSION_TTL_S = int(os.environ.get("HERMES_SHELL_SESSION_TTL_S", "3600"))
-    _session_tokens: dict[str, float] = {}  # token → unix expiry
-
+    # ── Stable webui session bearer (no TTL — local single-owner app) ─────────
+    # The ?k= handshake injects this STABLE bearer (derived above) into the page.
+    # No rotation, no expiry, no refresh: an owner who opened the UI once keeps a
+    # working bearer across idle/sleep/restart (it re-derives identical from the
+    # persistent master.key). The earlier rotating+TTL design only produced the
+    # recurring "Operator Token Required" 401 after the Mac slept past the TTL.
+    # Security is unchanged: the gate still DEFAULT-DENIES uncredentialed mutating
+    # calls on the loopback boundary; the only actor that could abuse loopback is
+    # the agent, and it is netns-isolated from :7517 (the structural control).
     def _mint_session_token() -> str:
-        now = _time_mod.time()
-        # Opportunistic GC so the dict can't grow unbounded across reloads.
-        for _t, _exp in list(_session_tokens.items()):
-            if _exp <= now:
-                _session_tokens.pop(_t, None)
-        tok = _secrets_mod.token_hex(32)
-        _session_tokens[tok] = now + _SESSION_TTL_S
-        return tok
+        return _WEBUI_TOKEN
 
     def _session_token_valid(tok: str) -> bool:
-        exp = _session_tokens.get(tok)
-        if exp is None:
-            return False
-        if exp <= _time_mod.time():
-            _session_tokens.pop(tok, None)
-            return False
-        return True
+        return _hmac_mod.compare_digest(tok, _WEBUI_TOKEN)
 
     app.state.mint_session_token = _mint_session_token
     _MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
@@ -758,11 +760,10 @@ def create_app() -> FastAPI:
         if request.method in _MUTATING_METHODS and path.startswith("/api/v1/"):
             auth = request.headers.get("authorization", "")
             token = auth[7:] if auth[:7].lower() == "bearer " else ""
-            # Accept EITHER the server-side operator token (internal callers) OR a
-            # valid unexpired rotating session token minted via the bootstrap
-            # handshake (the webui). compare_digest on the operator path keeps the
-            # comparison constant-time; the session path is a dict membership of a
-            # high-entropy random token.
+            # Accept EITHER the server-side operator token (internal daemon↔shell
+            # callers) OR the stable webui bearer (the owner's browser). Both are
+            # constant-time compared. Default-deny otherwise — an uncredentialed
+            # mutating request to the control-plane still gets a 401.
             operator_ok = bool(token) and _hmac_mod.compare_digest(token, _AUTH_TOKEN)
             if not (operator_ok or (token and _session_token_valid(token))):
                 return _JSONResp(
@@ -773,12 +774,9 @@ def create_app() -> FastAPI:
 
     @app.post("/api/v1/session/refresh")
     async def _refresh_session() -> dict:  # noqa: ANN202
-        # Reached only with a VALID (unexpired) Bearer — the mutating-method
-        # middleware above already gated it. Mint a FRESH rotating session token so
-        # an active tab renews before the TTL without re-running the ?k= handshake
-        # (and without exposing the bootstrap secret to the page). The token still
-        # expires; this only keeps a LIVE session alive — a token that stops being
-        # refreshed (e.g. scraped then abandoned) still dies within the TTL.
+        # Back-compat no-op: the bearer is now stable (no TTL), so there is nothing
+        # to rotate. Returning it keeps any old client that still polls refresh
+        # working. Reached only with a valid Bearer (the middleware gated it).
         return {"token": app.state.mint_session_token()}
 
     repo = SQLiteProviderRepository(db_path=_DB_PATH, vault=vault)

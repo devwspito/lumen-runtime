@@ -1,15 +1,47 @@
 // The shell-server injects window.__LUMEN_TOKEN__ into the served index.html on
-// the ?k= bootstrap handshake. It is a SHORT-LIVED rotating session token (server
-// TTL ~1h). We keep it in memory and renew it via POST /api/v1/session/refresh
-// while the tab is active, so mutating API calls never 401 mid-session — without
-// re-running the ?k= handshake and without exposing the bootstrap secret to the
-// page (and thus to browser extensions).
-let _token =
-  ((window as unknown as Record<string, unknown>)['__LUMEN_TOKEN__'] as string) ?? ''
+// the ?k= bootstrap handshake. It is now a STABLE per-install bearer (no TTL): the
+// owner opens the UI once at /?k=<secret> and the bearer keeps working forever —
+// across idle/sleep/restart — so mutating API calls never 401 again. We cache it
+// in localStorage so a later direct navigation / reload (no ?k=) still carries it.
+// This is a local single-owner app: the credential never leaves the owner's
+// machine, and the sandboxed agent is netns-isolated from the control plane.
+const STORAGE_KEY = 'lumen_token'
+
+function readInjected(): string {
+  const w = window as unknown as Record<string, unknown>
+  return (w['__LUMEN_TOKEN__'] as string) ?? ''
+}
+
+function readCached(): string {
+  try {
+    return localStorage.getItem(STORAGE_KEY) ?? ''
+  } catch {
+    return ''
+  }
+}
+
+function persist(tok: string): void {
+  try {
+    localStorage.setItem(STORAGE_KEY, tok)
+  } catch {
+    /* private mode / storage disabled — token stays in memory for this tab */
+  }
+}
+
+// Prefer a freshly injected bearer (just did the ?k= handshake); else fall back to
+// the one cached from a previous handshake. A freshly injected value is persisted
+// so subsequent loads without ?k= stay authenticated.
+let _token = readInjected() || readCached()
+if (readInjected()) persist(_token)
 
 export const token = (): string => _token
 
-/** Ask the server for a fresh rotating session token using the current valid one. */
+/**
+ * Re-validate / recover the bearer. The token is stable now, so this only matters
+ * on a stale-cache 401 (e.g. master.key changed after a fresh install): hitting
+ * /session/refresh with the current bearer returns the live one. On failure we
+ * drop the stale cache so a subsequent /?k= reopen lands clean.
+ */
 export async function refreshToken(): Promise<boolean> {
   if (!_token) return false
   try {
@@ -20,26 +52,18 @@ export async function refreshToken(): Promise<boolean> {
         'Content-Type': 'application/json',
       },
     })
-    if (!res.ok) return false
+    if (!res.ok) {
+      try { localStorage.removeItem(STORAGE_KEY) } catch { /* ignore */ }
+      return false
+    }
     const data = (await res.json()) as { token?: string }
     if (data.token) {
       _token = data.token
+      persist(_token)
       return true
     }
   } catch {
-    /* transient network error — keep the current token, the timer retries */
+    /* transient network error — keep the current token */
   }
   return false
-}
-
-// Renew well before the server TTL (default 3600s) so an open tab never lapses.
-const REFRESH_INTERVAL_MS = 45 * 60 * 1000
-let _timer: ReturnType<typeof setInterval> | null = null
-
-/** Start the periodic background refresh (call once at app startup). */
-export function startTokenRefresh(): void {
-  if (_timer || !_token) return
-  _timer = setInterval(() => {
-    void refreshToken()
-  }, REFRESH_INTERVAL_MS)
 }

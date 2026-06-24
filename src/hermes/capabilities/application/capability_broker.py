@@ -163,6 +163,7 @@ class CapabilityBroker:
         hitl_approval_token: str | None = None,
         work_item_id: UUID | None = None,
         autonomy_level: AutonomyLevel | None = None,
+        conversation_id: str = "",
     ) -> ExecutionOutcome:
         """Paso único al mundo — secuencia fail-closed de 8+1 pasos.
 
@@ -248,6 +249,7 @@ class CapabilityBroker:
                     justification=proposal.justification,
                     parameters_redacted=proposal.parameters,
                     tool_name=proposal.tool_name,
+                    conversation_id=conversation_id,
                 )
                 return ExecutionOutcome(
                     proposal_id=proposal.proposal_id,
