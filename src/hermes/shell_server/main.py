@@ -52,6 +52,7 @@ class ChatRequest(BaseModel):
     conversation_id: str | None = None  # propagado al daemon como contexto
     user_message: str = Field(min_length=1)
     dedup_key: str | None = None  # CTRL-P1-27: idempotencia doble-envío
+    agent_id: str | None = None  # agente destino; None → CEO (default)
 
 
 class ChatStartResponse(BaseModel):
@@ -952,7 +953,6 @@ def create_app() -> FastAPI:
             return {
                 "state": "idle",
                 "active_task_count": 0,
-                "active_agent_id": "",
                 "available": False,
                 "captured_at": datetime.now(tz=UTC).isoformat(),
             }
@@ -1095,18 +1095,28 @@ def create_app() -> FastAPI:
     async def chat_start(payload: ChatRequest) -> ChatStartResponse:
         """T048 🔒 — Encola el mensaje vía ControlPlanePort.enqueue.
 
+        Contract: one conversation = one agent (immutable once bound).
+        Agent resolution precedence:
+          1. Existing conversation's bound agent_id (never reassigned).
+          2. payload.agent_id if provided.
+          3. DEFAULT_AGENT_ID (CEO) as fallback.
+
         Fail-hard: si el daemon no está disponible → 503 agent_unavailable.
         Sin fallback passthrough (CTRL-P1-11, CTRL-P1-26, SC-005, FR-010).
-
-        enqueued_by lo deriva el daemon del sender_uid del bus (GetConnectionUnixUser).
-        El shell-server NO lo manda en el payload — sería spoofeable.
         """
+        from hermes.agents.domain.agent import DEFAULT_AGENT_ID  # noqa: PLC0415
         from hermes.tasks.control_plane.domain.ports import (  # noqa: PLC0415
             AuthenticatedChannel,
         )
 
         channel = AuthenticatedChannel(sender_uid=os.getuid())
         conv_id_str = payload.conversation_id or str(uuid4())
+        conv_id_uuid = UUID(conv_id_str)
+
+        # Resolve agent: honour existing binding first (contract immutability).
+        bound_agent = conv_repo.get_bound_agent_id(conversation_id=conv_id_uuid)
+        resolved_agent_id = bound_agent or payload.agent_id or DEFAULT_AGENT_ID
+
         # CTRL-P1-27: dedup_key por mensaje de chat (1 ejecución por doble-envío).
         dedup_key = payload.dedup_key or f"chat:{conv_id_str}:{hash(payload.user_message)}"
 
@@ -1120,6 +1130,7 @@ def create_app() -> FastAPI:
                 # I5 (schema agent_tasks): un chat_message DEBE llevar
                 # conversation_id o el INSERT OR IGNORE lo descarta en silencio.
                 conversation_id=conv_id_str,
+                agent_id=resolved_agent_id,
             )
         except AgentUnavailable as exc:
             logger.warning(
@@ -1136,7 +1147,11 @@ def create_app() -> FastAPI:
 
         logger.info(
             "hermes.shell_server.chat.enqueued",
-            extra={"task_id": str(result.task_id), "conv_id": conv_id_str},
+            extra={
+                "task_id": str(result.task_id),
+                "conv_id": conv_id_str,
+                "agent_id": resolved_agent_id,
+            },
         )
 
         # NOTA: la persistencia del mensaje del usuario (create_or_touch +

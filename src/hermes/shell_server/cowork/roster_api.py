@@ -57,10 +57,10 @@ def _build_departments(agents: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     departments: list[dict[str, Any]] = []
 
-    # Cerebro siempre primero.
+    # CEO always first.
     if cerebro:
         departments.append(
-            {"id": "cerebro", "name": "Cerebro", "kind": "cerebro", "agents": cerebro}
+            {"id": "cerebro", "name": "CEO", "kind": "cerebro", "agents": cerebro}
         )
 
     # Departamentos de fábrica primero, en el orden de DEPARTMENTS.

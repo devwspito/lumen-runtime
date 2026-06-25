@@ -612,7 +612,7 @@ class TestRealDbusInterfaceAdapter:
         captured: list[tuple] = []
 
         class _CapturingProxy:
-            async def call_enqueue(self, trigger_kind, text, priority, dedup_key, conversation_id, operator_token=""):
+            async def call_enqueue(self, trigger_kind, text, priority, dedup_key, conversation_id, operator_token="", agent_id=""):
                 captured.append((trigger_kind, text, priority, dedup_key, conversation_id))
                 return ("tid-abc", "/ws/tasks/tid-abc")
 
@@ -632,7 +632,7 @@ class TestRealDbusInterfaceAdapter:
         received_conv_id: list[str] = []
 
         class _Proxy:
-            async def call_enqueue(self, trigger_kind, text, priority, dedup_key, conversation_id, operator_token=""):
+            async def call_enqueue(self, trigger_kind, text, priority, dedup_key, conversation_id, operator_token="", agent_id=""):
                 received_conv_id.append(conversation_id)
                 return ("t", "/ws/tasks/t")
 

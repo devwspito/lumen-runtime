@@ -16,7 +16,7 @@ Patrón async→QML (thread-safe):
 
 Contrato (method snake_case  ←→  método D-Bus PascalCase):
   enqueue, get_conversation, list_conversations, delete_conversation,
-  list_agents, get_active_agent, set_active_agent, create_agent, update_agent,
+  list_agents, create_agent, update_agent,
   delete_agent, list_providers, get_active_provider, add_provider,
   update_provider, delete_provider, set_active_provider, test_provider,
   list_skills, promote_skill, deprecate_skill, sign_composio_skill,
@@ -54,14 +54,13 @@ _METHODS: dict[str, tuple[str, list[tuple[str, object, str]]]] = {
         ("dedup_key", "", "s"),
         ("conversation_id", "", "s"),
         ("operator_token", "", "s"),
+        ("agent_id", "", "s"),
     ]),
     "get_conversation": ("call_get_conversation", [("conversation_id", "", "s")]),
     "list_conversations": ("call_list_conversations", [("agent_id", "", "s")]),
     "delete_conversation": ("call_delete_conversation", [("conversation_id", "", "s")]),
     # ── Agentes (profiles) ───────────────────────────────────────────────
     "list_agents": ("call_list_agents", []),
-    "get_active_agent": ("call_get_active_agent", []),
-    "set_active_agent": ("call_set_active_agent", [("agent_id", "", "s")]),
     "create_agent": ("call_create_agent", [("draft_json", {}, "json")]),
     "update_agent": ("call_update_agent", [("agent_id", "", "s"), ("draft_json", {}, "json")]),
     "delete_agent": ("call_delete_agent", [("agent_id", "", "s")]),

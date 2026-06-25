@@ -79,11 +79,11 @@ class _MinimalControlPlane:
     def audit_entries_emitted(self) -> list:
         return []
 
-    async def enqueue(self, *, channel, trigger_kind, text, priority, dedup_key, conversation_id):
+    async def enqueue(self, *, channel, trigger_kind, text, priority, dedup_key, conversation_id, agent_id=None):
         from hermes.tasks.control_plane.domain.ports import EnqueueResult  # noqa: PLC0415
 
         self._calls.append(
-            {"trigger_kind": trigger_kind, "text": text, "conversation_id": conversation_id}
+            {"trigger_kind": trigger_kind, "text": text, "conversation_id": conversation_id, "agent_id": agent_id}
         )
         tid = uuid4()
         return EnqueueResult(task_id=tid, stream_path=f"/run/hermes/tasks/{tid}.sock")

@@ -329,7 +329,7 @@ def default_agent() -> Agent:
                     rule_4, *_SHARED_GOLDEN_RULES[2:])
     return Agent(
         agent_id=DEFAULT_AGENT_ID,
-        name="Lumen",
+        name="CEO",
         role=role,
         register="cercano, claro y resolutivo; tutea al usuario; sin rodeos",
         primary_mission=mission,

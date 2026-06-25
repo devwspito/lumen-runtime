@@ -68,8 +68,9 @@ _OPERATOR_ID = uuid4()
 
 
 class TestAutonomyLevelDomain:
-    def test_default_agent_has_balanced_level(self) -> None:
-        assert default_agent().autonomy_level is AutonomyLevel.BALANCED
+    def test_default_agent_has_autonomous_level(self) -> None:
+        # CEO (default agent) operates autonomously on safe/reversible actions.
+        assert default_agent().autonomy_level is AutonomyLevel.AUTONOMOUS
 
     def test_agent_draft_default_is_balanced(self) -> None:
         draft = AgentDraft(name="X")
@@ -150,21 +151,25 @@ class TestAutonomyPersistence:
     def test_migration_idempotent_on_existing_db(self, tmp_path) -> None:
         """Construir dos veces la misma DB no lanza (migración idempotente)."""
         from hermes.agents.infrastructure.sqlite_agent_registry import SqliteAgentRegistry
+        from hermes.agents.domain.agent import DEFAULT_AGENT_ID
 
         db = tmp_path / "s.db"
         SqliteAgentRegistry(db_path=db)
         # Segunda construcción aplica ALTER TABLE ADD COLUMN de nuevo → no debe lanzar.
         reg2 = SqliteAgentRegistry(db_path=db)
         agents = reg2.list_agents()
-        assert len(agents) == 1
-        assert agents[0].autonomy_level is AutonomyLevel.BALANCED
+        defaults = [a for a in agents if a.agent_id == DEFAULT_AGENT_ID]
+        assert len(defaults) == 1
+        assert defaults[0].autonomy_level is AutonomyLevel.AUTONOMOUS
 
-    def test_default_agent_seed_has_balanced(self, tmp_path) -> None:
+    def test_default_agent_seed_has_autonomous(self, tmp_path) -> None:
         from hermes.agents.infrastructure.sqlite_agent_registry import SqliteAgentRegistry
+        from hermes.agents.domain.agent import DEFAULT_AGENT_ID
 
         reg = SqliteAgentRegistry(db_path=tmp_path / "s.db")
-        default = reg.list_agents()[0]
-        assert default.autonomy_level is AutonomyLevel.BALANCED
+        default = reg.get_agent(DEFAULT_AGENT_ID)
+        # CEO (default agent) operates autonomously on safe/reversible actions.
+        assert default.autonomy_level is AutonomyLevel.AUTONOMOUS
 
 
 # ---------------------------------------------------------------------------
@@ -491,7 +496,7 @@ class TestResolveActiveAutonomyLevel:
         result = _resolve_active_autonomy_level(None)
         assert result is AutonomyLevel.BALANCED
 
-    def test_registry_with_autonomous_agent_returns_autonomous(self, tmp_path) -> None:
+    def test_explicit_agent_id_returns_that_agents_autonomy(self, tmp_path) -> None:
         from hermes.agents.infrastructure.sqlite_agent_registry import SqliteAgentRegistry
         from hermes.tasks.application.agent_loop_orchestrator import (
             _resolve_active_autonomy_level,
@@ -501,21 +506,32 @@ class TestResolveActiveAutonomyLevel:
         agent = reg.create_agent(
             AgentDraft(name="Bot", autonomy_level=AutonomyLevel.AUTONOMOUS)
         )
-        reg.set_active_agent(agent.agent_id)
-        result = _resolve_active_autonomy_level(reg)
+        # Pass agent_id explicitly — no global active_agent involved.
+        result = _resolve_active_autonomy_level(reg, agent_id=agent.agent_id)
         assert result is AutonomyLevel.AUTONOMOUS
 
-    def test_registry_error_returns_balanced(self) -> None:
-        """Si el registro lanza, _resolve_active_autonomy_level devuelve BALANCED (fail-safe)."""
+    def test_no_agent_id_falls_back_to_default_agent_autonomy(self, tmp_path) -> None:
+        """Without an agent_id, resolves to CEO (DEFAULT_AGENT_ID) autonomy."""
+        from hermes.agents.domain.agent import DEFAULT_AGENT_ID
+        from hermes.agents.infrastructure.sqlite_agent_registry import SqliteAgentRegistry
         from hermes.tasks.application.agent_loop_orchestrator import (
             _resolve_active_autonomy_level,
         )
 
-        class _BrokenRegistry:
-            def active_agent_id(self) -> str:
-                raise RuntimeError("DB unavailable")
+        reg = SqliteAgentRegistry(db_path=tmp_path / "s.db")
+        default_agent = reg.get_agent(DEFAULT_AGENT_ID)
+        result = _resolve_active_autonomy_level(reg)
+        assert result is default_agent.autonomy_level
 
-        result = _resolve_active_autonomy_level(_BrokenRegistry())
+    def test_unknown_agent_id_returns_balanced(self, tmp_path) -> None:
+        """Si el agent_id no existe, devuelve BALANCED (fail-safe)."""
+        from hermes.agents.infrastructure.sqlite_agent_registry import SqliteAgentRegistry
+        from hermes.tasks.application.agent_loop_orchestrator import (
+            _resolve_active_autonomy_level,
+        )
+
+        reg = SqliteAgentRegistry(db_path=tmp_path / "s.db")
+        result = _resolve_active_autonomy_level(reg, agent_id="nonexistent-agent")
         assert result is AutonomyLevel.BALANCED
 
 

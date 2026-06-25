@@ -432,25 +432,19 @@ class DbusRuntimeServiceWiring:
             return []
         return [agent_to_dict(a) for a in self._agent_registry.list_agents()]
 
-    def get_active_agent(self) -> str:
-        if self._agent_registry is None:
-            return ""
-        return self._agent_registry.active_agent_id()
-
     def runtime_status(self) -> dict:
-        """Return the real live runtime status: state, active_task_count, active_agent_id,
+        """Return the real live runtime status: state, active_task_count,
         activity (in-flight tool per task), and ruflo_active signal.
 
-        Read-only, no authZ — same policy as get_active_agent / list_providers.
-        Fail-soft: core keys always present; activity/ruflo_active omitted on error.
+        Read-only, no authZ. Fail-soft: core keys always present.
+        Note: active_agent_id has been removed — there is no global active agent.
+        Each conversation carries its own agent binding (per-conversation contract).
         """
         try:
             count = self._worker_count_fn() if self._worker_count_fn is not None else 0
-            active_agent_id = self.get_active_agent()
             status: dict = {
                 "state": "working" if count > 0 else "idle",
                 "active_task_count": count,
-                "active_agent_id": active_agent_id,
                 "captured_at": datetime.now(tz=UTC).isoformat(),
             }
         except Exception:  # noqa: BLE001 — never crash a status read
@@ -458,7 +452,6 @@ class DbusRuntimeServiceWiring:
             return {
                 "state": "idle",
                 "active_task_count": 0,
-                "active_agent_id": "",
                 "captured_at": datetime.now(tz=UTC).isoformat(),
             }
 
@@ -473,11 +466,6 @@ class DbusRuntimeServiceWiring:
             logger.debug("hermes.dbus.runtime_status_activity_error", exc_info=True)
 
         return status
-
-    async def set_active_agent(self, *, agent_id: str, sender_uid: int) -> None:
-        self._authorize(sender_uid, operation="set_active_agent")
-        self._require_registry().set_active_agent(agent_id)
-        logger.info("hermes.dbus.agent_activated", extra={"by_uid": sender_uid})
 
     async def create_agent(self, *, draft, sender_uid: int) -> dict:
         from hermes.agents.application.serialization import agent_to_dict  # noqa: PLC0415
@@ -2571,6 +2559,7 @@ class DbusRuntimeServiceWiring:
         sender_uid: int,
         conversation_id: str | None = None,
         operator_token: str | None = None,
+        agent_id: str | None = None,
     ) -> EnqueueResult:
         """Encola un WorkItem delegando en ControlPlaneService (Issue 2 / CTRL-P1-6).
 
@@ -2617,6 +2606,7 @@ class DbusRuntimeServiceWiring:
             priority=priority,
             dedup_key=dedup_key,
             conversation_id=conversation_id,
+            agent_id=agent_id,
         )
         # GATE 0 / M2 — el daemon ES dueño del store de conversaciones. Persiste el
         # mensaje del usuario AQUÍ (movido del shell-server) para que la historia
@@ -2630,17 +2620,16 @@ class DbusRuntimeServiceWiring:
         ):
             try:
                 from uuid import UUID as _UUID  # noqa: PLC0415
+                from hermes.agents.domain.agent import DEFAULT_AGENT_ID as _DEFAULT_AGENT_ID  # noqa: PLC0415
 
                 conv_uuid = _UUID(conversation_id)
-                active_agent = (
-                    self._agent_registry.active_agent_id()
-                    if self._agent_registry is not None
-                    else None
-                )
+                # Use the per-request agent_id (resolved by chat_start with
+                # conversation-binding precedence). Fall back to CEO if absent.
+                bound_agent = agent_id or _DEFAULT_AGENT_ID
                 self._conversation_repo.create_or_touch(
                     conversation_id=conv_uuid,
                     first_user_message=text,
-                    agent_id=active_agent,
+                    agent_id=bound_agent,
                 )
                 self._conversation_repo.append_message(
                     conversation_id=conv_uuid, role="user", content=text

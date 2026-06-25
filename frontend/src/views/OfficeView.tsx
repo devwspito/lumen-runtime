@@ -1,13 +1,14 @@
 import { lazy, Suspense, useCallback, useEffect, useReducer, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useOutletContext } from 'react-router-dom'
 import { sileo } from 'sileo'
 import { X } from 'lucide-react'
 
-import { getAgentRoster, getRuntimeStatus, listMcpServers, createAgent, setActiveAgent, updateAgent, deleteAgent } from '../api/client'
+import { getAgentRoster, getRuntimeStatus, listMcpServers, createAgent, updateAgent, deleteAgent } from '../api/client'
 import type { AgentRoster, RosterAgent, RosterDepartment, RuntimeStatus, CreateAgentPayload, UpdateAgentPayload } from '../api/types'
 import type { LumenAgent, LumenRuntimeStatus } from './office-live/engine/office-state'
 import { useConfirmDialog } from '../components/ConfirmDialog'
 import { useT } from '../lib/i18n'
+import type { ChatOutletContext } from '../components/Layout'
 
 // ── Lazy-load the canvas so the rAF loop only starts when En-vivo is shown ──
 
@@ -378,11 +379,11 @@ interface AgentDrawerProps {
 function AgentDrawer({ agent, departments, isWorking, onClose, onClone, onRefetch }: AgentDrawerProps) {
   const t = useT()
   const navigate = useNavigate()
+  const { startNewWithAgent } = useOutletContext<ChatOutletContext>()
   const initials = agent.name.charAt(0).toUpperCase()
   const isFactory = agent.source === 'ruflo'
   const isDefault = agent.is_default
   const isEditable = !isFactory && !isDefault
-  const [activating, setActivating] = useState(false)
   const [showEditModal, setShowEditModal] = useState(false)
   const [confirm, ConfirmDialogNode] = useConfirmDialog()
 
@@ -392,19 +393,8 @@ function AgentDrawer({ agent, departments, isWorking, onClose, onClone, onRefetc
     return () => document.removeEventListener('keydown', onKey)
   }, [onClose])
 
-  async function handleChat() {
-    if (!agent.is_default) {
-      setActivating(true)
-      try {
-        await setActiveAgent(agent.id)
-        sileo.success({ title: t('agents.drawer.toast.activated').replace('{name}', agent.name) })
-      } catch {
-        sileo.warning({ title: t('agents.drawer.toast.activate_err').replace('{name}', agent.name) })
-      } finally {
-        setActivating(false)
-      }
-    }
-    navigate('/chat')
+  function handleChat() {
+    startNewWithAgent(agent.id, agent.name)
     onClose()
   }
 
@@ -423,7 +413,7 @@ function AgentDrawer({ agent, departments, isWorking, onClose, onClone, onRefetc
       onRefetch()
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : t('agents.drawer.toast.delete_err')
-      // 403 means the backend protected it (Cerebro / default agent)
+      // 403 means the backend protected it (CEO / default agent)
       sileo.error({ title: msg })
     }
   }
@@ -480,7 +470,7 @@ function AgentDrawer({ agent, departments, isWorking, onClose, onClone, onRefetc
               </p>
             )}
 
-            {/* Non-editable notice for Cerebro / default agents */}
+            {/* Non-editable notice for CEO / default agents */}
             {(isDefault || isFactory) && !isEditable && (
               <p style={{
                 fontSize: 'var(--text-label)',
@@ -512,11 +502,9 @@ function AgentDrawer({ agent, departments, isWorking, onClose, onClone, onRefetc
                 type="button"
                 className="office-btn office-btn--primary"
                 onClick={handleChat}
-                disabled={activating}
-                aria-busy={activating}
                 title={t('agents.drawer.chat.title')}
               >
-                {activating ? t('agents.drawer.activating') : t('agents.drawer.chat')}
+                {t('agents.drawer.chat')}
               </button>
 
               {(isFactory || isDefault) && (
@@ -741,7 +729,7 @@ function TarjetasView({ roster, runtimeStatus, hasRuflo, onRosterRefetch, onAgen
   return (
     <>
       <div className="office-tarjetas">
-        {/* ── Cerebro departments ── */}
+        {/* ── CEO (default) departments ── */}
         {cerebroDepts.map((dept) => (
           <DepartmentSection
             key={dept.id}

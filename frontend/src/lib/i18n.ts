@@ -223,7 +223,7 @@ const translations = {
     'agents.card.aria_idle':      '{name}. Click para ver detalle.',
     'agents.status.working':      'Trabajando',
     'agents.status.online':       'En línea',
-    'agents.badge.default':       'Cerebro',
+    'agents.badge.default':       'CEO',
     'agents.badge.factory':       'Del sistema',
 
     // Agents / Office view — create card
@@ -233,16 +233,13 @@ const translations = {
     // Agents / Office view — agent drawer
     'agents.drawer.close':        'Cerrar',
     'agents.drawer.chat':         'Chatear',
-    'agents.drawer.activating':   'Activando…',
-    'agents.drawer.chat.title':   'Activar este agente y abrir el chat',
+    'agents.drawer.chat.title':   'Iniciar un chat con este agente',
     'agents.drawer.clone':        'Clonar y personalizar',
     'agents.drawer.schedule':     'Programar tarea',
     'agents.drawer.edit':         'Editar',
     'agents.drawer.delete':       'Borrar',
     'agents.drawer.readonly.default': 'No editable (puedes clonarlo para crear tu propia versión).',
     'agents.drawer.readonly.factory': 'Agente del sistema — clónalo para personalizar.',
-    'agents.drawer.toast.activated':  '{name} ahora está activo',
-    'agents.drawer.toast.activate_err': 'No se pudo activar {name}',
     'agents.drawer.confirm.title':    '¿Eliminar "{name}"?',
     'agents.drawer.confirm.desc':     'El agente se eliminará permanentemente. Esta acción no se puede deshacer.',
     'agents.drawer.confirm.confirm':  'Eliminar',
@@ -482,7 +479,7 @@ const translations = {
     'agents.card.aria_idle':      '{name}. Click to view details.',
     'agents.status.working':      'Working',
     'agents.status.online':       'Online',
-    'agents.badge.default':       'Brain',
+    'agents.badge.default':       'CEO',
     'agents.badge.factory':       'System',
 
     // Agents / Office view — create card
@@ -492,16 +489,13 @@ const translations = {
     // Agents / Office view — agent drawer
     'agents.drawer.close':        'Close',
     'agents.drawer.chat':         'Chat',
-    'agents.drawer.activating':   'Activating…',
-    'agents.drawer.chat.title':   'Activate this agent and open the chat',
+    'agents.drawer.chat.title':   'Start a chat with this agent',
     'agents.drawer.clone':        'Clone and customize',
     'agents.drawer.schedule':     'Schedule task',
     'agents.drawer.edit':         'Edit',
     'agents.drawer.delete':       'Delete',
     'agents.drawer.readonly.default': 'Not editable (you can clone it to create your own version).',
     'agents.drawer.readonly.factory': 'System agent — clone it to customize.',
-    'agents.drawer.toast.activated':  '{name} is now active',
-    'agents.drawer.toast.activate_err': 'Could not activate {name}',
     'agents.drawer.confirm.title':    'Delete "{name}"?',
     'agents.drawer.confirm.desc':     'The agent will be permanently deleted. This action cannot be undone.',
     'agents.drawer.confirm.confirm':  'Delete',

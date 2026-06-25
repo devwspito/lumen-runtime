@@ -206,6 +206,7 @@ class FakeDbusInterface:
         priority: int,
         dedup_key: str,
         conversation_id: str = "",
+        agent_id: str = "",
     ) -> EnqueueResult:
         self.enqueue_calls.append(
             {
@@ -214,6 +215,7 @@ class FakeDbusInterface:
                 "priority": priority,
                 "dedup_key": dedup_key,
                 "conversation_id": conversation_id,
+                "agent_id": agent_id,
             }
         )
         if not self._enqueue_queue:
@@ -608,11 +610,13 @@ class RealDbusInterface:
         priority: int,
         dedup_key: str,
         conversation_id: str = "",
+        agent_id: str = "",
     ) -> EnqueueResult:
-        # Daemon Enqueue signature: (s, s, i, s, s, s) -> (s, s)
+        # Daemon Enqueue signature: (s, s, i, s, s, s, s) -> (s, s)
         # The GTK shell runs IN the hermes-user session (uid ∈ authorized_uids),
         # so it is a DIRECT caller — the daemon ignores the (empty) operator_token
         # on the direct path. Proxy callers (shell-server) pass a signed token.
+        # agent_id: per-conversation bound agent ("" = resolve to CEO server-side).
         task_id_str, stream_path = await self._iface.call_enqueue(
             trigger_kind,
             text,
@@ -620,6 +624,7 @@ class RealDbusInterface:
             dedup_key,
             conversation_id,
             "",
+            agent_id,
         )
         return EnqueueResult(task_id=task_id_str, stream_path=stream_path)
 

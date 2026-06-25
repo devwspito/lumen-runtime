@@ -284,6 +284,21 @@ class SQLiteConversationRepository:
             ],
         )
 
+    def get_bound_agent_id(self, *, conversation_id: UUID) -> str | None:
+        """Return the agent_id bound to this conversation, or None if not found.
+
+        Used by chat_start to enforce the one-conversation-one-agent contract:
+        if a binding exists it MUST be reused; callers must not reassign.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT agent_id FROM conversations WHERE conversation_id = ?",
+                (str(conversation_id),),
+            ).fetchone()
+        if row is None:
+            return None
+        return row["agent_id"]
+
     def load_messages(
         self, *, conversation_id: UUID
     ) -> list[ChatMessage]:

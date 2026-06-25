@@ -406,10 +406,11 @@ class TestReadOnlyNoAuthRequired:
         result = wiring.list_skills()
         assert isinstance(result, list)
 
-    async def test_get_active_agent_no_auth_needed(self) -> None:
+    async def test_runtime_status_no_auth_needed(self) -> None:
         wiring, _, _ = _make_wiring(include_proxy=False)
-        result = wiring.get_active_agent()
-        assert isinstance(result, str)
+        result = wiring.runtime_status()
+        assert isinstance(result, dict)
+        assert "state" in result
 
     async def test_list_pending_no_auth_needed(self) -> None:
         """list_pending returns empty list when cp_service not injected — no crash."""
