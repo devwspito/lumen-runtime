@@ -1,6 +1,7 @@
 import { useEffect, useReducer, useRef, useState } from 'react'
 import { sileo } from 'sileo'
 import { X, Terminal, Search, Wrench } from 'lucide-react'
+import { useT } from '../lib/i18n'
 import { listMcpServers, addMcpServer, removeMcpServer, searchMcpRegistry, scanInstall, recordSecurityDecision, ApiError } from '../api/client'
 import type { McpServer, McpRegistryEntry, InstallScanResponse } from '../api/types'
 import { useConfirmDialog } from '../components/ConfirmDialog'
@@ -653,6 +654,7 @@ interface AddMcpFormProps {
 }
 
 function AddMcpForm({ onAdded, onToast }: AddMcpFormProps) {
+  const t = useT()
   const [adding, setAdding] = useState(false)
   const labelRef = useRef<HTMLInputElement>(null)
   const argvRef = useRef<HTMLInputElement>(null)
@@ -715,7 +717,7 @@ function AddMcpForm({ onAdded, onToast }: AddMcpFormProps) {
         placeholder="npx -y @modelcontextprotocol/server-brave-search"
         autoComplete="off"
       />
-      <label className="cv-label" htmlFor="mcp-env">Variables de configuración (CLAVE=VALOR, una por línea)</label>
+      <label className="cv-label" htmlFor="mcp-env">{t('mcp.env.label')}</label>
       <textarea
         id="mcp-env"
         ref={envRef}

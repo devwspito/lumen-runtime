@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import { sileo } from 'sileo'
 import { X, Zap, Search as SearchIcon, ChevronRight, Package } from 'lucide-react'
+import { useT } from '../lib/i18n'
 import {
   listSkills, searchSkillsHub, listHubSkills, installSkill, getHubOpStatus,
   uninstallHubSkill, promoteSkill,
@@ -625,11 +626,14 @@ export default function SkillsView() {
 
 // ── Installed skill row ───────────────────────────────────────────────────────
 
-function stateMeta(state: string): { label: string; variant: BadgeVariant } {
+type StateMeta = { label: string; variant: BadgeVariant }
+
+function useStateMeta(state: string): StateMeta {
+  const t = useT()
   const s = state.toLowerCase()
-  if (s.includes('autonom')) return { label: 'Autónoma', variant: 'ok' }
-  if (s.includes('deprec'))  return { label: 'Obsoleta', variant: 'neutral' }
-  if (s.includes('valid'))   return { label: 'Validada', variant: 'accent' }
+  if (s.includes('autonom')) return { label: t('skills.state.autonomous'), variant: 'ok' }
+  if (s.includes('deprec'))  return { label: t('skills.state.deprecated'), variant: 'neutral' }
+  if (s.includes('valid'))   return { label: t('skills.state.validated'), variant: 'accent' }
   return { label: state, variant: 'neutral' }
 }
 
@@ -642,9 +646,10 @@ interface SkillRowProps {
 }
 
 function SkillRow({ skill, loadingDetails, onView, onPromote, onUninstall }: SkillRowProps) {
+  const t = useT()
   const reduced = useReducedMotion()
   const name = skill.skill_name ?? skill.name ?? skill.slug ?? ''
-  const meta = stateMeta(skill.state ?? '')
+  const meta = useStateMeta(skill.state ?? '')
   const version = skill.version ? `v${skill.version}` : ''
   const surfaces = Array.isArray(skill.surface_kinds)
     ? skill.surface_kinds.join(' · ')
@@ -680,9 +685,9 @@ function SkillRow({ skill, loadingDetails, onView, onPromote, onUninstall }: Ski
           <button
             className="cv-btn cv-btn--primary cv-btn--sm"
             onClick={onPromote}
-            aria-label="Activar modo autónomo para esta habilidad"
+            aria-label={t('skills.promote')}
           >
-            Activar modo autónomo
+            {t('skills.promote')}
           </button>
         )}
         <button
@@ -775,6 +780,7 @@ function TeachSkillExpander({
   teachNameRef, teachDescRef,
   onStart, onPause, onResume, onStop, onCancel, onSetPhase,
 }: TeachSkillExpanderProps) {
+  const t = useT()
   const reduced = useReducedMotion()
 
   return (
@@ -795,7 +801,7 @@ function TeachSkillExpander({
         >
           <ChevronRight size={13} className="cv-teach-chevron" style={{ transform: 'none' }} />
         </motion.span>
-        Enseñar una habilidad (avanzado)
+        {t('skills.teach.header')}
       </button>
 
       {/* Animated body */}
@@ -870,7 +876,7 @@ function TeachSkillExpander({
                 </p>
                 <div className="cv-form-actions">
                   <button className="cv-btn cv-btn--secondary cv-btn--sm" onClick={onPause} type="button">Pausar</button>
-                  <button className="cv-btn cv-btn--primary cv-btn--sm" onClick={onStop} type="button">Detener y crear skill</button>
+                  <button className="cv-btn cv-btn--primary cv-btn--sm" onClick={onStop} type="button">{t('skills.teach.stop')}</button>
                   <button className="cv-btn cv-btn--ghost cv-btn--sm cv-btn--danger" onClick={onCancel} type="button">Cancelar</button>
                 </div>
               </motion.div>
@@ -888,7 +894,7 @@ function TeachSkillExpander({
                 <p className="state-label" role="status" aria-live="polite">Grabación en pausa.</p>
                 <div className="cv-form-actions">
                   <button className="cv-btn cv-btn--primary cv-btn--sm" onClick={onResume} type="button">Reanudar</button>
-                  <button className="cv-btn cv-btn--secondary cv-btn--sm" onClick={onStop} type="button">Detener y crear skill</button>
+                  <button className="cv-btn cv-btn--secondary cv-btn--sm" onClick={onStop} type="button">{t('skills.teach.stop_paused')}</button>
                   <button className="cv-btn cv-btn--ghost cv-btn--sm cv-btn--danger" onClick={onCancel} type="button">Cancelar</button>
                 </div>
               </motion.div>
@@ -905,7 +911,7 @@ function TeachSkillExpander({
                 exit={reduced ? undefined : { opacity: 0 }}
                 transition={{ duration: 0.15 }}
               >
-                Creando la skill con IA…
+                {t('skills.teach.synth')}
               </motion.p>
             )}
           </AnimatePresence>

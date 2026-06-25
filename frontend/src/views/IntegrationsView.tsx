@@ -1,6 +1,7 @@
 import { useEffect, useReducer, useRef, useState } from 'react'
 import { sileo } from 'sileo'
 import { Check, Plug, Globe } from 'lucide-react'
+import { useT } from '../lib/i18n'
 import {
   getComposioStatus, listComposioConnected, listComposioApps,
   connectComposioApp, setComposioApiKey,
@@ -59,6 +60,7 @@ function show(message: string, kind: 'ok' | 'warn' | 'error' | 'info' = 'ok') {
 }
 
 export default function IntegrationsView() {
+  const t = useT()
   const [composioState, dispatch] = useReducer(composioReducer, { status: 'loading' })
   const [wsState, setWsState] = useState<WsState>({ status: 'loading' })
   const reloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -128,7 +130,7 @@ export default function IntegrationsView() {
     <>
       <PageHeader
         title="Integraciones"
-        subtitle="Conecta Lumen a tus apps. Más de 250 conectores disponibles vía Composio."
+        subtitle={t('int.subtitle')}
       />
 
       <div className="view-body cv-view-body">
@@ -161,8 +163,8 @@ export default function IntegrationsView() {
 
           {/* ── Composio status ────────────────────────────────────────────── */}
           <StaggerItem>
-            <section className="cv-section" aria-label="Estado Composio">
-              <h2 className="cv-section-label">Composio — conecta tus apps</h2>
+            <section className="cv-section" aria-label="Servicios conectados">
+              <h2 className="cv-section-label">Conecta tus apps</h2>
               {composioState.status === 'loading' && (
                 <div className="cv-skeleton" style={{ height: 48 }} aria-busy="true" />
               )}
@@ -186,9 +188,9 @@ export default function IntegrationsView() {
                 </FadeIn>
               )}
               {composioState.status === 'ready' && (
-                <div className="integration-status-ok" aria-label="Composio activo">
+                <div className="integration-status-ok" aria-label="Servicios conectados activos">
                   <Check size={15} className="integration-status-ok__check" aria-hidden="true" />
-                  Composio activo · Tu cuenta: <code>{composioState.info.entity_id ?? ''}</code>
+                  Servicios conectados activos · Tu cuenta: <code>{composioState.info.entity_id ?? ''}</code>
                 </div>
               )}
             </section>
@@ -353,22 +355,22 @@ function ComposioSetupCard({ onSaved, onToast }: ComposioSetupCardProps) {
   return (
     <div className="cv-teach-card">
       <p className="cv-teach-intro">
-        Composio conecta Lumen a tus apps del día a día (Gmail, Slack, Notion y más de 250). Es gratis para empezar.
+        Conecta el agente a tus apps del día a día (Gmail, Slack, Notion y más de 250). Es gratis para empezar.
       </p>
       <p className="cv-teach-intro">
         1) Entra en{' '}
         <a href="https://app.composio.dev/developers" target="_blank" rel="noopener noreferrer">app.composio.dev</a>
-        {' '}· 2) Crea una cuenta gratis · 3) En <strong>Settings → API Keys</strong> genera una clave (<code>ak_…</code>) y pégala aquí.
+        {' '}· 2) Crea una cuenta gratis · 3) En <strong>Settings → API Keys</strong> genera una clave y pégala aquí.
       </p>
       <div className="cv-form-inline">
-        <label className="sr-only" htmlFor="composio-apikey">Clave API de Composio</label>
+        <label className="sr-only" htmlFor="composio-apikey">Clave de acceso</label>
         {/* Secret: password input, never echoed back */}
         <input
           id="composio-apikey"
           ref={keyRef}
           className="cv-input"
           type="password"
-          placeholder="Clave API de Composio"
+          placeholder="Clave de acceso"
           autoComplete="new-password"
           onKeyDown={e => { if (e.key === 'Enter') handleSave() }}
         />

@@ -24,8 +24,10 @@ import type { Provider } from '../api/types'
 import type { ChatOutletContext } from '../components/Layout'
 import ContextPanel from '../components/ContextPanel'
 import PendingApprovalsInChat from '../components/PendingApprovalsInChat'
+import { useT } from '../lib/i18n'
+import { toolLabel } from '../lib/toolLabels'
 
-// ── i18n strings (ES, matching vanilla i18n.js) ───────────────────────────────
+// ── Static strings (these do not need locale switching — they are Spanish only) ──
 
 const STRINGS = {
   welcomeTitle:  'Hola, soy Lumen',
@@ -46,6 +48,14 @@ const SUGGESTIONS = [
   STRINGS.suggest3,
   STRINGS.suggest4,
 ]
+
+/** Map raw error messages from the backend/stream to human-readable copy. */
+function humanizeError(msg: string, t: (key: Parameters<ReturnType<typeof useT>>[0]) => string): string {
+  if (/connection refused|econnrefused|network/i.test(msg)) return t('chat.err.connection')
+  if (/stream_error|stream error/i.test(msg)) return t('chat.err.stream')
+  if (/timeout|timed out/i.test(msg)) return t('chat.err.timeout')
+  return t('chat.err.generic')
+}
 
 // ── Welcome screen ────────────────────────────────────────────────────────────
 
@@ -148,9 +158,9 @@ function DelegationStep({ step, isStreaming }: DelegationStepProps) {
             <CheckCircle2 size={12} style={{ color: 'var(--ok)', flexShrink: 0 }} aria-hidden="true" />
           )}
         </div>
-        {isStreaming && liveActivity && (
+        {isStreaming && liveActivity && (toolLabel(liveActivity.tool) !== null) && (
           <div className="delegation-step__live" aria-live="polite" aria-atomic="true">
-            {liveActivity.tool.replace(/_/g, ' ')}
+            {toolLabel(liveActivity.tool)}
           </div>
         )}
       </div>
@@ -256,6 +266,7 @@ interface UserMessageProps {
 }
 
 function UserMessage({ text, failed }: UserMessageProps) {
+  const t = useT()
   return (
     <div
       className={`message message--user${failed ? ' message--failed' : ''}`}
@@ -268,7 +279,7 @@ function UserMessage({ text, failed }: UserMessageProps) {
           style={{ fontSize: 'var(--text-caption)', color: 'var(--danger)', margin: '4px 0 0' }}
           role="alert"
         >
-          No se pudo enviar
+          {t('chat.err.not_sent')}
         </p>
       )}
     </div>
@@ -351,19 +362,20 @@ function StatusBar({ phase, text }: StatusBarProps) {
 
 function NoModelBanner() {
   const navigate = useNavigate()
+  const t = useT()
   return (
     <div
       className="chat-status chat-status--error"
       role="alert"
       style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 'var(--sp-3)' }}
     >
-      <span>Sin modelo configurado. Conecta un proveedor para empezar a chatear.</span>
+      <span>{t('chat.nomodel.text')}</span>
       <button
         type="button"
         className="cv-btn cv-btn--primary cv-btn--sm"
         onClick={() => navigate('/proveedores')}
       >
-        Ir a Proveedores
+        {t('chat.nomodel.cta')}
       </button>
     </div>
   )
@@ -498,6 +510,7 @@ interface ComposerProps {
 }
 
 function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: ComposerProps) {
+  const t = useT()
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [attachments, setAttachments] = useState<PendingAttachment[]>([])
@@ -550,7 +563,7 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
             ),
           )
         } catch (err) {
-          const msg = err instanceof ApiError ? err.message : 'Error al subir el archivo.'
+          const msg = err instanceof ApiError ? err.message : t('chat.err.attach').replace('{name}', att.file.name)
           console.error(`Attachment upload failed for ${att.file.name}: ${msg}`)
           setAttachments((prev) =>
             prev.map((a) =>
@@ -735,6 +748,7 @@ function SpinnerIcon() {
 // ── ChatView ──────────────────────────────────────────────────────────────────
 
 export default function ChatView() {
+  const t = useT()
   // All chat state comes from Layout via outlet context — no duplicate useChat instance.
   const { convId, messages, status, sendMessage, stopStream, approvalRefreshTick } = useOutletContext<ChatOutletContext>()
   const [composerText, setComposerText] = useState('')
@@ -810,7 +824,8 @@ export default function ChatView() {
 
   const statusText = status.phase === 'streaming' ? status.statusText
     : status.phase === 'sending' ? 'Enviando…'
-    : status.phase === 'error' && !showNoModel ? (status as { phase: 'error'; message: string }).message
+    : status.phase === 'error' && !showNoModel
+      ? humanizeError((status as { phase: 'error'; message: string }).message ?? '', t)
     : undefined
 
   return (
