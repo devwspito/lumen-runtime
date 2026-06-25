@@ -4,7 +4,7 @@
  * Three sub-areas:
  *   (a) Pending HITL approvals — polled every 3 s, Approve/Deny via MfaModal.
  *   (b) Governance — MFA enrollment + security policy presets + accordion catalog.
- *   (c) Security center — egress permissions, audit chain, recent scans.
+ *   (c) Security center — egress permissions, recent scans.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
@@ -18,8 +18,6 @@ import {
   setPolicyTools,
   setMfaOnDangers,
   getSecurityScans,
-  getAuditChainHead,
-  getSecurityPolicy,
   listEgressDomains,
   grantEgressDomain,
   revokeEgressDomain,
@@ -31,7 +29,6 @@ import type {
   PoliciesResponse,
   PolicyCatalogEntry,
   SecurityScan,
-  AuditHead,
 } from '../api/types'
 import ApprovalCard from '../components/ApprovalCard'
 import MfaEnroll from '../components/MfaEnroll'
@@ -42,7 +39,6 @@ import {
   AnimatedListItem,
   AnimatedExpanderContent,
   AnimatedChevron,
-  FadeIn,
   Stagger,
   StaggerItem,
   HoverRow,
@@ -1040,17 +1036,11 @@ function ScanRow({ scan }: { scan: SecurityScan }) {
 
 function SecurityCenterSection() {
   const [scans, setScans] = useState<SecurityScan[] | null>(null)
-  const [auditHead, setAuditHead] = useState<AuditHead | null | undefined>(undefined)
-  const [policy, setPolicy] = useState<unknown>(undefined)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    Promise.all([getSecurityScans(), getAuditChainHead(), getSecurityPolicy()])
-      .then(([s, a, p]) => {
-        setScans(Array.isArray(s) ? s : [])
-        setAuditHead(a)
-        setPolicy(p)
-      })
+    getSecurityScans()
+      .then(s => { setScans(Array.isArray(s) ? s : []) })
       .finally(() => setLoading(false))
   }, [])
 
@@ -1059,59 +1049,22 @@ function SecurityCenterSection() {
   }
 
   return (
-    <>
-      <section className="cv-section">
-        <div className="cv-section-label">Cadena de auditoría</div>
-        <div className="seg-card">
-          {!auditHead ? (
-            <p className="cv-empty">Sin datos de cadena de auditoría.</p>
-          ) : (
-            <FadeIn>
-              <div className="seg-audit-head">
-                <code className="seg-audit-head__hash">
-                  {auditHead.hash ?? auditHead.head ?? '—'}
-                </code>
-                {auditHead.timestamp && (
-                  <span className="seg-audit-head__time">
-                    {new Date(auditHead.timestamp).toLocaleString('es')}
-                  </span>
-                )}
-              </div>
-            </FadeIn>
-          )}
+    <section className="cv-section">
+      <div className="cv-section-label">Escaneos recientes</div>
+      {!scans || scans.length === 0 ? (
+        <p className="cv-empty">Sin escaneos recientes.</p>
+      ) : (
+        <div className="cv-list">
+          <AnimatePresence initial={false}>
+            {scans.map((s, i) => (
+              <AnimatedListItem key={s.scan_id ?? s.id ?? i}>
+                <ScanRow scan={s} />
+              </AnimatedListItem>
+            ))}
+          </AnimatePresence>
         </div>
-      </section>
-
-      <section className="cv-section">
-        <div className="cv-section-label">Escaneos recientes</div>
-        {!scans || scans.length === 0 ? (
-          <p className="cv-empty">Sin escaneos recientes.</p>
-        ) : (
-          <div className="cv-list">
-            <AnimatePresence initial={false}>
-              {scans.map((s, i) => (
-                <AnimatedListItem key={s.scan_id ?? s.id ?? i}>
-                  <ScanRow scan={s} />
-                </AnimatedListItem>
-              ))}
-            </AnimatePresence>
-          </div>
-        )}
-      </section>
-
-      <section className="cv-section">
-        <div className="cv-section-label">Política activa</div>
-        <div className="seg-card">
-          {policy == null ? (
-            <p className="cv-empty">Sin política configurada.</p>
-          ) : (
-            <pre className="seg-policy-pre">
-              {JSON.stringify(policy, null, 2)}
-            </pre>
-          )}
-        </div>
-      </section>
-    </>
+      )}
+    </section>
   )
 }
 
@@ -1129,7 +1082,7 @@ export default function SeguridadView() {
       <div className="view-header" style={{ padding: 0, border: 'none' }}>
         <h1 className="view-title">Seguridad y gobernanza</h1>
         <p className="view-subtitle">
-          Aprobaciones, políticas del agente, escaneos y cadena de auditoría.
+          Aprobaciones, políticas del agente y escaneos de seguridad.
         </p>
       </div>
 

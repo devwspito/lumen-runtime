@@ -700,6 +700,7 @@ interface TarjetasViewProps {
   hasRuflo: boolean
   onRosterChange: (roster: AgentRoster) => void
   onRosterRefetch: () => void
+  onAgentClick: (agent: RosterAgent) => void
 }
 
 interface ClonePrefill {
@@ -708,10 +709,8 @@ interface ClonePrefill {
   department: string
 }
 
-function TarjetasView({ roster, runtimeStatus, hasRuflo, onRosterRefetch }: TarjetasViewProps) {
+function TarjetasView({ roster, runtimeStatus, hasRuflo, onRosterRefetch, onAgentClick }: TarjetasViewProps) {
   const [showCreateModal, setShowCreateModal] = useState(false)
-  const [clonePrefill, setClonePrefill] = useState<ClonePrefill | undefined>(undefined)
-  const [selectedAgent, setSelectedAgent] = useState<RosterAgent | null>(null)
 
   const activeIds = activeAgentIds(runtimeStatus)
 
@@ -722,17 +721,7 @@ function TarjetasView({ roster, runtimeStatus, hasRuflo, onRosterRefetch }: Tarj
 
   function handleAgentSaved(_agent: RosterAgent) {
     setShowCreateModal(false)
-    setClonePrefill(undefined)
     onRosterRefetch()
-  }
-
-  function handleCloneRequest(agent: RosterAgent) {
-    setClonePrefill({
-      name: `${agent.name} (copia)`,
-      description: agent.description,
-      department: 'Mis agentes',
-    })
-    setShowCreateModal(true)
   }
 
   return (
@@ -744,7 +733,7 @@ function TarjetasView({ roster, runtimeStatus, hasRuflo, onRosterRefetch }: Tarj
             key={dept.id}
             dept={dept}
             activeIds={activeIds}
-            onAgentClick={setSelectedAgent}
+            onAgentClick={onAgentClick}
             onCreateClick={() => setShowCreateModal(true)}
             sectionIndex={0}
           />
@@ -756,7 +745,7 @@ function TarjetasView({ roster, runtimeStatus, hasRuflo, onRosterRefetch }: Tarj
             key={dept.id}
             dept={dept}
             activeIds={activeIds}
-            onAgentClick={setSelectedAgent}
+            onAgentClick={onAgentClick}
             onCreateClick={() => setShowCreateModal(true)}
             sectionIndex={i}
           />
@@ -784,7 +773,7 @@ function TarjetasView({ roster, runtimeStatus, hasRuflo, onRosterRefetch }: Tarj
             key={dept.id}
             dept={dept}
             activeIds={activeIds}
-            onAgentClick={setSelectedAgent}
+            onAgentClick={onAgentClick}
             onCreateClick={() => setShowCreateModal(true)}
             sectionIndex={0}
           />
@@ -823,29 +812,12 @@ function TarjetasView({ roster, runtimeStatus, hasRuflo, onRosterRefetch }: Tarj
       {showCreateModal && (
         <AgentFormModal
           departments={roster.departments}
-          mode={clonePrefill ? 'clone' : 'create'}
-          prefill={clonePrefill}
-          onClose={() => {
-            setShowCreateModal(false)
-            setClonePrefill(undefined)
-          }}
+          mode="create"
+          onClose={() => setShowCreateModal(false)}
           onSaved={handleAgentSaved}
         />
       )}
 
-      {selectedAgent && (
-        <AgentDrawer
-          agent={selectedAgent}
-          departments={roster.departments}
-          isWorking={activeIds.has(selectedAgent.id)}
-          onClose={() => setSelectedAgent(null)}
-          onClone={(agent) => {
-            setSelectedAgent(null)
-            handleCloneRequest(agent)
-          }}
-          onRefetch={onRosterRefetch}
-        />
-      )}
     </>
   )
 }
@@ -856,7 +828,9 @@ export default function OfficeView() {
   const [tab, setTab] = useState<Tab>('live')
   const [state, dispatch] = useReducer(dataReducer, { status: 'loading' })
   const [showCreateFromHeader, setShowCreateFromHeader] = useState(false)
-  const navigate = useNavigate()
+  const [selectedAgent, setSelectedAgent] = useState<RosterAgent | null>(null)
+  const [showCloneModalRoot, setShowCloneModalRoot] = useState(false)
+  const [clonePrefillRoot, setClonePrefillRoot] = useState<ClonePrefill | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   // ── Initial load + programmatic refetch ──────────────────────────────────
@@ -913,21 +887,11 @@ export default function OfficeView() {
     }
   }, [])
 
-  const handleAgentClick = useCallback(async (agentId: string, agentName: string) => {
-    // Activate the clicked agent, then navigate to /chat
-    const agent = state.status === 'ready'
-      ? state.roster.departments.flatMap(d => d.agents).find(a => a.id === agentId)
-      : undefined
-    if (agent && !agent.is_default) {
-      try {
-        await setActiveAgent(agentId)
-        sileo.success({ title: `${agentName} ahora está activo` })
-      } catch {
-        sileo.warning({ title: `No se pudo activar ${agentName}` })
-      }
-    }
-    navigate('/chat')
-  }, [navigate, state])
+  const handleCanvasAgentClick = useCallback((agentId: string, _agentName: string) => {
+    if (state.status !== 'ready') return
+    const agent = state.roster.departments.flatMap(d => d.agents).find(a => a.id === agentId)
+    if (agent) setSelectedAgent(agent)
+  }, [state])
 
   // Fullscreen for the live floor — many users want the office maximised.
   const liveRef = useRef<HTMLDivElement>(null)
@@ -1047,6 +1011,7 @@ export default function OfficeView() {
                   })
                 }
                 onRosterRefetch={load}
+                onAgentClick={setSelectedAgent}
               />
             )}
 
@@ -1067,7 +1032,7 @@ export default function OfficeView() {
                   <OfficeCanvas
                     agents={engineAgents}
                     runtimeStatus={engineRuntimeStatus}
-                    onAgentClick={handleAgentClick}
+                    onAgentClick={handleCanvasAgentClick}
                   />
                 </Suspense>
               </div>
@@ -1088,6 +1053,40 @@ export default function OfficeView() {
           />
         )}
       </div>
+
+      {/* Agent detail drawer — shared between Tarjetas and Live/Office tabs */}
+      {selectedAgent && state.status === 'ready' && (
+        <AgentDrawer
+          agent={selectedAgent}
+          departments={state.roster.departments}
+          isWorking={activeAgentIds(state.runtimeStatus).has(selectedAgent.id)}
+          onClose={() => setSelectedAgent(null)}
+          onClone={(agent) => {
+            setSelectedAgent(null)
+            setClonePrefillRoot({
+              name: `${agent.name} (copia)`,
+              description: agent.description,
+              department: 'Mis agentes',
+            })
+            setShowCloneModalRoot(true)
+          }}
+          onRefetch={load}
+        />
+      )}
+
+      {showCloneModalRoot && state.status === 'ready' && (
+        <AgentFormModal
+          departments={state.roster.departments}
+          mode="clone"
+          prefill={clonePrefillRoot ?? undefined}
+          onClose={() => { setShowCloneModalRoot(false); setClonePrefillRoot(null) }}
+          onSaved={() => {
+            setShowCloneModalRoot(false)
+            setClonePrefillRoot(null)
+            void load()
+          }}
+        />
+      )}
     </div>
   )
 }
