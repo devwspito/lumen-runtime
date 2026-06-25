@@ -568,12 +568,21 @@ export function revokeEgressDomain(domain: string): Promise<unknown> {
  * yet expose GET /egress/mode (returns mode='deny' with the existing allow-list).
  */
 export async function getEgressMode(): Promise<EgressModeResponse> {
-  try {
-    return await request<EgressModeResponse>('/egress/mode')
-  } catch {
-    // Backend has not shipped the mode endpoint yet — synthesise from legacy response
-    const legacy = await listEgressDomains()
-    return { mode: 'deny', domains: legacy.domains, deny: [] }
+  // GET /egress/domains is the source of truth for mode + BOTH lists. The /egress/mode
+  // endpoint only returns {mode, description} (no lists), so reading it left domains/deny
+  // undefined and crashed the panels (.length on undefined). Always normalise to arrays.
+  const d = await request<{
+    mode?: string
+    domains?: string[]
+    denylist?: string[]
+    deny?: string[]
+    blocklist_count?: number
+  }>('/egress/domains')
+  return {
+    mode: d.mode === 'allow' ? 'allow' : 'deny',
+    domains: Array.isArray(d.domains) ? d.domains : [],
+    deny: Array.isArray(d.denylist) ? d.denylist : Array.isArray(d.deny) ? d.deny : [],
+    blocklist_count: d.blocklist_count,
   }
 }
 
