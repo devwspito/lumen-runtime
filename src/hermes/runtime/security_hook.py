@@ -1352,36 +1352,6 @@ def make_pre_tool_call_hook(
 _NATIVE_DANGER_GATE_TIMEOUT_S: float = 30.0
 
 
-def _danger_justification(tool_name: str, args: dict[str, Any]) -> str:
-    """Owner-facing reason WHY this action needs sign-off — accurate per tool.
-
-    The old generic "actúa fuera de la jaula" was WRONG for self-modifying tools:
-    skill_manage / install / cronjob run INSIDE the cage; they need approval because
-    they WIDEN the agent's own powers (install a learned skill, schedule itself, change
-    its config), NOT because they escape the cage. Only send_message/discord/ha truly
-    reach outside. This copy lets the owner understand the post-task card.
-    """
-    name = ""
-    if isinstance(args, dict):
-        name = str(args.get("name") or args.get("identifier") or "").strip()
-    t = (tool_name or "").lower()
-    if "skill" in t:
-        extra = f" «{name}»" if name and name != "web" else ""
-        return (f"Hermes ha aprendido una nueva habilidad{extra} y pide tu visto bueno "
-                "para instalarla — amplía lo que el agente sabe hacer.")
-    if "install" in t:
-        extra = f" «{name}»" if name else ""
-        return f"Instalar{extra} amplía las capacidades del agente — necesita tu visto bueno."
-    if "policy" in t or "mfa" in t:
-        return "Cambia la configuración de seguridad del agente — necesita tu visto bueno."
-    if t == "cronjob":
-        return "Programa una tarea recurrente del agente — necesita tu visto bueno."
-    if "delegate" in t or "spawn" in t:
-        return "Crea o coordina un sub-agente — necesita tu visto bueno."
-    if t in {"send_message", "discord", "discord_admin"} or t.startswith("ha_") or "send" in t:
-        return "Contacta al exterior, fuera de la jaula — necesita tu visto bueno."
-    return f"«{tool_name}» necesita tu visto bueno antes de ejecutarse."
-
 
 def _resolve_native_danger_approval(
     tool_name: str, args: dict[str, Any], broker: Any, engine_loop: Any,
@@ -1431,12 +1401,14 @@ def _resolve_native_danger_approval(
         # Register a pending row (web UI shows it) + register a blocking Event slot.
         from hermes.capabilities.domain.ports import ConsentContext, RiskLevel  # noqa: PLC0415
 
+        from hermes.capabilities.proposal_summary import human_summary  # noqa: PLC0415
+
         _await(gate.register_pending(
             proposal_id=proposal_id,
             work_item_id=UUID(int=0),
             consent_context=ConsentContext(operator_id=None, tenant_id=UUID(int=0)),
             risk=RiskLevel.HIGH,
-            justification=f"{tool_name} actúa fuera de la jaula y requiere aprobación del dueño",
+            justification=human_summary(tool_name, safe),
             parameters_redacted=safe,
             tool_name=tool_name,
             action_digest=digest,
