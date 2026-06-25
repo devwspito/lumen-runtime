@@ -158,6 +158,13 @@ class ComposioClient:
         self._api_key = api_key
         # Accept an injected SDK for tests; otherwise construct with the real key.
         self._sdk: Composio = sdk if sdk is not None else Composio(api_key=api_key)
+        # Composio v0.9+ REJECTS manual tools.execute() without a CONCRETE version
+        # ("Toolkit version not specified" 502; "latest" is NOT accepted in manual
+        # execution, nor as a global/dict default). So the agent could discover + call
+        # Gmail/etc. but every execution failed. We resolve each toolkit's newest
+        # published version (meta.available_versions[0]) once and cache it per slug —
+        # the owner never has to pin versions by hand.
+        self._ver_cache: dict[str, str] = {}
 
     # ----------------------------------------------------------------
     # Internals
@@ -370,6 +377,29 @@ class ComposioClient:
             lambda: self._sdk.connected_accounts.delete(connection_id)
         )
 
+    async def _latest_toolkit_version(self, tool_slug: str) -> str | None:
+        """Newest concrete version of the toolkit owning `tool_slug`, cached per toolkit.
+
+        GMAIL_FETCH_EMAILS -> toolkit 'gmail' -> meta.available_versions[0] (e.g.
+        '20260624_00'). Composio v0.9+ rejects manual execute() without a concrete
+        version and does NOT accept 'latest' there, so we resolve the latest published
+        version once per toolkit. Best-effort: on any error return None (no version).
+        """
+        toolkit = (tool_slug or "").split("_", 1)[0].lower()
+        if not toolkit:
+            return None
+        if toolkit in self._ver_cache:
+            return self._ver_cache[toolkit]
+        try:
+            tk = await self._guarded(lambda: self._sdk.toolkits.get(slug=toolkit))
+            versions = list(getattr(getattr(tk, "meta", None), "available_versions", []) or [])
+            ver = versions[0] if versions else None
+        except Exception:  # noqa: BLE001 — best-effort; fall through to no version
+            ver = None
+        if ver:
+            self._ver_cache[toolkit] = ver
+        return ver
+
     # ----------------------------------------------------------------
     # Action execution
     # ----------------------------------------------------------------
@@ -394,12 +424,16 @@ class ComposioClient:
         maintained while the exact account is pinned.  None → current behaviour.
         """
         _ca_id = connected_account_id or None  # explicit None keeps SDK default
+        # Composio v0.9+ requires a concrete toolkit version for manual execute().
+        version = await self._latest_toolkit_version(slug)
+        _ver_kw = {"version": version} if version else {}
         resp = await self._guarded(
             lambda: self._sdk.tools.execute(
                 slug,
                 params,
                 user_id=entity_id,
                 connected_account_id=_ca_id,
+                **_ver_kw,
             )
         )
 
