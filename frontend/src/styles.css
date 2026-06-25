@@ -2986,6 +2986,102 @@ details[open] .cv-teach-chevron {
   color: var(--ink2);
 }
 
+/* Egress mode row — label + toggle pill */
+.seg-egress-mode-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  flex-wrap: wrap;
+  padding-bottom: var(--sp-3);
+  border-bottom: 1px solid var(--line);
+}
+
+.seg-egress-mode-row__info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.seg-egress-mode-row__label {
+  font-size: var(--text-body);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.seg-egress-mode-row__hint {
+  font-size: var(--text-caption);
+  color: var(--ink4);
+}
+
+/* Egress mode toggle pill (ALLOW | DENY) */
+.seg-egress-mode-toggle {
+  display: inline-flex;
+  border-radius: var(--r-md);
+  background: var(--surface2);
+  border: 1px solid var(--line);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.seg-egress-mode-toggle__btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--ink3);
+  font-size: var(--text-label);
+  font-weight: 500;
+  font-family: var(--font-ui);
+  padding: 6px 16px;
+  cursor: pointer;
+  transition: color 120ms var(--ease), background 120ms var(--ease);
+  line-height: 1.4;
+}
+
+.seg-egress-mode-toggle__btn:hover:not(:disabled):not(.seg-egress-mode-toggle__btn--active) {
+  color: var(--ink);
+  background: var(--card);
+}
+
+.seg-egress-mode-toggle__btn:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.seg-egress-mode-toggle__btn--active {
+  background: var(--accent);
+  color: #fff;
+  cursor: default;
+}
+
+.seg-egress-mode-toggle__btn--deny.seg-egress-mode-toggle__btn--active {
+  background: color-mix(in srgb, var(--danger) 80%, transparent);
+  color: #fff;
+}
+
+/* System blocklist badge */
+.seg-egress-system-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--text-caption);
+  color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ok) 25%, transparent);
+  border-radius: var(--r-sm);
+  padding: 4px 10px;
+  font-weight: 500;
+}
+
+.seg-egress-system-badge__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ok);
+  flex-shrink: 0;
+}
+
 /* Audit chain head */
 .seg-audit-head {
   display: flex;
