@@ -8,8 +8,9 @@ Contratos (FR-009, FR-017, task_stream_socket_v1.md):
     Back-pressure best-effort: descarta deltas para clientes lentos.
     La verdad durable es el audit, no el stream.
   - subscribe(): retorna un AsyncGenerator de frames para task_id.
-    Re-attach: si la tarea ya tiene un estado terminal (done/error),
-    reenvía el status + done actuales (NO replay del histórico de tokens).
+    Re-attach "tipo cloud": replaya el LOG ORDENADO COMPLETO del run hasta el
+    momento (status + tool_calls + thinking + tokens) y luego sigue en vivo, sin
+    importar si la tarea sigue corriendo o ya terminó.
   - close_task(): cierra todos los suscriptores de task_id con frame DONE.
 
 Garantías de aislamiento multi-task:
@@ -28,7 +29,6 @@ from uuid import UUID
 
 from hermes.tasks.control_plane.domain.task_stream_frame import (
     TaskStreamFrame,
-    delta_frame,
     done_frame,
 )
 
@@ -41,6 +41,11 @@ _SUBSCRIBER_BUFFER_SIZE: int = 64
 
 # Sentinel que indica al generador del suscriptor que debe cerrarse.
 _CLOSE_SENTINEL = object()
+
+# Tope del log de replay por task_id (acota memoria; si se supera, se descartan los
+# frames más antiguos). Cubre tareas largas con muchos tool_calls + tokens. La verdad
+# durable del resultado final es el espejo de conversación / audit, no este log.
+_MAX_REPLAY_FRAMES: int = 6000
 
 
 class StreamBroker:
@@ -61,17 +66,16 @@ class StreamBroker:
         self._subscribers: dict[
             UUID, list[tuple[asyncio.Queue[object], asyncio.AbstractEventLoop]]
         ] = defaultdict(list)
-        # Estado terminal actual por task_id (status + done para re-attach)
-        self._terminal_status: dict[UUID, TaskStreamFrame] = {}
+        # Frame DONE/ERROR terminal por task_id (cierra el replay).
         self._terminal_done: dict[UUID, TaskStreamFrame] = {}
-        # Deltas acumulados por task_id para REPLAY en re-attach. Un suscriptor
-        # que conecta DESPUÉS de que la tarea terminó (caso común con modelos
-        # rápidos: el ChatWorker se engancha tras completarse) debe poder leer la
-        # respuesta. Sin esto, re-attach solo daba status+done (sin texto) → la UI
-        # mostraba el mensaje del usuario pero ninguna respuesta. La narrativa de
-        # chat es un único delta, así que el coste de memoria es la propia
-        # respuesta (acotada por nº de conversaciones).
-        self._terminal_deltas: dict[UUID, list[str]] = defaultdict(list)
+        # LOG DE REPLAY ORDENADO por task_id: TODOS los frames no-terminales en el orden
+        # exacto en que ocurrieron (status, tool_call, thinking_delta, delta). Esto es lo
+        # que hace el chat "tipo cloud/Codex": un cliente que reconecta/refresca/cambia de
+        # sesión replaya el run ENTERO hasta el momento — los pasos de las tools Y el texto,
+        # no solo la respuesta final — y sigue en vivo. Antes solo se acumulaban los deltas
+        # de texto → al reconectar a media tarea (p.ej. mientras navega la web) no se veían
+        # las tools ni nada → pantalla en blanco. Acotado por _MAX_REPLAY_FRAMES.
+        self._replay_log: dict[UUID, list[TaskStreamFrame]] = defaultdict(list)
 
     def publish(self, frame: TaskStreamFrame) -> None:
         """Publica un frame a todos los suscriptores de frame.task_id.
@@ -83,15 +87,17 @@ class StreamBroker:
 
         No bloqueante — NO usa await. Llamado desde el loop del daemon.
         """
-        is_lifecycle = frame.kind.value in ("status", "done", "error")
+        kind = frame.kind.value
+        is_lifecycle = kind in ("status", "done", "error")
 
-        if is_lifecycle:
-            self._record_terminal_state(frame)
-        elif frame.kind.value == "delta":
-            # Acumula para replay en re-attach (suscriptor que llega tarde).
-            delta_text = frame.payload.get("delta", "")
-            if delta_text:
-                self._terminal_deltas[frame.task_id].append(delta_text)
+        if kind in ("done", "error"):
+            self._terminal_done[frame.task_id] = frame
+        else:
+            # status, tool_call, thinking_delta, delta → log de replay ORDENADO (acotado).
+            log = self._replay_log[frame.task_id]
+            log.append(frame)
+            if len(log) > _MAX_REPLAY_FRAMES:
+                del log[: len(log) - _MAX_REPLAY_FRAMES]
 
         subscribers = self._subscribers.get(frame.task_id, [])
         for q, loop in list(subscribers):
@@ -118,31 +124,44 @@ class StreamBroker:
     async def subscribe(
         self, *, task_id: UUID
     ) -> AsyncGenerator[TaskStreamFrame, None]:
-        """Suscribe al stream de task_id.
+        """Suscribe al stream de task_id, con REPLAY DURABLE en re-attach.
 
-        Re-attach: si la tarea ya tiene estado terminal registrado, emite
-        el status + done actuales ANTES de retornar (no replay de tokens).
-        El generador termina cuando recibe el frame DONE o cuando el broker
-        lo cierra explícitamente.
+        Re-attach (FIX 2026-06-26 — el chat se quedaba en blanco al refrescar a media
+        tarea): SIEMPRE reproduce el estado acumulado ANTES de los frames en vivo — el
+        status actual + TODOS los deltas emitidos hasta ahora + (si ya terminó) el done.
+        Antes, el replay solo ocurría si la tarea YA había terminado; un re-attach a
+        MITAD de una tarea larga entraba directo por la rama viva y solo veía frames
+        FUTUROS → se perdía todo lo ya streameado → la UI mostraba el mensaje del usuario
+        sin respuesta. Ahora un cliente que refresca/reconecta reconstruye la respuesta
+        hasta el momento y continúa en vivo, sin importar si la tarea sigue o terminó.
+
+        Sin duplicados: tomamos el snapshot del replay ANTES de registrar la cola, así un
+        delta que llegue en la micro-ventana register↔snapshot no se replica (a lo sumo se
+        pierde, caso raro que el poll del espejo de conversación del cliente cubre). El
+        generador termina al recibir DONE/ERROR o al cerrarse el broker.
         """
-        # Re-attach: reenvía estado actual si ya terminó (status + DELTAS + done).
-        # Replay de los deltas para que un suscriptor que conecta tras completarse
-        # la tarea reciba la respuesta (no solo status+done vacíos).
-        if task_id in self._terminal_done:
-            if task_id in self._terminal_status:
-                yield self._terminal_status[task_id]
-            for _delta in self._terminal_deltas.get(task_id, []):
-                yield delta_frame(task_id=task_id, delta=_delta)
-            yield self._terminal_done[task_id]
-            return
-
         q: asyncio.Queue[object] = asyncio.Queue(maxsize=_SUBSCRIBER_BUFFER_SIZE)
         loop = asyncio.get_running_loop()
         entry = (q, loop)
         subscribers_list = self._subscribers[task_id]
+
+        # Snapshot del catch-up ANTES de registrar la cola (evita duplicar un frame en
+        # la ventana register↔snapshot). Los frames publicados DESPUÉS del append entran
+        # por la cola (índice >= len(replay)) → no solapan con el replay.
+        replay = list(self._replay_log.get(task_id, []))
+        replay_done = self._terminal_done.get(task_id)
         subscribers_list.append(entry)
 
         try:
+            # Catch-up: el run ENTERO hasta ahora — status + tool_calls + thinking + texto,
+            # en el orden exacto en que ocurrieron. Esto da el comportamiento "tipo cloud":
+            # reconectar/refrescar/cambiar de sesión reconstruye toda la actividad viva.
+            for _frame in replay:
+                yield _frame
+            if replay_done is not None:
+                yield replay_done
+                return  # la tarea ya terminó — run completo replayed
+            # Vivo: frames publicados DESPUÉS del registro de la cola.
             while True:
                 item = await q.get()
                 if item is _CLOSE_SENTINEL:
@@ -196,8 +215,7 @@ class StreamBroker:
             logger.warning("hermes.tasks.stream_broker.force_enqueue_failed")
 
     def _record_terminal_state(self, frame: TaskStreamFrame) -> None:
-        """Registra el estado terminal para re-attach."""
-        if frame.kind.value == "status":
-            self._terminal_status[frame.task_id] = frame
-        elif frame.kind.value in ("done", "error"):
+        """Registra el frame terminal (done/error) para re-attach. Los demás frames
+        (status incluido) van al log de replay ordenado en publish()."""
+        if frame.kind.value in ("done", "error"):
             self._terminal_done[frame.task_id] = frame

@@ -23,6 +23,13 @@ import type { StreamFrame } from '../api/types'
 import { renderMarkdown } from '../lib/markdown'
 import { toolLabel } from '../lib/toolLabels'
 
+/** Maximum chars kept in live thinkingText / activityText during streaming.
+ *  The tail is sufficient for display; the final complete answer lives in renderedHtml. */
+const LIVE_TEXT_CAP = 8_000
+
+/** Flush interval in ms — limits React re-renders to ~8/sec regardless of frame rate. */
+const FLUSH_INTERVAL_MS = 120
+
 const SS_CONV_ID = 'lumen:convId'
 const SS_TASK_ID = 'lumen:taskId'
 const SS_AGENT_ID = 'lumen:agentId'
@@ -99,6 +106,21 @@ type Action =
    * overwrite a WS-finalized turn that arrived later on the same render cycle.
    */
   | { type: 'ADOPT_FINAL'; id: string; renderedHtml: string }
+  /**
+   * BATCH_UPDATE: coalesced flush from the throttle buffer.
+   * Applies accumulated thinking chunks, delta chunks, new tool steps, and the
+   * latest status string all in a single state update — one re-render per flush
+   * instead of one per WS frame.
+   */
+  | {
+      type: 'BATCH_UPDATE'
+      id: string
+      thinkingChunk: string
+      deltaChunk: string
+      newToolSteps: ToolStep[]
+      thinkingDone: boolean
+      statusText: string | null
+    }
 
 function updateAssistant(
   messages: ChatMessage[],
@@ -163,6 +185,8 @@ function reducer(state: ChatState, action: Action): ChatState {
         ...state,
         messages: updateAssistant(state.messages, action.id, m => ({
           ...m,
+          // activityText is NOT capped — the full text is needed for renderMarkdown on STREAM_DONE.
+          // The live display reads only lastLine(), which is cheap regardless of length.
           activityText: m.activityText + action.chunk,
         })),
       }
@@ -172,7 +196,7 @@ function reducer(state: ChatState, action: Action): ChatState {
         ...state,
         messages: updateAssistant(state.messages, action.id, m => ({
           ...m,
-          thinkingText: m.thinkingText + action.chunk,
+          thinkingText: (m.thinkingText + action.chunk).slice(-LIVE_TEXT_CAP),
         })),
       }
 
@@ -228,6 +252,46 @@ function reducer(state: ChatState, action: Action): ChatState {
         status: { phase: 'idle' },
       }
 
+    case 'BATCH_UPDATE': {
+      // Single immutable update covering all accumulated WS frames from one flush tick.
+      // toolSteps reset activityText per the TOOL_CALL semantics (matches segmentStart).
+      const { id, thinkingChunk, deltaChunk, newToolSteps, thinkingDone, statusText } = action
+      const nextStatus: ChatState['status'] = statusText !== null
+        ? { phase: 'streaming', statusText }
+        : state.status
+
+      if (!thinkingChunk && !deltaChunk && newToolSteps.length === 0 && !thinkingDone) {
+        // Only a status update — avoid touching messages array.
+        return { ...state, status: nextStatus }
+      }
+
+      return {
+        ...state,
+        status: nextStatus,
+        messages: updateAssistant(state.messages, id, m => {
+          let next = m
+          if (newToolSteps.length > 0) {
+            // Each TOOL_CALL resets activityText (matches vanilla segmentStart logic)
+            next = { ...next, toolSteps: [...next.toolSteps, ...newToolSteps], activityText: '' }
+          }
+          if (thinkingChunk) {
+            // thinkingText is capped — it's a transient trace only shown in a collapsed
+            // <details> block. The final answer is never derived from thinkingText.
+            next = { ...next, thinkingText: (next.thinkingText + thinkingChunk).slice(-LIVE_TEXT_CAP) }
+          }
+          if (deltaChunk) {
+            // activityText is NOT capped — the full text is needed for renderMarkdown on STREAM_DONE.
+            // The live display reads only lastLine(), which is cheap regardless of length.
+            next = { ...next, activityText: next.activityText + deltaChunk }
+          }
+          if (thinkingDone && !next.thinkingDone) {
+            next = { ...next, thinkingDone: true }
+          }
+          return next
+        }),
+      }
+    }
+
     default:
       return state
   }
@@ -264,6 +328,53 @@ export function useChat(): UseChatReturn {
   const restoredRef = useRef(false)
   // "reconectando…" status while re-attaching a stream after refresh
   const [reconnecting, setReconnecting] = useState(false)
+
+  // ── Coalesce / throttle buffer ────────────────────────────────────────────────
+  // Instead of dispatching on every WS frame we accumulate here and flush at most
+  // once per FLUSH_INTERVAL_MS. This limits React re-renders to ~8/sec regardless
+  // of how fast the backend streams — eliminating the main-thread block on long tasks.
+  interface PendingBatch {
+    id: string
+    thinkingChunk: string
+    deltaChunk: string
+    newToolSteps: ToolStep[]
+    thinkingDone: boolean
+    statusText: string | null
+    markConnected: (() => void) | null
+  }
+  const pendingBatchRef = useRef<PendingBatch | null>(null)
+  const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const flushPending = useCallback(() => {
+    if (flushTimerRef.current !== null) {
+      clearTimeout(flushTimerRef.current)
+      flushTimerRef.current = null
+    }
+    const batch = pendingBatchRef.current
+    if (!batch) return
+    pendingBatchRef.current = null
+
+    if (batch.markConnected) {
+      batch.markConnected()
+    }
+    dispatch({
+      type: 'BATCH_UPDATE',
+      id: batch.id,
+      thinkingChunk: batch.thinkingChunk,
+      deltaChunk: batch.deltaChunk,
+      newToolSteps: batch.newToolSteps,
+      thinkingDone: batch.thinkingDone,
+      statusText: batch.statusText,
+    })
+  }, [])
+
+  const clearFlushTimer = useCallback(() => {
+    if (flushTimerRef.current !== null) {
+      clearTimeout(flushTimerRef.current)
+      flushTimerRef.current = null
+    }
+    pendingBatchRef.current = null
+  }, [])
 
   // The task_id for the in-flight assistant turn. Set before startPoll, cleared
   // when the turn finalises. The poll reads this to scope the activity indicator
@@ -386,6 +497,9 @@ export function useChat(): UseChatReturn {
 
   const stopStream = useCallback(() => {
     clearPoll()
+    // Flush any coalesced frames before closing so no data is silently dropped.
+    flushPending()
+    clearFlushTimer()
     streamRef.current?.close()
     streamRef.current = null
     // Freeze any in-flight assistant message so partial text is preserved and
@@ -400,7 +514,7 @@ export function useChat(): UseChatReturn {
     currentTaskIdRef.current = null
     sessionStorage.removeItem(SS_TASK_ID)
     setReconnecting(false)
-  }, [clearPoll])
+  }, [clearPoll, flushPending, clearFlushTimer])
 
   const startNew = useCallback(() => {
     stopStream()
@@ -492,29 +606,71 @@ export function useChat(): UseChatReturn {
           // is live again — so we're no longer "reconnecting". Clearing only on done/error
           // (below) left "Reconectando…" stuck for the whole task even while frames flowed.
           const markConnected = () => setReconnecting(false)
+
+          // Accumulate incoming WS frames into pendingBatchRef and schedule a
+          // FLUSH_INTERVAL_MS timeout. The flush emits a single BATCH_UPDATE
+          // dispatch covering all frames collected since the last flush — this
+          // limits React re-renders to ~8/sec no matter how fast the backend streams.
+          const scheduleBatchFlush = () => {
+            if (flushTimerRef.current === null) {
+              flushTimerRef.current = setTimeout(flushPending, FLUSH_INTERVAL_MS)
+            }
+          }
+
           const callbacks: StreamCallbacks = {
             onDelta(chunk) {
-              markConnected()
-              dispatch({ type: 'DELTA', id: assistantMsgId, chunk })
+              const b = pendingBatchRef.current
+              if (b && b.id === assistantMsgId) {
+                b.deltaChunk += chunk
+                b.markConnected = markConnected
+              } else {
+                pendingBatchRef.current = { id: assistantMsgId, thinkingChunk: '', deltaChunk: chunk, newToolSteps: [], thinkingDone: false, statusText: null, markConnected }
+              }
+              scheduleBatchFlush()
             },
             onThinking(chunk) {
-              markConnected()
-              dispatch({ type: 'THINKING', id: assistantMsgId, chunk })
+              const b = pendingBatchRef.current
+              if (b && b.id === assistantMsgId) {
+                b.thinkingChunk += chunk
+                b.markConnected = markConnected
+              } else {
+                pendingBatchRef.current = { id: assistantMsgId, thinkingChunk: chunk, deltaChunk: '', newToolSteps: [], thinkingDone: false, statusText: null, markConnected }
+              }
+              scheduleBatchFlush()
             },
             onToolCall(frame: Extract<StreamFrame, { kind: 'tool_call' }>) {
-              markConnected()
               const d = frame.tool_call ?? (frame as Record<string, unknown>)
               const name = (d.tool as string | undefined) ?? (d.tool_name as string | undefined) ?? 'herramienta'
               const label = (d.label as string | undefined) ?? String(name).replace(/_/g, ' ')
               const target = String((d.target as string | undefined) ?? '').slice(0, 80)
-              dispatch({ type: 'TOOL_CALL', id: assistantMsgId, step: { name, label, target } })
-              dispatch({ type: 'THINKING_DONE', id: assistantMsgId })
+              const step: ToolStep = { name, label, target }
+              // Flush any accumulated text before the tool step so the segment boundary
+              // is clean (matches vanilla segmentStart behaviour — activityText resets on TOOL_CALL).
+              flushPending()
+              const b = pendingBatchRef.current
+              if (b && b.id === assistantMsgId) {
+                b.newToolSteps.push(step)
+                b.thinkingDone = true
+                b.markConnected = markConnected
+              } else {
+                pendingBatchRef.current = { id: assistantMsgId, thinkingChunk: '', deltaChunk: '', newToolSteps: [step], thinkingDone: true, statusText: null, markConnected }
+              }
+              scheduleBatchFlush()
             },
             onStatus(msg) {
-              markConnected()
-              dispatch({ type: 'STATUS_STREAMING', text: msg })
+              const b = pendingBatchRef.current
+              if (b && b.id === assistantMsgId) {
+                b.statusText = msg
+                b.markConnected = markConnected
+              } else {
+                pendingBatchRef.current = { id: assistantMsgId, thinkingChunk: '', deltaChunk: '', newToolSteps: [], thinkingDone: false, statusText: msg, markConnected }
+              }
+              scheduleBatchFlush()
             },
             onDone() {
+              // Flush any buffered frames BEFORE finalising so no data is lost.
+              flushPending()
+              clearFlushTimer()
               clearPoll()
               dispatch({ type: 'STREAM_DONE', id: assistantMsgId })
               streamRef.current = null
@@ -528,6 +684,8 @@ export function useChat(): UseChatReturn {
               // still be running and the mirror will eventually have the answer.
               // Show a neutral "working" status rather than an error bar so the user
               // is not alarmed while the poll continues watching for the final answer.
+              flushPending()
+              clearFlushTimer()
               dispatch({ type: 'STATUS_STREAMING', text: 'Trabajando…' })
               streamRef.current = null
               sessionStorage.removeItem(SS_TASK_ID)
@@ -545,10 +703,13 @@ export function useChat(): UseChatReturn {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Clear the poll on unmount so intervals never leak between route navigations.
+  // Clear the poll and any pending flush timer on unmount.
   useEffect(() => {
-    return () => { clearPoll() }
-  }, [clearPoll])
+    return () => {
+      clearPoll()
+      clearFlushTimer()
+    }
+  }, [clearPoll, clearFlushTimer])
 
   const sendMessage = useCallback(async (text: string) => {
     if (!text.trim()) return
@@ -605,12 +766,34 @@ export function useChat(): UseChatReturn {
     ).length
     startPoll(convId!, baselineSend)
 
+    // Accumulate incoming WS frames into pendingBatchRef and schedule a
+    // FLUSH_INTERVAL_MS timeout. The flush emits a single BATCH_UPDATE
+    // dispatch covering all frames collected since the last flush — this
+    // limits React re-renders to ~8/sec no matter how fast the backend streams.
+    const scheduleBatchFlush = () => {
+      if (flushTimerRef.current === null) {
+        flushTimerRef.current = setTimeout(flushPending, FLUSH_INTERVAL_MS)
+      }
+    }
+
     const callbacks: StreamCallbacks = {
       onDelta(chunk) {
-        dispatch({ type: 'DELTA', id: assistantMsgId, chunk })
+        const b = pendingBatchRef.current
+        if (b && b.id === assistantMsgId) {
+          b.deltaChunk += chunk
+        } else {
+          pendingBatchRef.current = { id: assistantMsgId, thinkingChunk: '', deltaChunk: chunk, newToolSteps: [], thinkingDone: false, statusText: null, markConnected: null }
+        }
+        scheduleBatchFlush()
       },
       onThinking(chunk) {
-        dispatch({ type: 'THINKING', id: assistantMsgId, chunk })
+        const b = pendingBatchRef.current
+        if (b && b.id === assistantMsgId) {
+          b.thinkingChunk += chunk
+        } else {
+          pendingBatchRef.current = { id: assistantMsgId, thinkingChunk: chunk, deltaChunk: '', newToolSteps: [], thinkingDone: false, statusText: null, markConnected: null }
+        }
+        scheduleBatchFlush()
       },
       onToolCall(frame: Extract<StreamFrame, { kind: 'tool_call' }>) {
         // d can be the nested descriptor OR the frame itself — both shapes share tool/label/target.
@@ -618,17 +801,32 @@ export function useChat(): UseChatReturn {
         const name = (d.tool as string | undefined) ?? (d.tool_name as string | undefined) ?? 'herramienta'
         const label = (d.label as string | undefined) ?? String(name).replace(/_/g, ' ')
         const target = String((d.target as string | undefined) ?? '').slice(0, 80)
-        dispatch({
-          type: 'TOOL_CALL',
-          id: assistantMsgId,
-          step: { name, label, target },
-        })
-        dispatch({ type: 'THINKING_DONE', id: assistantMsgId })
+        const step: ToolStep = { name, label, target }
+        // Flush any accumulated text before the tool step so the segment boundary
+        // is clean (matches vanilla segmentStart behaviour — activityText resets on TOOL_CALL).
+        flushPending()
+        const b = pendingBatchRef.current
+        if (b && b.id === assistantMsgId) {
+          b.newToolSteps.push(step)
+          b.thinkingDone = true
+        } else {
+          pendingBatchRef.current = { id: assistantMsgId, thinkingChunk: '', deltaChunk: '', newToolSteps: [step], thinkingDone: true, statusText: null, markConnected: null }
+        }
+        scheduleBatchFlush()
       },
       onStatus(msg) {
-        dispatch({ type: 'STATUS_STREAMING', text: msg })
+        const b = pendingBatchRef.current
+        if (b && b.id === assistantMsgId) {
+          b.statusText = msg
+        } else {
+          pendingBatchRef.current = { id: assistantMsgId, thinkingChunk: '', deltaChunk: '', newToolSteps: [], thinkingDone: false, statusText: msg, markConnected: null }
+        }
+        scheduleBatchFlush()
       },
       onDone() {
+        // Flush any buffered frames BEFORE finalising so no data is lost.
+        flushPending()
+        clearFlushTimer()
         clearPoll()
         dispatch({ type: 'STREAM_DONE', id: assistantMsgId })
         streamRef.current = null
@@ -639,6 +837,8 @@ export function useChat(): UseChatReturn {
       onError(msg) {
         // Keep the poll running on WS error — the task may still be running and
         // the mirror poll will surface the final answer when it appears.
+        flushPending()
+        clearFlushTimer()
         dispatch({ type: 'STATUS_ERROR', message: msg })
         streamRef.current = null
         sessionStorage.removeItem(SS_TASK_ID)
@@ -646,7 +846,7 @@ export function useChat(): UseChatReturn {
     }
 
     streamRef.current = openTaskStream(taskId, callbacks)
-  }, [state.convId, stopStream, startPoll, clearPoll])
+  }, [state.convId, stopStream, startPoll, clearPoll, flushPending, clearFlushTimer])
 
   const loadConversation = useCallback(async (id: string) => {
     stopStream()
