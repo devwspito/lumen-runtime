@@ -12,6 +12,12 @@ we must not have. Now every layer derives from `delicacy(tool)` here:
      delicacy; delicacy only governs owner-approval friction + the default toggle.)
 
 One edit here re-aligns the whole stack. No per-file lists to drift.
+
+ESCALATED MFA MODEL (owner decision 2026-06-25):
+Per-action HITL approvals use a tiered model:
+  - simple tier: most tools → Aprobar/Rechazar without MFA.
+  - mfa tier: cage-widening (MOST_DELICATE) + destructive/irreversible tools → TOTP required.
+`is_mfa_required(tool)` is the single query point for ALL surfaces (gate, web API, frontend).
 """
 
 from __future__ import annotations
@@ -94,6 +100,58 @@ _CAGE_CONTAINED: frozenset[str] = frozenset({"write_file", "patch"})
 CAGED_NATIVE_EXEC_TOOLS: frozenset[str] = frozenset({"terminal", "execute_code", "process"})
 CAGED_NATIVE_FILE_TOOLS: frozenset[str] = frozenset({"read_file", "search_files", "write_file", "patch"})
 CAGED_NATIVE_TOOLS: frozenset[str] = CAGED_NATIVE_EXEC_TOOLS | CAGED_NATIVE_FILE_TOOLS
+
+
+# ---------------------------------------------------------------------------
+# Escalated MFA model — per-action HITL tier (owner decision 2026-06-25).
+#
+# TWO AXES — do NOT conflate them:
+#
+#   _MOST_DELICATE  (security-hook / delicacy() axis)
+#     → Tools blocked by the pre-dispatch hook; governs default-off and riddle MFA.
+#     → Includes "cronjob" because scheduling a cron IS cage-widening (capability
+#       changes that survive across sessions).
+#
+#   _MFA_TIER_HITL  (per-action HITL approval axis)
+#     → Tools whose HITL *approval card* requires TOTP before the owner can allow.
+#     → "cronjob" is SIMPLE here (owner decision 2026-06-25: schedule delegation is
+#       approved with a plain click; the cage still enforces at execution time).
+#     → Set = (_MOST_DELICATE - scheduling tools) ∪ _DESTRUCTIVE.
+#
+# One edit to each set re-aligns the whole stack. No per-file lists to drift.
+#
+# _DESTRUCTIVE — tools whose PRIMARY registered contract is PERMANENT DATA LOSS.
+# NOT a word-list scan of command content (feedback_no_deterministic_routing).
+# Native exec tools (terminal/execute_code) that MAY run rm are handled by Nous's
+# own _await_gateway_decision; the cage native gate covers them separately.
+_DESTRUCTIVE: frozenset[str] = frozenset({
+    # Future: "delete_file", "drop_table", "purge_records"
+})
+
+# Tools in _MOST_DELICATE that are SIMPLE tier for per-action HITL approvals.
+# The cage + broker enforcement still applies; TOTP is not required to approve.
+_MOST_DELICATE_SIMPLE_HITL: frozenset[str] = frozenset({"cronjob"})
+
+# Per-action HITL mfa tier = cage-widening tools (minus scheduling) + destructive.
+_MFA_TIER_HITL: frozenset[str] = (
+    _MOST_DELICATE - _MOST_DELICATE_SIMPLE_HITL
+) | _DESTRUCTIVE
+
+
+def is_mfa_required(tool: str) -> bool:
+    """True when a per-action HITL approval requires owner TOTP.
+
+    Escalated MFA model (owner decision 2026-06-25):
+      - _MFA_TIER_HITL tools (install_* / set_policy / disable_mfa / skill_manage) → MFA.
+      - _DESTRUCTIVE tools (irreversible data loss) → MFA.
+      - cronjob and everything else → simple (no MFA, plain Approve/Deny button).
+
+    Single source of truth consumed by:
+      - sqlite_approval_gate.approve() (enforcement point)
+      - approvals_api._to_frontend() (required_level field for the frontend)
+      - ApprovalCard.tsx (conditional MfaModal)
+    """
+    return tool in _MFA_TIER_HITL
 
 
 def hook_mfa_block(tool: str, *, mfa_on_dangers: bool) -> bool:

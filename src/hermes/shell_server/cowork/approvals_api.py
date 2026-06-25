@@ -1,29 +1,31 @@
-"""HITL approvals + owner MFA for the Lumen Cowork web UI (P4 elevation gate).
+"""HITL approvals for the Lumen Cowork web UI (P4 elevation gate).
 
   GET  /api/v1/approvals/pending          → [{proposal_id, kind, summary, target, required_level}]
-  POST /api/v1/approvals/{proposal_id}     body: {decision, totp}
+  POST /api/v1/approvals/{proposal_id}     body: {decision, totp?}
   GET  /api/v1/mfa/status                  → {enrolled}
   POST /api/v1/mfa/enroll                  body: {totp?}  → {otpauth_uri, secret}
 
-Elevation contract (the deterministic gate): an action the agent cannot run is NOT a
-dead end — it surfaces here as a pending proposal. The OWNER approves it. Approval
-requires the owner's TOTP so the AGENT cannot self-approve its own elevation (no access
-to the TOTP secret — uid 999, sandboxed, no master.key, egress sealed).
+Escalated MFA model (owner decision 2026-06-25):
+  - simple tier  (most tools: cronjob, send_message, delegate_task …)
+      → Approve/Deny without MFA.  required_level="simple".
+  - mfa tier (MOST_DELICATE: install_*/set_policy/disable_mfa/skill_manage +
+      destructive/irreversible tools)
+      → TOTP required.  required_level="mfa".
 
-TOTP-only model (owner decision 2026-06-24): every action gates on the TOTP and nothing
-else. A browser-driving agent could read+solve any on-screen humanity/riddle challenge,
-so the only real factor is the secret it cannot reach. The owner's TOTP is forwarded to
-the daemon gate — the single MFA enforcement point for ALL surfaces (web + D-Bus).
+Classification is from tool_delicacy.is_mfa_required (single source of truth).
+The agent is isolated by netns — it cannot call this endpoint (bearer + network
+isolation). For simple-tier proposals the human pressing Approve IS proof of presence.
+For mfa-tier the TOTP adds the one factor the caged agent cannot reach (owner-only
+0600 secret).
 
-Approving requires MFA to be enrolled first (mandatory MFA). Denying never does —
-rejecting is always safe. The operator-token middleware still fronts every mutator.
+Policy changes (policies_api.py: set_preset/set_policy_tools/set_mfa_on_dangers)
+still require MFA — those endpoints are NOT touched here.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-import secrets
 from typing import Literal
 from uuid import UUID
 
@@ -31,21 +33,21 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from hermes.capabilities.infrastructure.sqlite_approval_gate import ApprovalGateError
+from hermes.capabilities.tool_delicacy import is_mfa_required
 from hermes.shell_server.security.mfa import MfaStore, ProtectionLevel
 from hermes.shell_server.security.mfa_tool_tier import MfaFactors
 from hermes.tasks.control_plane.domain.ports import AgentUnavailable, AuthenticatedChannel
 
 logger = logging.getLogger("hermes.shell_server.cowork.approvals_api")
 
-# MFA verification now lives in the GATE (gate.approve), the single enforcement point
-# for ALL surfaces (web + D-Bus) — red-team 2026-06-19, finding 3. This layer only
-# forwards the owner's raw factors; it no longer classifies or verifies the tier
-# (that drifted across layers). The tier logic is in shell_server.security.mfa_tool_tier.
+# Tier labels used in the required_level field (consumed by ApprovalCard.tsx).
+_LEVEL_SIMPLE = "simple"
+_LEVEL_MFA = ProtectionLevel.MFA.value  # "mfa"
 
 
 class ApprovalDecision(BaseModel):
     decision: Literal["once", "always", "deny"]
-    totp: str | None = None
+    totp: str | None = None  # required only for mfa-tier proposals; ignored for simple-tier
 
 
 class EnrollBody(BaseModel):
@@ -112,33 +114,55 @@ def create_approvals_router(mfa: MfaStore | None = None) -> APIRouter:
             except AgentUnavailable as exc:
                 raise _unavailable(proposal_id, exc) from exc
 
-        # APPROVE → TOTP-only model (owner decision 2026-06-24). The shell-server holds
-        # the TOTP secret, so we pre-verify HERE for an immediate, friendly error; then we
-        # FORWARD the TOTP to the gate, the single MFA enforcement point for ALL surfaces
-        # (web + D-Bus — red-team 2026-06-19, finding 3). Both check the same code.
-        # The previous code forwarded NO factors → the gate verified with None → it always
-        # failed → the error crossed D-Bus as a generic fault and surfaced as
-        # "agente no disponible". MFA must be enrolled first; denying never needs MFA.
-        if not store.is_enrolled():
-            raise HTTPException(status_code=403, detail={"code": "mfa_not_enrolled",
-                "message": "Configura el MFA antes de aprobar acciones (obligatorio)."})
+        # APPROVE — escalated MFA model (owner decision 2026-06-25).
+        # Resolve the tier from the pending rows to decide if TOTP is needed.
+        # The tier comes from the stored tool_name (server-side, not client-supplied).
+        mfa_factors: MfaFactors | None = None
+        pending_rows = []
+        try:
+            pending_rows = await request.app.state.control_plane.list_hitl_pending()
+        except Exception:  # noqa: BLE001 — degraded but safe: treat as simple
+            pass
 
-        ok, reason = store.verify(level=ProtectionLevel.MFA, totp=body.totp or "")
-        if not ok:
-            logger.warning("hermes.cowork.approvals.mfa_denied proposal=%s reason=%s",
-                           proposal_id, reason)
-            raise HTTPException(status_code=401, detail={"code": reason,
-                "message": _mfa_reason_message(reason)})
+        target_tool = ""
+        for r in pending_rows:
+            if str(r.get("proposal_id", "")) == proposal_id:
+                target_tool = r.get("tool_name", "")
+                break
+
+        needs_mfa = is_mfa_required(target_tool) if target_tool else False
+
+        if needs_mfa:
+            # mfa-tier: TOTP required. Pre-verify here for a friendly error; also
+            # forward factors to the gate (the single enforcement point).
+            if not store.is_enrolled():
+                raise HTTPException(status_code=403, detail={"code": "mfa_not_enrolled",
+                    "message": "Configura el MFA antes de aprobar esta acción "
+                    "(requiere verificación por ser una acción de alta delicadeza)."})
+            ok, reason = store.verify(level=ProtectionLevel.MFA, totp=body.totp or "")
+            if not ok:
+                logger.warning(
+                    "hermes.cowork.approvals.mfa_denied proposal=%s tool=%s reason=%s",
+                    proposal_id, target_tool, reason,
+                )
+                raise HTTPException(status_code=401, detail={"code": reason,
+                    "message": _mfa_reason_message(reason)})
+            mfa_factors = MfaFactors(totp=body.totp or "")
 
         try:
             await request.app.state.control_plane.approve(
                 channel=channel, proposal_id=parsed_id,
-                mfa_factors=MfaFactors(totp=body.totp or ""))
-            logger.info("hermes.cowork.approvals.approved proposal=%s", proposal_id)
+                mfa_factors=mfa_factors)
+            logger.info(
+                "hermes.cowork.approvals.approved proposal=%s tier=%s",
+                proposal_id, "mfa" if needs_mfa else "simple",
+            )
             return {"ok": True, "decision": body.decision}
         except ApprovalGateError as exc:
-            gate_reason = getattr(exc, "reason", "mfa_denied")
-            raise HTTPException(status_code=401, detail={"code": gate_reason,
+            gate_reason = getattr(exc, "reason", "approval_failed")
+            status = 401 if gate_reason in {"mfa_required", "invalid_totp",
+                                             "mfa_not_enrolled"} else 400
+            raise HTTPException(status_code=status, detail={"code": gate_reason,
                 "message": _mfa_reason_message(gate_reason)}) from exc
         except AgentUnavailable as exc:
             raise _unavailable(proposal_id, exc) from exc
@@ -197,7 +221,7 @@ def _to_frontend(row: dict, store: MfaStore) -> dict:
         # C — chat anchor: the REAL chat conversation_id (None for pre-migration
         # rows or non-chat cycles like scheduled/autonomous tasks).
         "conversation_id": row.get("conversation_id") or None,
-        # D — TOTP-only model: every action gates on TOTP (no humanity/riddle tier).
-        "required_level": ProtectionLevel.MFA.value,
+        # Escalated MFA model: mfa-tier tools require TOTP; simple-tier do not.
+        "required_level": _LEVEL_MFA if is_mfa_required(tool_name) else _LEVEL_SIMPLE,
         "mfa_enrolled": mfa_state.enrolled,
     }
