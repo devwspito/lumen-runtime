@@ -173,7 +173,7 @@ export function OfficeCanvas({ agents, runtimeStatus, onAgentClick }: Props) {
       office.hoveredAgentId = agentHit.id
       office.hoveredRoomId = null
       office.hoveredFurnitureIdx = -1
-      setTooltip({ x: e.clientX - rect.left, y: e.clientY - rect.top, name: agentHit.agentName })
+      setTooltip({ x: e.clientX - rect.left, y: e.clientY - rect.top, name: agentHit.agentName, hint: 'ver detalle' })
       canvas.style.cursor = 'pointer'
       return
     }
