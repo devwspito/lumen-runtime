@@ -2383,16 +2383,11 @@ class DbusRuntimeServiceWiring:
         approved_by = self._authorize_and_resolve(
             sender_uid, operation="approve_action", operator_token=operator_token
         )
-        # Forward the owner's TOTP to the gate — the gate is the single MFA enforcement
-        # point for ALL surfaces (red-team 2026-06-19, finding 3). Previously no factors
-        # reached the gate → it verified with None → always failed → the error crossed
-        # D-Bus as a generic fault and surfaced as "agente no disponible".
-        from hermes.shell_server.security.mfa_tool_tier import MfaFactors  # noqa: PLC0415
-
+        # Per-action approvals no longer require MFA (Mandato 2 / 2026-06-25).
+        # The gate.approve no longer calls mfa_verifier — it just mints the token.
         token = await self._gate.approve(
             proposal_id=proposal_id,
             approved_by=approved_by,
-            mfa_factors=MfaFactors(totp=totp),
         )
         logger.info(
             "hermes.dbus.hitl_approved",
@@ -2422,17 +2417,29 @@ class DbusRuntimeServiceWiring:
                         "hermes.dbus.hitl_reenqueue_skipped: %s", exc
                     )
             else:
-                logger.warning(
-                    "hermes.dbus.hitl_approved_no_work_item: proposal_id=%s — "
-                    "work_item_id no encontrado en el gate; la tarea no se re-encola.",
+                logger.debug(
+                    "hermes.dbus.hitl_approved_native_danger: proposal_id=%s — "
+                    "work_item_id=0 (native-danger gate, not a queue task); "
+                    "signalling blocked conversation thread to resume.",
                     proposal_id,
                 )
         else:
-            logger.warning(
+            logger.debug(
                 "hermes.dbus.hitl_approved_no_queue: proposal_id=%s — "
-                "work_queue no inyectada; la tarea no se re-encola.",
+                "work_queue not injected; native-danger signal path only.",
                 proposal_id,
             )
+
+        # Native-danger block-and-resume (Mandato 1 / 2026-06-25):
+        # The security hook blocked the conversation thread on a threading.Event
+        # registered under this proposal_id. Signal it now so the EXACT same tool
+        # call is resumed (approved) without any re-prompt or re-attempt.
+        from hermes.runtime.security_hook import signal_native_danger_approval  # noqa: PLC0415
+        signalled = signal_native_danger_approval(str(proposal_id), "approved")
+        logger.info(
+            "hermes.dbus.hitl_native_danger_signalled: proposal=%s signalled=%s",
+            proposal_id, signalled,
+        )
 
         return HitlApprovalResult(approval_token=token, approved_by=approved_by)
 
@@ -2464,6 +2471,11 @@ class DbusRuntimeServiceWiring:
             "hermes.dbus.hitl_rejected",
             extra={"proposal_id": str(proposal_id), "by_uid": sender_uid},
         )
+
+        # Signal the blocked conversation thread so it can return the deny message
+        # to the agent immediately (block-and-resume, Mandato 1 / 2026-06-25).
+        from hermes.runtime.security_hook import signal_native_danger_approval  # noqa: PLC0415
+        signal_native_danger_approval(str(proposal_id), "denied")
 
     async def list_hitl_pending(self, *, limit: int = 50) -> list[dict]:
         """Propuestas HITL pendientes de aprobación humana (CTRL-P1-5).

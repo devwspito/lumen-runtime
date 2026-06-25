@@ -38,6 +38,7 @@ import asyncio
 import logging
 import re
 import shlex
+import threading
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -52,6 +53,48 @@ logger = logging.getLogger("hermes.runtime.security_hook")
 
 # Timeout for async bridges (kill-switch check + audit persist).
 _ASYNC_BRIDGE_TIMEOUT_S: float = 5.0
+
+# ---------------------------------------------------------------------------
+# Native danger approval event registry — block-and-resume pattern.
+#
+# Maps proposal_id (str) → {"event": threading.Event, "choice": str | None}.
+# The security hook registers a slot BEFORE blocking; approve_action / reject_action
+# signal it so the SAME tool call is resumed (approved) or rejected (denied/timeout).
+# This replaces the digest-based re-attempt (which failed when LLM regenerated args)
+# and the re-prompt continuation (which asked the LLM to re-call with exact params,
+# but the LLM ignored that instruction or produced slightly different args).
+# Thread-safe: writes under _pending_events_lock; reads are atomic dict lookups.
+# ---------------------------------------------------------------------------
+_pending_events: dict[str, dict] = {}  # proposal_id → {"event": Event, "choice": str|None}
+_pending_events_lock = threading.Lock()
+
+# How long the hook waits for the owner before auto-denying (seconds).
+_NATIVE_DANGER_OWNER_WAIT_S: float = float(
+    __import__("os").environ.get("HERMES_HITL_WAIT_S", "600")
+)
+
+
+def signal_native_danger_approval(proposal_id: str, choice: str) -> bool:
+    """Signal a pending native-danger gate to resume with *choice*.
+
+    Called from approve_action / reject_action after the gate has minted/rejected
+    the token. Returns True if a waiting thread was found and signalled, False if
+    no thread is waiting (e.g. the hook already timed out).
+
+    Thread-safe. choice ∈ {"approved", "denied"}.
+    """
+    with _pending_events_lock:
+        slot = _pending_events.get(str(proposal_id))
+    if slot is None:
+        return False
+    slot["choice"] = choice
+    slot["event"].set()
+    logger.info(
+        "hermes.security_hook.native_danger_signalled: proposal=%s choice=%s",
+        proposal_id,
+        choice,
+    )
+    return True
 
 # Terminal tool names as reported to the hook.
 _TERMINAL_TOOLS: frozenset[str] = frozenset({"run_command", "run_terminal", "terminal"})
@@ -1315,15 +1358,19 @@ def _resolve_native_danger_approval(
 ) -> str | None:
     """Per-action owner approval for a cage-escaping NATIVE danger.
 
-    Returns None if the owner has ALREADY approved this exact action (the single-use
-    token is consumed here → ALLOW). Returns a block message otherwise (a pending row
-    is registered so it surfaces in the web approvals UI; the owner approves with MFA
-    and the agent re-attempts the action → it then executes).
+    Block-and-resume pattern (Mandato 1 / 2026-06-25):
+    - Registers a pending row so the web UI shows the approval card.
+    - Registers a threading.Event slot in _pending_events under proposal_id.
+    - BLOCKS the calling (conversation) thread waiting for the owner to
+      Approve or Deny from the web UI (up to _NATIVE_DANGER_OWNER_WAIT_S).
+    - When approve_action / reject_action signals the event, resumes and
+      returns None (approved → ALLOW the EXACT same call) or a block message.
+    - No re-attempt, no digest-based re-try, no LLM re-prompt: the SAME
+      blocked tool call is either allowed or denied in-place.
 
-    FAIL-CLOSED: the gate/loop missing or ANY error → a block message (never raises;
-    a raise here would be swallowed by invoke_hook into ALLOW — red-team finding 2).
-    Execution stays on the caller's (conversation) thread; this only does bounded async
-    gate I/O via run_coroutine_threadsafe.
+    FAIL-CLOSED: gate/loop missing or ANY error → block message (never raises;
+    a raise is swallowed by invoke_hook into ALLOW — red-team finding 2).
+    Thread-safe: _pending_events writes are under _pending_events_lock.
     """
     import asyncio  # noqa: PLC0415
     import hashlib  # noqa: PLC0415
@@ -1332,7 +1379,7 @@ def _resolve_native_danger_approval(
 
     gate = getattr(broker, "_approval_gate", None) if broker is not None else None
     if gate is None or engine_loop is None:
-        return ("requiere aprobación del dueño con MFA, pero el buzón de aprobaciones "
+        return ("requiere aprobación del dueño, pero el buzón de aprobaciones "
                 "no está disponible — bloqueado (fail-closed).")
 
     def _await(coro: Any) -> Any:
@@ -1347,19 +1394,14 @@ def _resolve_native_danger_approval(
                 "utf-8", "replace"
             )
         ).hexdigest()
+        proposal_id = uuid5(NAMESPACE_URL, digest)
+        proposal_id_str = str(proposal_id)
 
-        # Already approved? Consume the single-use token (binds to THIS action) → allow.
-        pid = _await(gate.approved_proposal_for_digest(digest))
-        if pid is not None:
-            token = _await(gate.approved_token_for(pid))
-            if token and _await(gate.verify_token(proposal_id=pid, token=token)):
-                return None  # owner-approved + consumed → ALLOW exactly once
-
-        # Not approved → register a pending row (web UI shows it) + block with a hint.
+        # Register a pending row (web UI shows it) + register a blocking Event slot.
         from hermes.capabilities.domain.ports import ConsentContext, RiskLevel  # noqa: PLC0415
 
         _await(gate.register_pending(
-            proposal_id=uuid5(NAMESPACE_URL, digest),
+            proposal_id=proposal_id,
             work_item_id=UUID(int=0),
             consent_context=ConsentContext(operator_id=None, tenant_id=UUID(int=0)),
             risk=RiskLevel.HIGH,
@@ -1369,12 +1411,53 @@ def _resolve_native_danger_approval(
             action_digest=digest,
             conversation_id=conversation_id,
         ))
-        return (
-            "Acción ENCOLADA para el visto bueno del dueño. La tarjeta de aprobación "
-            "ya está pendiente en el panel. Informa al usuario de que queda pendiente "
-            "de su confirmación y que la ejecutarás en cuanto la apruebe. "
-            "No propongas rodeos."
+
+        # Register the Event AFTER the row exists so approve_action can find it.
+        event = threading.Event()
+        slot: dict = {"event": event, "choice": None}
+        with _pending_events_lock:
+            _pending_events[proposal_id_str] = slot
+
+        logger.info(
+            "hermes.security_hook.native_danger_waiting: proposal=%s tool=%s — "
+            "blocking conversation thread for owner decision (timeout=%ss)",
+            proposal_id_str, tool_name, _NATIVE_DANGER_OWNER_WAIT_S,
         )
+
+        # Block the conversation thread until the owner acts or timeout.
+        resolved = event.wait(timeout=_NATIVE_DANGER_OWNER_WAIT_S)
+
+        # Clean up slot regardless of outcome.
+        with _pending_events_lock:
+            _pending_events.pop(proposal_id_str, None)
+
+        if not resolved:
+            logger.warning(
+                "hermes.security_hook.native_danger_timeout: proposal=%s tool=%s — "
+                "owner did not respond in %ss, auto-denying (fail-closed)",
+                proposal_id_str, tool_name, _NATIVE_DANGER_OWNER_WAIT_S,
+            )
+            return (
+                "Tiempo de espera agotado: el dueño no aprobó la acción a tiempo. "
+                "La tarjeta de aprobación sigue disponible si quieres reintentar."
+            )
+
+        choice = slot.get("choice")
+        if choice == "approved":
+            logger.info(
+                "hermes.security_hook.native_danger_approved: proposal=%s tool=%s — "
+                "owner approved; executing the exact same call",
+                proposal_id_str, tool_name,
+            )
+            return None  # ALLOW the exact same blocked call
+
+        # Denied or unknown.
+        logger.info(
+            "hermes.security_hook.native_danger_denied: proposal=%s tool=%s choice=%r",
+            proposal_id_str, tool_name, choice,
+        )
+        return f"El dueño rechazó la acción '{tool_name}'. No la reintentes."
+
     except Exception as exc:  # noqa: BLE001 — security gate: never raise (would ALLOW)
         logger.error(
             "hermes.security_hook.native_danger_gate_error tool=%s err=%r — block (fail-closed)",

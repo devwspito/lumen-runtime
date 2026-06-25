@@ -4,34 +4,38 @@
  * Rendered both inside SeguridadView (full list) and PendingApprovalsInChat
  * (filtered to the active conversation).
  *
- * "Permitir" opens MfaModal (TOTP only) unless MFA is globally disabled.
- * "Denegar" fires without MFA.
- * Errors surface as toasts; the modal stays open on failure.
+ * Escalated MFA model (owner decision 2026-06-25):
+ *   - simple tier (required_level === "simple"): Aprobar/Denegar directly — no TOTP.
+ *     Applies to most tools: cronjob, send_message, delegate_task, browser actions, etc.
+ *   - mfa tier  (required_level === "mfa"):  MfaModal is shown before approving.
+ *     Applies to cage-widening tools: install_*, set_policy, disable_mfa, skill_manage,
+ *     and any _DESTRUCTIVE tools.
+ *
+ * Classification is server-side (tool_delicacy.is_mfa_required). The client
+ * reads `approval.required_level` — never does its own word-list scan.
  */
 
 import { useState } from 'react'
 import { sileo } from 'sileo'
 import { resolveApproval } from '../api/client'
 import type { PendingApproval } from '../api/types'
-import MfaEnroll from './MfaEnroll'
 import MfaModal from './MfaModal'
-import type { MfaFactors } from './MfaModal'
 
 export interface ApprovalCardProps {
   approval: PendingApproval
-  /** When true, "Permitir" bypasses MFA entirely (mfa_on_dangers is OFF). */
+  /** Legacy compat — no longer the gate; classification comes from required_level. */
   mfaDisabled?: boolean
   onResolved(): void
 }
 
 export default function ApprovalCard({
   approval,
-  mfaDisabled = false,
   onResolved,
 }: ApprovalCardProps) {
-  const [showModal, setShowModal] = useState(false)
   const [busy, setBusy] = useState(false)
-  const [needsEnroll, setNeedsEnroll] = useState(approval.mfa_enrolled === false)
+  const [showMfaModal, setShowMfaModal] = useState(false)
+
+  const isMfaTier = approval.required_level === 'mfa'
 
   const params = approval.parameters
   const paramEntries =
@@ -52,75 +56,54 @@ export default function ApprovalCard({
     }
   }
 
-  function handlePermitirClick() {
-    if (mfaDisabled) {
-      void handleApprove({ totp: '' })
+  function handleApproveClick() {
+    if (isMfaTier) {
+      // mfa-tier: open MfaModal to collect TOTP before sending approve.
+      setShowMfaModal(true)
     } else {
-      setShowModal(true)
+      // simple-tier: approve immediately, no TOTP.
+      void doApprove()
     }
   }
 
-  async function handleApprove(factors: MfaFactors) {
+  async function doApprove(totp?: string) {
     setBusy(true)
     try {
-      await resolveApproval(approval.proposal_id, 'once', { totp: factors.totp ?? null })
-      setShowModal(false)
+      await resolveApproval(approval.proposal_id, 'once', { totp: totp ?? null })
       sileo.success({ title: 'Acción aprobada' })
       onResolved()
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      const lower = msg.toLowerCase()
-      if (lower.includes('mfa_not_enrolled') || lower.includes('not enrolled')) {
-        setShowModal(false)
-        setNeedsEnroll(true)
-      } else {
-        sileo.error({ title: msg || 'No se pudo aprobar' })
-      }
+      sileo.error({ title: msg || 'No se pudo aprobar' })
     } finally {
       setBusy(false)
     }
   }
 
-  function handleEnrolled() {
-    setNeedsEnroll(false)
-    setShowModal(true)
-  }
-
   return (
-    <div
-      className="seg-approval-card"
-      role="alertdialog"
-      aria-label={`Aprobación requerida: ${approval.summary}`}
-    >
-      <div className="seg-approval-card__body">
-        <p className="seg-approval-card__question">{approval.summary}</p>
-        {approval.target && (
-          <p className="seg-approval-card__target">{approval.target}</p>
-        )}
-        {paramEntries.length > 0 && (
-          <dl className="seg-approval-card__params">
-            {paramEntries.map(([k, v]) => (
-              <div key={k} className="seg-approval-card__param-row">
-                <dt>{k}</dt>
-                <dd>{typeof v === 'object' ? JSON.stringify(v) : String(v)}</dd>
-              </div>
-            ))}
-          </dl>
-        )}
-      </div>
-
-      {needsEnroll ? (
-        <div className="seg-approval-card__mfa">
-          <p
-            className="seg-approval-card__mfa-error"
-            role="status"
-            style={{ color: 'var(--warn)' }}
-          >
-            Necesitas configurar tu verificación (MFA) para aprobar esto.
-          </p>
-          <MfaEnroll onEnrolled={handleEnrolled} />
+    <>
+      <div
+        className="seg-approval-card"
+        role="alertdialog"
+        aria-label={`Aprobación requerida: ${approval.summary}`}
+      >
+        <div className="seg-approval-card__body">
+          <p className="seg-approval-card__question">{approval.summary}</p>
+          {approval.target && (
+            <p className="seg-approval-card__target">{approval.target}</p>
+          )}
+          {paramEntries.length > 0 && (
+            <dl className="seg-approval-card__params">
+              {paramEntries.map(([k, v]) => (
+                <div key={k} className="seg-approval-card__param-row">
+                  <dt>{k}</dt>
+                  <dd>{typeof v === 'object' ? JSON.stringify(v) : String(v)}</dd>
+                </div>
+              ))}
+            </dl>
+          )}
         </div>
-      ) : (
+
         <div
           className="seg-approval-card__actions"
           role="group"
@@ -128,16 +111,12 @@ export default function ApprovalCard({
         >
           <button
             className="cv-btn cv-btn--primary cv-btn--sm"
-            onClick={handlePermitirClick}
+            onClick={handleApproveClick}
             disabled={busy}
             type="button"
-            aria-label={
-              mfaDisabled
-                ? 'Permitir esta acción'
-                : 'Permitir esta acción (requiere tu MFA)'
-            }
+            aria-label={isMfaTier ? 'Permitir esta acción (requiere MFA)' : 'Permitir esta acción'}
           >
-            Permitir
+            {isMfaTier ? 'Permitir (MFA)' : 'Permitir'}
           </button>
           <button
             className="cv-btn cv-btn--ghost cv-btn--sm"
@@ -149,15 +128,18 @@ export default function ApprovalCard({
             Denegar
           </button>
         </div>
-      )}
+      </div>
 
-      {showModal && (
+      {showMfaModal && (
         <MfaModal
-          title="Aprobar acción"
-          onSign={handleApprove}
-          onCancel={() => setShowModal(false)}
+          title={`Autorizar: ${approval.target || approval.summary}`}
+          onSign={({ totp }) => {
+            setShowMfaModal(false)
+            void doApprove(totp)
+          }}
+          onCancel={() => setShowMfaModal(false)}
         />
       )}
-    </div>
+    </>
   )
 }

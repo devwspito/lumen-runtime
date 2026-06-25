@@ -209,9 +209,10 @@ class DbusControlPlaneAdapter:
         proposal_id: UUID,
         mfa_factors: Any | None = None,
     ) -> str:
-        # Forward the owner's TOTP to the daemon gate (single MFA enforcement point).
-        # Empty string when absent — D-Bus strings can't be None; the gate fails closed.
-        totp = getattr(mfa_factors, "totp", None) or ""
+        # Escalated MFA model (owner decision 2026-06-25):
+        # simple-tier → mfa_factors is None → pass empty TOTP; the gate skips MFA check.
+        # mfa-tier   → mfa_factors.totp is non-empty; the gate verifies it.
+        totp = (mfa_factors.totp if mfa_factors is not None else None) or ""
         return await self._call_returning("call_approve", str(proposal_id), totp)
 
     async def reject(
