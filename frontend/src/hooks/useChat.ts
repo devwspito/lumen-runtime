@@ -25,6 +25,7 @@ import { toolLabel } from '../lib/toolLabels'
 
 const SS_CONV_ID = 'lumen:convId'
 const SS_TASK_ID = 'lumen:taskId'
+const SS_AGENT_ID = 'lumen:agentId'
 
 function genUUID(): string {
   try {
@@ -66,6 +67,8 @@ type ChatStatus =
 
 interface ChatState {
   convId: string | null
+  /** Agent bound to this conversation (set on first message; immutable after). */
+  agentId: string | null
   messages: ChatMessage[]
   status: ChatStatus
 }
@@ -79,6 +82,7 @@ type Action =
   | { type: 'STATUS_IDLE' }
   | { type: 'STATUS_ERROR'; message: string }
   | { type: 'SET_CONV_ID'; convId: string }
+  | { type: 'SET_AGENT_ID'; agentId: string }
   | { type: 'DELTA'; id: string; chunk: string }
   | { type: 'THINKING'; id: string; chunk: string }
   | { type: 'THINKING_DONE'; id: string }
@@ -107,10 +111,13 @@ function updateAssistant(
 function reducer(state: ChatState, action: Action): ChatState {
   switch (action.type) {
     case 'RESET':
-      return { convId: null, messages: [], status: { phase: 'idle' } }
+      return { convId: null, agentId: null, messages: [], status: { phase: 'idle' } }
 
     case 'SET_CONV_ID':
       return { ...state, convId: action.convId }
+
+    case 'SET_AGENT_ID':
+      return { ...state, agentId: action.agentId }
 
     case 'ADD_USER':
       return {
@@ -203,7 +210,7 @@ function reducer(state: ChatState, action: Action): ChatState {
       }
 
     case 'LOAD_MESSAGES':
-      return { ...state, convId: action.convId, messages: action.messages }
+      return { ...state, convId: action.convId, agentId: state.agentId, messages: action.messages }
 
     case 'ADOPT_FINAL':
       return {
@@ -228,12 +235,16 @@ function reducer(state: ChatState, action: Action): ChatState {
 
 interface UseChatReturn {
   convId: string | null
+  /** Agent bound to the current conversation (null = CEO / default). */
+  agentId: string | null
   messages: ChatMessage[]
   status: ChatStatus
   /** True while re-attaching to a stream that was in-flight before a page refresh. */
   reconnecting: boolean
   sendMessage(text: string): Promise<void>
   startNew(): void
+  /** Start a new conversation pre-bound to a specific agent. */
+  startNewWithAgent(agentId: string): void
   stopStream(): void
   loadConversation(id: string): Promise<void>
 }
@@ -241,6 +252,7 @@ interface UseChatReturn {
 export function useChat(): UseChatReturn {
   const [state, dispatch] = useReducer(reducer, {
     convId: null,
+    agentId: null,
     messages: [],
     status: { phase: 'idle' },
   })
@@ -394,15 +406,31 @@ export function useChat(): UseChatReturn {
     stopStream()
     sessionStorage.removeItem(SS_CONV_ID)
     sessionStorage.removeItem(SS_TASK_ID)
+    sessionStorage.removeItem(SS_AGENT_ID)
     dispatch({ type: 'RESET' })
   }, [stopStream])
 
-  // Persist convId to sessionStorage whenever it changes so a refresh can restore it.
+  const startNewWithAgent = useCallback((agentId: string) => {
+    stopStream()
+    sessionStorage.removeItem(SS_CONV_ID)
+    sessionStorage.removeItem(SS_TASK_ID)
+    sessionStorage.setItem(SS_AGENT_ID, agentId)
+    dispatch({ type: 'RESET' })
+    dispatch({ type: 'SET_AGENT_ID', agentId })
+  }, [stopStream])
+
+  // Persist convId and agentId to sessionStorage whenever they change so a refresh can restore them.
   useEffect(() => {
     if (state.convId) {
       sessionStorage.setItem(SS_CONV_ID, state.convId)
     }
   }, [state.convId])
+
+  useEffect(() => {
+    if (state.agentId) {
+      sessionStorage.setItem(SS_AGENT_ID, state.agentId)
+    }
+  }, [state.agentId])
 
   // On mount: restore the last conversation and, if a task was streaming, re-attach.
   // Also starts the polling safety-net so that long silent tool calls never freeze
@@ -413,6 +441,11 @@ export function useChat(): UseChatReturn {
 
     const savedConvId = sessionStorage.getItem(SS_CONV_ID)
     const savedTaskId = sessionStorage.getItem(SS_TASK_ID)
+    const savedAgentId = sessionStorage.getItem(SS_AGENT_ID)
+
+    if (savedAgentId) {
+      dispatch({ type: 'SET_AGENT_ID', agentId: savedAgentId })
+    }
 
     if (!savedConvId) return
 
@@ -524,6 +557,7 @@ export function useChat(): UseChatReturn {
 
     // Own the conversation id client-side (mirrors vanilla chat.js genUUID pattern)
     let convId = state.convId
+    const isNewConversation = !convId
     if (!convId) {
       convId = genUUID()
       dispatch({ type: 'SET_CONV_ID', convId })
@@ -535,12 +569,18 @@ export function useChat(): UseChatReturn {
     dispatch({ type: 'ADD_USER', id: userMsgId, text })
     dispatch({ type: 'STATUS_SENDING' })
 
+    // Include agent_id only on the first message of a conversation so the backend
+    // can bind it. On subsequent messages in the same conversation, the backend
+    // already knows the agent; sending it again is harmless but we omit it for clarity.
+    const agentIdToSend = isNewConversation ? (state.agentId ?? undefined) : undefined
+
     let taskId: string
     try {
       const res = await postChat({
         conversation_id: convId,
         user_message: text,
         dedup_key: `chat:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+        ...(agentIdToSend ? { agent_id: agentIdToSend } : {}),
       })
       taskId = res.task_id
     } catch (err) {
@@ -637,11 +677,13 @@ export function useChat(): UseChatReturn {
 
   return {
     convId: state.convId,
+    agentId: state.agentId,
     messages: state.messages,
     status: state.status,
     reconnecting,
     sendMessage,
     startNew,
+    startNewWithAgent,
     stopStream,
     loadConversation,
   }

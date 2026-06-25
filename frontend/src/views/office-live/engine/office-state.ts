@@ -88,7 +88,7 @@ const KIND_TO_ROLE: Record<string, string> = {
 
 // ── Derive departments and agent infos from the real roster ────
 // One DepartmentInfo per unique department_id in the agent list.
-// Cerebro comes first; the rest are sorted alphabetically by name.
+// CEO comes first; the rest are sorted alphabetically by name.
 
 function buildDepartmentsFromAgents(agents: LumenAgent[]): DepartmentInfo[] {
   const seen = new Map<string, DepartmentInfo>()

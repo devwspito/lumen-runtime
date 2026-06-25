@@ -28,7 +28,6 @@ from hermes.agents.domain.ports import (
 from hermes.agents.domain.default_roster import default_roster
 from hermes.prompts.persona import PersonaSpec
 
-_ACTIVE_KEY = "active_agent_id"
 _ROSTER_SEEDED_KEY = "roster_seeded"
 
 _SCHEMA = """
@@ -111,16 +110,12 @@ class SqliteAgentRegistry:
     # Seed
     # ------------------------------------------------------------------
     def _ensure_default(self) -> None:
-        """Siembra el agente 'default' + lo marca activo si no hay agentes."""
+        """Siembra el agente 'default' (CEO) si no hay agentes."""
         with self._connect() as conn:
             row = conn.execute("SELECT COUNT(*) AS n FROM agents").fetchone()
             if row["n"] > 0:
                 return
             self._insert(conn, default_agent())
-            conn.execute(
-                "INSERT OR REPLACE INTO agent_settings (key, value) VALUES (?, ?)",
-                (_ACTIVE_KEY, DEFAULT_AGENT_ID),
-            )
 
     def _seed_roster(self) -> None:
         """Siembra el equipo de fábrica UNA sola vez (flag en agent_settings).
@@ -308,15 +303,9 @@ class SqliteAgentRegistry:
             if count <= 1:
                 raise CannotDeleteLastAgent(agent_id)
             conn.execute("DELETE FROM agents WHERE agent_id = ?", (agent_id,))
-            # Si era el activo, reactiva el default.
-            if self._read_setting(conn, _ACTIVE_KEY) == agent_id:
-                conn.execute(
-                    "INSERT OR REPLACE INTO agent_settings (key, value) VALUES (?, ?)",
-                    (_ACTIVE_KEY, DEFAULT_AGENT_ID),
-                )
 
     # ------------------------------------------------------------------
-    # Active agent
+    # Settings helpers (used by roster seeding)
     # ------------------------------------------------------------------
     @staticmethod
     def _read_setting(conn: sqlite3.Connection, key: str) -> str | None:
@@ -325,40 +314,17 @@ class SqliteAgentRegistry:
         ).fetchone()
         return row["value"] if row else None
 
-    def active_agent_id(self) -> str:
-        with self._connect() as conn:
-            value = self._read_setting(conn, _ACTIVE_KEY)
-            if value is not None:
-                exists = conn.execute(
-                    "SELECT 1 FROM agents WHERE agent_id = ?", (value,)
-                ).fetchone()
-                if exists:
-                    return value
-            # Fallback: default si existe, si no el primero.
-            row = conn.execute(
-                "SELECT agent_id FROM agents ORDER BY is_default DESC, created_at ASC LIMIT 1"
-            ).fetchone()
-        return row["agent_id"] if row else DEFAULT_AGENT_ID
-
-    def set_active_agent(self, agent_id: str) -> None:
-        self.get_agent(agent_id)  # raises AgentNotFound
-        with self._connect() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO agent_settings (key, value) VALUES (?, ?)",
-                (_ACTIVE_KEY, agent_id),
-            )
-
     # ------------------------------------------------------------------
     # Persona resolution (consumido por el engine, por ciclo)
     # ------------------------------------------------------------------
     def persona_for(self, agent_id: str | None) -> PersonaSpec:
-        target = agent_id or self.active_agent_id()
+        target = agent_id or DEFAULT_AGENT_ID
         try:
             return self.get_agent(target).to_persona()
         except AgentNotFound:
             pass
-        # Fail-soft: el agente activo, o el default hardcoded.
+        # Fail-soft: the CEO (default), or the hardcoded default_agent().
         try:
-            return self.get_agent(self.active_agent_id()).to_persona()
+            return self.get_agent(DEFAULT_AGENT_ID).to_persona()
         except AgentNotFound:
             return default_agent().to_persona()

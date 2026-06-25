@@ -159,6 +159,7 @@ class ControlPlaneService:
         priority: int = 0,
         dedup_key: str | None = None,
         conversation_id: str | None = None,
+        agent_id: str | None = None,
     ) -> EnqueueResult:
         """Encola un WorkItem.
 
@@ -182,6 +183,7 @@ class ControlPlaneService:
             operator_uuid=operator_uuid,
             tenant_id=self._tenant_id,
             conversation_id=conversation_id,
+            agent_id=agent_id,
         )
         persisted = await self._queue.enqueue(item)
         entry = self._emit_accepted_audit(
@@ -658,12 +660,18 @@ def _build_work_item(
     operator_uuid: UUID,
     tenant_id: UUID,
     conversation_id: str | None = None,
+    agent_id: str | None = None,
 ) -> WorkItem:
     """Construye un WorkItem con enqueued_by derivado del canal — nunca del texto.
 
     conversation_id va en el payload: la cola lo espeja a la columna dedicada y
     la invariante I5 del esquema exige que un chat_message lo lleve (sin él, el
     INSERT OR IGNORE descarta la tarea en silencio).
+
+    agent_id is the per-conversation contract agent resolved by chat_start.
+    It travels in payload["agent_id"] so build_decision_context can read it
+    and set DecisionContext.agent_id — the engine reads THAT, not the global
+    active_agent_id.
     """
     payload: dict[str, str] = {
         # CTRL-P1-3: enqueued_by se fija aquí, NUNCA del texto del cliente
@@ -677,6 +685,8 @@ def _build_work_item(
     }
     if conversation_id:
         payload["conversation_id"] = conversation_id
+    if agent_id:
+        payload["agent_id"] = agent_id
     return WorkItem.new(
         tenant_id=tenant_id,
         trigger_kind=trigger_kind,

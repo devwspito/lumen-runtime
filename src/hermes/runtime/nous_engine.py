@@ -1851,13 +1851,12 @@ class NousReasoningEngine:
 
         # F3: resolve external ToolSpecs filtered per active agent (B4).
         # agent_id from DecisionContext (CTRL-secure: set server-side from WorkItem).
-        # Falls back to agent_registry.active_agent_id() when not in context.
+        # Falls back to DEFAULT_AGENT_ID (CEO) — never reads the global active_agent.
+        from hermes.agents.domain.agent import DEFAULT_AGENT_ID as _DEFAULT_AGENT_ID  # noqa: PLC0415
+
         active_agent_id = context.agent_id if hasattr(context, "agent_id") else None
-        if active_agent_id is None and self._agent_registry is not None:
-            try:
-                active_agent_id = self._agent_registry.active_agent_id()
-            except Exception:  # noqa: BLE001
-                pass
+        if active_agent_id is None:
+            active_agent_id = _DEFAULT_AGENT_ID
         # FIX B.1 — wire streaming: extract chunk_sink injected by the orchestrator
         # and build a sync callback that emits incremental tokens to the client.
         # The counting_sink wrapper (injected by the orchestrator) increments

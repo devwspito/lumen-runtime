@@ -138,7 +138,7 @@ class Runtime1Client(QObject):
 
         self._call(
             "Enqueue",
-            (trigger_kind, text, priority, dedup_key, conversation_id, ""),
+            (trigger_kind, text, priority, dedup_key, conversation_id, "", ""),
             _on_multi,
             on_error,
             multi=True,

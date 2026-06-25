@@ -750,7 +750,7 @@ function SpinnerIcon() {
 export default function ChatView() {
   const t = useT()
   // All chat state comes from Layout via outlet context — no duplicate useChat instance.
-  const { convId, messages, status, sendMessage, stopStream, approvalRefreshTick } = useOutletContext<ChatOutletContext>()
+  const { convId, agentName, messages, status, sendMessage, stopStream, approvalRefreshTick } = useOutletContext<ChatOutletContext>()
   const [composerText, setComposerText] = useState('')
   // Open by default so the workspace folder (Carpeta de Trabajo) is visible —
   // the owner didn't even know it existed when it was collapsed.
@@ -836,7 +836,10 @@ export default function ChatView() {
           {/* Topbar */}
           <div className="chat-topbar">
             <span className="chat-topbar-title">
-              {showWelcome ? 'Nueva conversación' : 'Chat'}
+              {agentName
+                ? `Hablando con ${agentName}`
+                : showWelcome ? 'Nueva conversación' : 'Chat'
+              }
             </span>
             <button
               className="chat-topbar-panel-btn"

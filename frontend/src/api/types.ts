@@ -97,6 +97,8 @@ export interface ChatStartPayload {
   conversation_id?: string
   user_message: string
   dedup_key?: string
+  /** Bind this conversation to a specific agent. Omit (or use "default") for the CEO agent. */
+  agent_id?: string
 }
 
 export interface ChatStartResponse {

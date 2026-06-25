@@ -168,8 +168,14 @@ function truncate(s: string, n: number) {
 
 export interface ChatOutletContext {
   convId: string | null
+  /** Agent bound to the current conversation (null = CEO / default). */
+  agentId: string | null
+  /** Display name of the bound agent (set when opening a chat from an agent card). */
+  agentName: string | null
   loadConversation(id: string): Promise<void>
   startNew(): void
+  /** Start a new conversation pre-bound to a specific agent, then navigate to chat. */
+  startNewWithAgent(agentId: string, agentName: string): void
   sendMessage(text: string): Promise<void>
   messages: ReturnType<typeof useChat>['messages']
   status: ReturnType<typeof useChat>['status']
@@ -307,6 +313,8 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
   // Chat state lives here, above both the sidebar nav (RecentsSection) and
   // the main content area (ChatView). ChatView receives it via outlet context.
   const chat = useChat()
+  // Display name for the agent bound to the current chat (cleared on new chat).
+  const [boundAgentName, setBoundAgentName] = useState<string | null>(null)
 
   // Bumped each time the user sends a message so PendingApprovalsInChat can
   // fire an immediate poll without waiting for the 3 s interval.
@@ -337,6 +345,13 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
 
   function handleNewChat() {
     chat.startNew()
+    setBoundAgentName(null)
+    navigate('/chat')
+  }
+
+  function handleStartNewWithAgent(agentId: string, agentName: string) {
+    chat.startNewWithAgent(agentId)
+    setBoundAgentName(agentName)
     navigate('/chat')
   }
 
@@ -446,8 +461,11 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
         {/* Pass the shared chat state down to ChatView via outlet context */}
         <Outlet context={{
           convId: chat.convId,
+          agentId: chat.agentId,
+          agentName: boundAgentName,
           loadConversation: chat.loadConversation,
           startNew: chat.startNew,
+          startNewWithAgent: handleStartNewWithAgent,
           sendMessage: handleSendMessage,
           messages: chat.messages,
           status: chat.status,

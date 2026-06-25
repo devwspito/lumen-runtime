@@ -193,7 +193,7 @@ class Runtime1ServiceInterface(ServiceInterface):
 
     @method()
     async def Enqueue(  # noqa: N802
-        self, trigger_kind: "s", text: "s", priority: "i", dedup_key: "s", conversation_id: "s", operator_token: "s"  # noqa: F821,UP037
+        self, trigger_kind: "s", text: "s", priority: "i", dedup_key: "s", conversation_id: "s", operator_token: "s", agent_id: "s"  # noqa: F821,UP037
     ) -> "ss":  # noqa: F821,UP037
         """Encola un WorkItem.
 
@@ -205,6 +205,7 @@ class Runtime1ServiceInterface(ServiceInterface):
         el operator_id real (el humano), nunca el uid del proxy.
         conversation_id viaja como "s" ("" = None); un chat_message lo exige
         (invariante I5 del esquema agent_tasks).
+        agent_id: el agente contratado para esta conversación ("" = no especificado).
         Devuelve (task_id, stream_path).
         """
         sender_uid = await self._resolve_current_sender_uid()
@@ -216,6 +217,7 @@ class Runtime1ServiceInterface(ServiceInterface):
             sender_uid=sender_uid,
             conversation_id=conversation_id or None,
             operator_token=operator_token or None,
+            agent_id=agent_id or None,
         )
         return str(result.task_id), result.stream_path
 
@@ -428,25 +430,14 @@ class Runtime1ServiceInterface(ServiceInterface):
         return json.dumps(self._wiring.list_agents())
 
     @method()
-    async def GetActiveAgent(self) -> "s":  # noqa: N802,F821,UP037
-        """agent_id del agente activo (read-only)."""
-        return self._wiring.get_active_agent()
-
-    @method()
     async def GetRuntimeStatus(self) -> "s":  # noqa: N802,F821,UP037
         """Estado en tiempo real del runtime (read-only, no authZ).
 
-        Devuelve JSON: {state, active_task_count, active_agent_id, captured_at}.
+        Devuelve JSON: {state, active_task_count, captured_at}.
         Fail-soft: cualquier error devuelve el shape idle.
+        Note: active_agent_id has been removed — agent binding is per-conversation.
         """
         return json.dumps(self._wiring.runtime_status())
-
-    @method()
-    async def SetActiveAgent(self, agent_id: "s") -> "b":  # noqa: N802,F821,UP037
-        """Marca el agente activo. by = UID del bus (CTRL-P1-3)."""
-        sender_uid = await self._resolve_current_sender_uid()
-        await self._wiring.set_active_agent(agent_id=agent_id, sender_uid=sender_uid)
-        return True
 
     @method()
     async def CreateAgent(self, draft_json: "s") -> "s":  # noqa: N802,F821,UP037

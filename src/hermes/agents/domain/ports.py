@@ -17,11 +17,11 @@ class AgentNotFound(LookupError):
 
 
 class CannotUpdateDefaultAgent(ValueError):
-    """El agente 'default' (Cerebro) no se puede editar vía API.
+    """El agente 'default' (CEO) no se puede editar vía API.
 
-    El Cerebro tiene un system prompt world-class fijo; modificarlo
+    El CEO tiene un system prompt world-class fijo; modificarlo
     podría degradar el comportamiento del SO. Si necesitas personalizar
-    el Cerebro, usa el campo 'instructions' del agente default directamente
+    el CEO, usa el campo 'instructions' del agente default directamente
     en el daemon (no expuesto al canal REST por diseño).
     """
 
@@ -52,14 +52,6 @@ class AgentRegistryPort(Protocol):
 
     def delete_agent(self, agent_id: str) -> None:
         """Elimina un agente. Lanza CannotDeleteDefaultAgent / CannotDeleteLastAgent."""
-        ...
-
-    def active_agent_id(self) -> str:
-        """ID del agente activo (el que recibe el chat por defecto)."""
-        ...
-
-    def set_active_agent(self, agent_id: str) -> None:
-        """Marca el agente activo. Lanza AgentNotFound si no existe."""
         ...
 
     def persona_for(self, agent_id: str | None) -> PersonaSpec:

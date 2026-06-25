@@ -142,11 +142,16 @@ class DbusControlPlaneAdapter:
         priority: int = 0,
         dedup_key: str | None = None,
         conversation_id: str | None = None,
+        agent_id: str | None = None,
     ) -> EnqueueResult:
         """Encola vía D-Bus → org.hermes.Runtime1.Enqueue.
 
         enqueued_by NO se pasa en el payload — el daemon lo deriva del
         sender_uid del bus (GetConnectionUnixUser). CTRL-P1-3 / G2.
+
+        agent_id is the per-conversation bound agent resolved by chat_start.
+        The daemon carries it into WorkItem.target_agent_id so the engine
+        uses the contract agent, never the global active_agent.
 
         Raises:
             AgentUnavailable: daemon no en el bus o timeout.
@@ -176,6 +181,7 @@ class DbusControlPlaneAdapter:
                 dedup_key or "",
                 conversation_id or "",
                 operator_token,
+                agent_id or "",
             )
         except DBusError as exc:
             _translate_dbus_error(exc)

@@ -235,7 +235,7 @@ class AgentLoopOrchestrator:
             # pure narrative replies that invoke no tool calls. The entry is
             # cleared by worker_pool._worker_loop's finally block
             # (live_activity.clear(item.id)) on task completion or failure.
-            _chat_agent_id = _resolve_chat_agent_id(self._agent_registry)
+            _chat_agent_id = _resolve_chat_agent_id(item.payload)
             _record_chat_activity(str(item.id), _chat_agent_id)
 
         # spec 014 inc. 3 (CTRL-13 fix): propaga el operator_id verificado del
@@ -869,17 +869,17 @@ def _resolve_active_autonomy_level(
     """Lee el AutonomyLevel del agente DESTINO de la tarea (fail-safe).
 
     Prioridad: agent_id explícito (el agente al que va la tarea)
-    → active_agent_id() → AutonomyLevel.BALANCED.
+    → DEFAULT_AGENT_ID (CEO) → AutonomyLevel.BALANCED.
 
     El broker interpreta None como BALANCED (invariante).
     No lanza — la resolución del nivel de autonomía nunca debe tumbar el loop.
     """
-    from hermes.agents.domain.agent import AutonomyLevel  # noqa: PLC0415
+    from hermes.agents.domain.agent import DEFAULT_AGENT_ID, AutonomyLevel  # noqa: PLC0415
 
     if agent_registry is None:
         return AutonomyLevel.BALANCED
     try:
-        resolved_id = agent_id or agent_registry.active_agent_id()
+        resolved_id = agent_id or DEFAULT_AGENT_ID
         agent = agent_registry.get_agent(resolved_id)
         return agent.autonomy_level
     except Exception:  # noqa: BLE001 — fail-safe: el loop no debe caerse
@@ -1067,19 +1067,18 @@ def _taint_consent_if_external(
     )
 
 
-def _resolve_chat_agent_id(agent_registry: "Any") -> str:
-    """Return the active agent id for live_activity tagging during a chat task.
+def _resolve_chat_agent_id(item_payload: "dict | None") -> str:
+    """Return the contract agent id for live_activity tagging during a chat task.
 
-    Reads agent_registry.active_agent_id() (fail-safe: returns "default" if
-    the registry is absent or raises). Called once per chat task at in_progress
-    time — before run_cycle — so the floor animates immediately.
+    Reads agent_id from the WorkItem payload (set by chat_start via the
+    per-conversation binding). Falls back to DEFAULT_AGENT_ID (CEO) when
+    absent — never reads the global active_agent_id.
     """
-    if agent_registry is None:
-        return "default"
-    try:
-        return str(agent_registry.active_agent_id())
-    except Exception:  # noqa: BLE001
-        return "default"
+    from hermes.agents.domain.agent import DEFAULT_AGENT_ID  # noqa: PLC0415
+
+    if item_payload is None:
+        return DEFAULT_AGENT_ID
+    return str(item_payload.get("agent_id") or DEFAULT_AGENT_ID)
 
 
 def _record_chat_activity(task_id: str, agent_id: str) -> None:

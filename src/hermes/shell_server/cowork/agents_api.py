@@ -114,13 +114,6 @@ def create_agents_router() -> APIRouter:
             logger.warning("hermes.agents.list_unavailable", extra={"reason": str(exc)})
             return []
 
-    @router.get("/active")
-    async def get_active_agent(request: Request) -> dict:
-        """Return the id of the currently active agent. Fail-soft: empty string."""
-        proxy = request.app.state.dbus_proxy
-        active_id = await proxy.call_str("get_active_agent")
-        return {"active_agent_id": active_id}
-
     # ------------------------------------------------------------------
     # Roster mutators
     # ------------------------------------------------------------------
@@ -169,13 +162,13 @@ def create_agents_router() -> APIRouter:
 
     @router.post("/{agent_id}/activate")
     async def activate_agent(request: Request, agent_id: str) -> dict:
-        """Set the active agent."""
-        proxy = request.app.state.dbus_proxy
-        try:
-            await proxy.call_bool("set_active_agent", agent_id)
-            return {"ok": True, "active_agent_id": agent_id}
-        except AgentUnavailable as exc:
-            _raise_503(exc, "set_active_agent")
+        """Deprecated: global active agent has been removed.
+
+        Agent binding is now per-conversation: pass agent_id in the
+        POST /api/v1/chat request body. This endpoint is a no-op kept
+        for backward compatibility with existing frontend calls.
+        """
+        return {"ok": True, "active_agent_id": agent_id, "deprecated": True}
 
     # ------------------------------------------------------------------
     # Per-agent capabilities
