@@ -12,12 +12,14 @@ import { useState } from 'react'
 import { QRCodeSVG } from 'qrcode.react'
 import { sileo } from 'sileo'
 import { mfaEnroll } from '../api/client'
+import { useT } from '../lib/i18n'
 
 interface MfaEnrollProps {
   onEnrolled(): void
 }
 
 export default function MfaEnroll({ onEnrolled }: MfaEnrollProps) {
+  const t = useT()
   const [otpauthUri, setOtpauthUri] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
@@ -31,7 +33,7 @@ export default function MfaEnroll({ onEnrolled }: MfaEnrollProps) {
       const res = await mfaEnroll(null)
       setOtpauthUri(res.otpauth_uri ?? null)
     } catch (err) {
-      sileo.error({ title: `No se pudo activar MFA: ${err instanceof Error ? err.message : err}` })
+      sileo.error({ title: t('mfa_enroll.err').replace('{err}', err instanceof Error ? err.message : String(err)) })
     } finally {
       setBusy(false)
     }
@@ -45,7 +47,7 @@ export default function MfaEnroll({ onEnrolled }: MfaEnrollProps) {
         disabled={busy}
         type="button"
       >
-        {busy ? 'Activando…' : 'Activar MFA'}
+        {busy ? t('mfa_enroll.activating') : t('mfa_enroll.activate')}
       </button>
     )
   }
@@ -75,7 +77,7 @@ export default function MfaEnroll({ onEnrolled }: MfaEnrollProps) {
         onClick={onEnrolled}
         type="button"
       >
-        Ya lo tengo configurado
+        {t('mfa_enroll.done')}
       </button>
     </div>
   )

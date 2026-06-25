@@ -10,6 +10,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { sileo } from 'sileo'
 import { Save } from 'lucide-react'
+import { useT } from '../lib/i18n'
 import {
   listPendingApprovals,
   mfaStatus,
@@ -56,6 +57,7 @@ import {
 const POLL_INTERVAL_MS = 3000
 
 function ApprovalsSection({ mfaDisabled }: { mfaDisabled: boolean }) {
+  const t = useT()
   const [approvals, setApprovals] = useState<PendingApproval[]>([])
   const [loading, setLoading] = useState(true)
 
@@ -73,11 +75,11 @@ function ApprovalsSection({ mfaDisabled }: { mfaDisabled: boolean }) {
 
   return (
     <section className="cv-section">
-      <div className="cv-section-label">Aprobaciones pendientes</div>
+      <div className="cv-section-label">{t('seg.approvals.label')}</div>
       {loading ? (
-        <div className="cv-skeleton" aria-busy="true" aria-label="Cargando aprobaciones…" />
+        <div className="cv-skeleton" aria-busy="true" aria-label="Cargando…" />
       ) : approvals.length === 0 ? (
-        <div className="cv-empty">Sin aprobaciones pendientes.</div>
+        <div className="cv-empty">{t('seg.approvals.empty')}</div>
       ) : (
         <div className="cv-list">
           <AnimatePresence initial={false}>
@@ -99,10 +101,12 @@ function ApprovalsSection({ mfaDisabled }: { mfaDisabled: boolean }) {
 
 // ── Governance section ────────────────────────────────────────────────────────
 
-const PRESETS: Array<[string, string, string]> = [
-  ['equilibrado', 'Equilibrado', 'Herramientas estándar activas; las de mayor riesgo (most_delicate) requieren tu aprobación explícita'],
-  ['permisivo', 'Permisivo', 'Todas las herramientas activas — el agente actúa sin restricciones, bajo tu responsabilidad'],
-  ['bloqueado', 'Bloqueado', 'Todas las herramientas desactivadas — el agente no puede ejecutar ninguna acción'],
+// PRESETS are defined as a function so they can use the translator.
+// The tuple is [id, label] — descriptions come from t() in the component.
+const PRESET_IDS: Array<[string, string]> = [
+  ['equilibrado', 'Equilibrado'],
+  ['permisivo',   'Permisivo'],
+  ['bloqueado',   'Bloqueado'],
 ]
 
 /**
@@ -157,14 +161,15 @@ function aggregateDelicacy(entries: PolicyCatalogEntry[]): DelicacyLevel {
 }
 
 function DelicacyBadge({ level, size = 'normal' }: { level: DelicacyLevel; size?: 'normal' | 'sm' }) {
+  const t = useT()
   if (level === 'normal') return null
-  const label = level === 'most_delicate' ? 'Muy delicado' : 'Delicado'
+  const label = level === 'most_delicate' ? t('seg.badge.approval') : t('seg.badge.attention')
   const color = level === 'most_delicate' ? 'var(--danger)' : 'var(--warn)'
   return (
     <span
       className={`seg-pol-badge ${size === 'sm' ? 'seg-pol-badge--sm' : ''}`}
       style={{ color, background: `${color}22` }}
-      aria-label={`Nivel de delicadeza: ${label}`}
+      aria-label={label}
     >
       {label}
     </span>
@@ -300,6 +305,7 @@ interface ToolRowProps {
 }
 
 function ToolRow({ entry, busy, onToggle }: ToolRowProps) {
+  const t = useT()
   const checkId = `tool-${entry.name}`
   const tipId = `tool-tip-${entry.name}`
   const notVisible = !entry.llm_visible
@@ -328,10 +334,10 @@ function ToolRow({ entry, busy, onToggle }: ToolRowProps) {
         <span
           id={tipId}
           className="seg-pol-tool-native"
-          title="El agente usa el equivalente nativo; esta herramienta no aparece en el catálogo del LLM"
-          aria-label="Usa equivalente nativo"
+          title={t('seg.tool.native.tip')}
+          aria-label={t('seg.tool.native.label')}
         >
-          nativo
+          {t('seg.tool.native.label')}
         </span>
       )}
     </motion.li>
@@ -348,6 +354,7 @@ type PendingAction =
 // ── Governance section ────────────────────────────────────────────────────────
 
 function GovernanceSection() {
+  const t = useT()
   const [mfa, setMfa] = useState<MfaStatus | null>(null)
   const [pol, setPol] = useState<PoliciesResponse | null>(null)
   const [loading, setLoading] = useState(true)
@@ -424,11 +431,11 @@ function GovernanceSection() {
     setToolPending({})
     try {
       await setPolicyTools(changes, '')
-      sileo.success({ title: 'Cambios guardados' })
+      sileo.success({ title: t('seg.save.ok') })
       await load()
     } catch (err) {
       await load()
-      sileo.error({ title: `No se pudo guardar: ${err instanceof Error ? err.message : err}` })
+      sileo.error({ title: t('seg.save.err').replace('{err}', err instanceof Error ? err.message : String(err)) })
     } finally {
       setBusy(false)
     }
@@ -441,7 +448,7 @@ function GovernanceSection() {
     try {
       if (pendingAction.kind === 'preset') {
         await setPolicyPreset(pendingAction.preset, factors.totp)
-        sileo.success({ title: `Preset «${pendingAction.preset}» aplicado` })
+        sileo.success({ title: t('seg.preset.ok').replace('{preset}', pendingAction.preset) })
         setPendingPreset(null)
         setPendingAction(null)
         await load()
@@ -459,13 +466,13 @@ function GovernanceSection() {
         setToolPending({})
         try {
           await setPolicyTools(pendingAction.changes, factors.totp)
-          sileo.success({ title: 'Cambios guardados' })
+          sileo.success({ title: t('seg.save.ok') })
           setPendingAction(null)
           await load()
         } catch (err) {
           // Revert optimistic update
           await load()
-          sileo.error({ title: `No se pudo guardar: ${err instanceof Error ? err.message : err}` })
+          sileo.error({ title: t('seg.save.err').replace('{err}', err instanceof Error ? err.message : String(err)) })
           return
         }
 
@@ -473,14 +480,14 @@ function GovernanceSection() {
         await setMfaOnDangers(pendingAction.enabled, factors.totp)
         sileo.success({
           title: pendingAction.enabled
-            ? 'Verificación en peligrosos: activa'
-            : 'Verificación en peligrosos: desactivada',
+            ? t('seg.dangers.on.ok')
+            : t('seg.dangers.off.ok'),
         })
         setPol(prev => prev ? { ...prev, mfa_on_dangers: pendingAction.enabled } : prev)
         setPendingAction(null)
       }
     } catch (err) {
-      sileo.error({ title: `No se pudo aplicar: ${err instanceof Error ? err.message : err}` })
+      sileo.error({ title: t('seg.preset.err').replace('{err}', err instanceof Error ? err.message : String(err)) })
       return
     } finally {
       setBusy(false)
@@ -492,16 +499,16 @@ function GovernanceSection() {
   function requestPresetSave() {
     if (!pendingPreset) return
     if (mfaDisabled) {
-      // No MFA required: persist directly without opening the modal
+      // No verification required: persist directly without opening the modal
       setBusy(true)
       void setPolicyPreset(pendingPreset, '')
         .then(() => {
-          sileo.success({ title: `Preset «${pendingPreset}» aplicado` })
+          sileo.success({ title: t('seg.preset.ok').replace('{preset}', pendingPreset) })
           setPendingPreset(null)
           return load()
         })
         .catch(err => {
-          sileo.error({ title: `No se pudo aplicar: ${err instanceof Error ? err.message : err}` })
+          sileo.error({ title: t('seg.preset.err').replace('{err}', err instanceof Error ? err.message : String(err)) })
         })
         .finally(() => setBusy(false))
     } else {
@@ -545,10 +552,10 @@ function GovernanceSection() {
         setBusy(true)
         try {
           await setMfaOnDangers(true, '')
-          sileo.success({ title: 'Verificación en peligrosos: activa' })
+          sileo.success({ title: t('seg.dangers.on.ok') })
           setPol(prev => prev ? { ...prev, mfa_on_dangers: true } : prev)
         } catch (err) {
-          sileo.error({ title: `No se pudo activar: ${err instanceof Error ? err.message : err}` })
+          sileo.error({ title: t('seg.preset.err').replace('{err}', err instanceof Error ? err.message : String(err)) })
         } finally {
           setBusy(false)
         }
@@ -575,15 +582,15 @@ function GovernanceSection() {
 
   return (
     <>
-      {/* ── MFA Modal — kept outside Stagger so it renders above all sections */}
+      {/* ── Verification Modal — kept outside Stagger so it renders above all sections */}
       {pendingAction && (
         <MfaModal
           title={
             pendingAction.kind === 'preset'
-              ? `Aplicar preset «${pendingAction.preset}»`
+              ? t('seg.mfa_modal.preset').replace('{preset}', pendingAction.preset)
               : pendingAction.kind === 'mfa_dangers'
-              ? 'Desactivar verificación en peligrosos'
-              : 'Guardar cambios de capacidades'
+              ? t('seg.mfa_modal.dangers_off')
+              : t('seg.mfa_modal.tools')
           }
           onSign={handleSign}
           onCancel={() => {
@@ -596,43 +603,43 @@ function GovernanceSection() {
         />
       )}
 
-      {/* ── MFA enrollment ── */}
+      {/* ── Two-step verification enrollment ── */}
       <section className="cv-section">
-        <div className="cv-section-label">Tu verificación (MFA)</div>
+        <div className="cv-section-label">{t('seg.mfa.label')}</div>
         <div className="seg-card">
           <p className="seg-card__intro">
             {mfa.enrolled
-              ? 'MFA activo. Aprobar acciones peligrosas y cambiar políticas requiere tu código.'
-              : 'Sin MFA no puedes aprobar acciones peligrosas. Actívalo con tu app de autenticación.'}
+              ? t('seg.mfa.enrolled')
+              : t('seg.mfa.not_enrolled')}
           </p>
 
           {!mfa.enrolled && <MfaEnroll onEnrolled={load} />}
         </div>
       </section>
 
-      {/* ── Policies ── */}
+      {/* ── Permissions ── */}
       <section className="cv-section">
-        <div className="cv-section-label">Políticas de seguridad — qué puede hacer el agente</div>
+        <div className="cv-section-label">{t('seg.policies.label')}</div>
         <div className="seg-card">
           <p className="seg-card__intro">
-            Cambiar cualquier política requiere tu código MFA (así el agente nunca abre su propia jaula).
+            {t('seg.policies.intro')}
           </p>
 
-          {/* MFA on dangers global toggle */}
+          {/* Verification on sensitive actions toggle */}
           <div className="seg-pol-danger-row">
             <div className="seg-pol-danger-row__info">
               <span className="seg-pol-danger-row__label">
-                Pedir mi MFA para los comandos peligrosos
+                {t('seg.policies.dangers.label')}
               </span>
               <span className="seg-pol-danger-row__hint">
                 {mfaDisabled
-                  ? 'Desactivado — el agente ejecuta acciones peligrosas sin pedirte confirmación.'
-                  : 'Si lo desactivas, el agente ejecuta acciones peligrosas en autónomo sin pedírtelo. Recomendado mantenerlo activo.'}
+                  ? t('seg.policies.dangers.off')
+                  : t('seg.policies.dangers.on')}
               </span>
             </div>
             <ToggleSwitch
               id="toggle-mfa-dangers"
-              aria-label="Pedir MFA para comandos peligrosos"
+              aria-label={t('seg.policies.dangers.label')}
               checked={pol.mfa_on_dangers ?? true}
               disabled={busy}
               onChange={requestMfaDangersToggle}
@@ -643,19 +650,26 @@ function GovernanceSection() {
           <div>
             <div className="seg-pol-sub-label">Preset rápido</div>
             <div className="seg-presets">
-              {PRESETS.map(([id, label, desc]) => (
-                <button
-                  key={id}
-                  className={`cv-btn cv-btn--sm ${currentPreset === id ? 'cv-btn--primary' : 'cv-btn--secondary'}`}
-                  title={desc}
-                  onClick={() => setPendingPreset(id)}
-                  type="button"
-                  disabled={busy}
-                  aria-pressed={currentPreset === id}
-                >
-                  {label}
-                </button>
-              ))}
+              {PRESET_IDS.map(([id, label]) => {
+                const desc = t(
+                  id === 'equilibrado' ? 'seg.preset.equilibrado.desc'
+                  : id === 'permisivo' ? 'seg.preset.permisivo.desc'
+                  : 'seg.preset.bloqueado.desc'
+                )
+                return (
+                  <button
+                    key={id}
+                    className={`cv-btn cv-btn--sm ${currentPreset === id ? 'cv-btn--primary' : 'cv-btn--secondary'}`}
+                    title={desc}
+                    onClick={() => setPendingPreset(id)}
+                    type="button"
+                    disabled={busy}
+                    aria-pressed={currentPreset === id}
+                  >
+                    {label}
+                  </button>
+                )
+              })}
             </div>
 
             {/* Animated preset-save bar — slides in when a preset is pending */}
@@ -670,7 +684,7 @@ function GovernanceSection() {
                   transition={TWEEN}
                 >
                   <span className="seg-pol-preset-hint">
-                    Vista previa del preset «{pendingPreset}» — las capacidades de abajo ya reflejan el cambio. Guarda para aplicarlo.
+                    {t('seg.policies.preset.hint').replace('{preset}', pendingPreset ?? '')}
                   </span>
                   <button
                     type="button"
@@ -851,8 +865,9 @@ interface EgressModeToggleProps {
 }
 
 function EgressModeToggle({ mode, busy, onRequest }: EgressModeToggleProps) {
+  const t = useT()
   return (
-    <div className="seg-egress-mode-toggle" role="group" aria-label="Modo de acceso a red">
+    <div className="seg-egress-mode-toggle" role="group" aria-label={t('seg.network.mode.label')}>
       <button
         type="button"
         className={`seg-egress-mode-toggle__btn ${mode === 'allow' ? 'seg-egress-mode-toggle__btn--active' : ''}`}
@@ -860,7 +875,7 @@ function EgressModeToggle({ mode, busy, onRequest }: EgressModeToggleProps) {
         disabled={busy || mode === 'allow'}
         onClick={() => onRequest('allow')}
       >
-        Permitido
+        {t('seg.network.allow')}
       </button>
       <button
         type="button"
@@ -869,7 +884,7 @@ function EgressModeToggle({ mode, busy, onRequest }: EgressModeToggleProps) {
         disabled={busy || mode === 'deny'}
         onClick={() => onRequest('deny')}
       >
-        Bloqueado
+        {t('seg.network.deny')}
       </button>
     </div>
   )
@@ -885,6 +900,7 @@ interface AllowModeProps {
 }
 
 function AllowModePanel({ denyList, blocklistCount, onAdd, onRemove }: AllowModeProps) {
+  const t = useT()
   const [input, setInput] = useState('')
 
   async function handleAdd() {
@@ -903,8 +919,7 @@ function AllowModePanel({ denyList, blocklistCount, onAdd, onRemove }: AllowMode
       transition={TWEEN}
     >
       <p className="seg-card__intro">
-        El agente puede acceder a internet. El sistema bloquea automaticamente
-        sitios maliciosos conocidos, y tu puedes bloquear sitios concretos.
+        {t('seg.network.allow.intro')}
       </p>
 
       {blocklistCount != null && blocklistCount > 0 && (
@@ -942,7 +957,7 @@ function AllowModePanel({ denyList, blocklistCount, onAdd, onRemove }: AllowMode
       </div>
 
       {denyList.length === 0 ? (
-        <p className="cv-empty">Ningun dominio bloqueado manualmente.</p>
+        <p className="cv-empty">{t('seg.network.none_blocked')}</p>
       ) : (
         <ul className="cv-list" aria-label="Dominios bloqueados manualmente">
           <AnimatePresence initial={false}>
@@ -975,6 +990,7 @@ interface DenyModeProps {
 }
 
 function DenyModePanel({ allowList, onGrant, onRevoke }: DenyModeProps) {
+  const t = useT()
   const [input, setInput] = useState('')
 
   async function handleGrant() {
@@ -993,9 +1009,7 @@ function DenyModePanel({ allowList, onGrant, onRevoke }: DenyModeProps) {
       transition={TWEEN}
     >
       <p className="seg-card__intro">
-        Por defecto el agente no puede acceder a ningun sitio web. Autoriza
-        dominios concretos (p.ej. <code>pypi.org</code>, <code>github.com</code>).
-        Aplica al navegador y al terminal del agente.
+        {t('seg.network.deny.intro')}
       </p>
 
       <div className="cv-form-inline" style={{ marginBottom: 'var(--sp-2)' }}>
@@ -1003,7 +1017,7 @@ function DenyModePanel({ allowList, onGrant, onRevoke }: DenyModeProps) {
           id="egress-grant-input"
           className="cv-input"
           type="text"
-          placeholder="dominio (ej. github.com)"
+          placeholder="dominio (ej. tu-erp.empresa.com)"
           autoComplete="off"
           spellCheck={false}
           value={input}
@@ -1022,7 +1036,7 @@ function DenyModePanel({ allowList, onGrant, onRevoke }: DenyModeProps) {
       </div>
 
       {allowList.length === 0 ? (
-        <p className="cv-empty">Ningun dominio autorizado — el agente no accede a la red.</p>
+        <p className="cv-empty">{t('seg.network.none_allowed')}</p>
       ) : (
         <ul className="cv-list" aria-label="Dominios autorizados">
           <AnimatePresence initial={false}>
@@ -1033,9 +1047,9 @@ function DenyModePanel({ allowList, onGrant, onRevoke }: DenyModeProps) {
                   className="cv-btn cv-btn--ghost cv-btn--sm"
                   onClick={() => { void onRevoke(d) }}
                   type="button"
-                  aria-label={`Revocar dominio ${d}`}
+                  aria-label={`${t('seg.network.revoke')} ${d}`}
                 >
-                  Revocar
+                  {t('seg.network.revoke')}
                 </button>
               </AnimatedListItem>
             ))}
@@ -1049,10 +1063,11 @@ function DenyModePanel({ allowList, onGrant, onRevoke }: DenyModeProps) {
 // ── EgressSection ─────────────────────────────────────────────────────────────
 
 function EgressSection() {
+  const t = useT()
   const [state, setState] = useState<EgressModeResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
-  // MFA modal: holds the requested next mode while waiting for TOTP
+  // Verification modal: holds the requested next mode while waiting for TOTP
   const [pendingMode, setPendingMode] = useState<EgressMode | null>(null)
 
   const load = useCallback(async () => {
@@ -1080,14 +1095,14 @@ function EgressSection() {
       await setEgressMode(pendingMode, factors.totp)
       sileo.success({
         title: pendingMode === 'allow'
-          ? 'Modo Permitido activado'
-          : 'Modo Bloqueado activado',
+          ? t('seg.allow_mode.ok')
+          : t('seg.deny_mode.ok'),
       })
       await load()
     } catch (err) {
       // Revert
       setState(prev)
-      sileo.error({ title: `No se pudo cambiar el modo: ${err instanceof Error ? err.message : err}` })
+      sileo.error({ title: t('seg.save.err').replace('{err}', err instanceof Error ? err.message : String(err)) })
     } finally {
       setBusy(false)
     }
@@ -1155,12 +1170,12 @@ function EgressSection() {
 
   return (
     <section className="cv-section">
-      <div className="cv-section-label">Permisos de red</div>
+      <div className="cv-section-label">{t('seg.network.label')}</div>
 
-      {/* MFA modal for mode change — rendered outside the card so it layers above */}
+      {/* Verification modal for mode change — rendered outside the card so it layers above */}
       {pendingMode && (
         <MfaModal
-          title={pendingMode === 'allow' ? 'Activar modo Permitido' : 'Activar modo Bloqueado'}
+          title={pendingMode === 'allow' ? t('seg.allow_mode.ok') : t('seg.deny_mode.ok')}
           onSign={handleModeSign}
           onCancel={() => setPendingMode(null)}
         />
@@ -1168,15 +1183,15 @@ function EgressSection() {
 
       <div className="seg-card">
         {loading ? (
-          <div className="cv-skeleton" aria-busy="true" aria-label="Cargando permisos de red..." />
+          <div className="cv-skeleton" aria-busy="true" aria-label="Cargando…" />
         ) : state != null ? (
           <>
             {/* Mode toggle */}
             <div className="seg-egress-mode-row">
               <div className="seg-egress-mode-row__info">
-                <span className="seg-egress-mode-row__label">Modo de acceso</span>
+                <span className="seg-egress-mode-row__label">{t('seg.network.mode.label')}</span>
                 <span className="seg-egress-mode-row__hint">
-                  Cambiar el modo requiere tu codigo MFA.
+                  {t('seg.network.mode.hint')}
                 </span>
               </div>
               <EgressModeToggle
@@ -1236,6 +1251,7 @@ function SeverityBadge({ severity }: { severity: string }) {
 // ── Scan row ──────────────────────────────────────────────────────────────────
 
 function ScanRow({ scan }: { scan: SecurityScan }) {
+  const t = useT()
   const [showModal, setShowModal] = useState(false)
   const [busy, setBusy] = useState(false)
   const [allowed, setAllowed] = useState(
@@ -1286,7 +1302,7 @@ function ScanRow({ scan }: { scan: SecurityScan }) {
         )}
         {allowed && (
           <span className="seg-severity-badge" style={{ color: '#34D399', background: '#34D39922' }}>
-            PERMITIDO
+            {t('seg.scan.allowed')}
           </span>
         )}
         {flagged && !allowed && scanId && (
@@ -1296,7 +1312,7 @@ function ScanRow({ scan }: { scan: SecurityScan }) {
             type="button"
             disabled={busy}
           >
-            Permitir igualmente
+            {t('seg.scan.allow')}
           </button>
         )}
       </div>
@@ -1315,6 +1331,7 @@ function ScanRow({ scan }: { scan: SecurityScan }) {
 // ── Security center section ───────────────────────────────────────────────────
 
 function SecurityCenterSection() {
+  const t = useT()
   const [scans, setScans] = useState<SecurityScan[] | null>(null)
   const [loading, setLoading] = useState(true)
 
@@ -1325,14 +1342,14 @@ function SecurityCenterSection() {
   }, [])
 
   if (loading) {
-    return <div className="cv-skeleton" aria-busy="true" aria-label="Cargando centro de seguridad…" />
+    return <div className="cv-skeleton" aria-busy="true" aria-label="Cargando…" />
   }
 
   return (
     <section className="cv-section">
-      <div className="cv-section-label">Escaneos recientes</div>
+      <div className="cv-section-label">{t('seg.scans.label')}</div>
       {!scans || scans.length === 0 ? (
-        <p className="cv-empty">Sin escaneos recientes.</p>
+        <p className="cv-empty">{t('seg.scans.empty')}</p>
       ) : (
         <div className="cv-list">
           <AnimatePresence initial={false}>

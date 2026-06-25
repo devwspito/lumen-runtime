@@ -146,7 +146,7 @@ function statusMeta(status: string): { label: string } {
   const s = String(status).toLowerCase()
   if (s === 'completed' || s === 'done' || s === 'success') return { label: 'Completada' }
   if (s === 'in_progress' || s === 'running' || s === 'claimed') return { label: 'En curso' }
-  if (s === 'failed' || s === 'error') return { label: 'Falló' }
+  if (s === 'failed' || s === 'error') return { label: 'No se completó' }
   return { label: status }
 }
 
