@@ -53,26 +53,78 @@ def _conn(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+_GOVERNANCE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS skill_packages_view (
+  package_id         TEXT PRIMARY KEY,
+  skill_id           TEXT NOT NULL,
+  skill_name         TEXT NOT NULL,
+  version            INTEGER NOT NULL,
+  state              TEXT NOT NULL,
+  surface_kinds      TEXT NOT NULL,
+  signed_at          TEXT NOT NULL,
+  signature_short    TEXT,
+  validated_at       TEXT,
+  validated_by       TEXT,
+  promoted_at        TEXT,
+  promoted_by        TEXT,
+  signing_method     TEXT NOT NULL DEFAULT 'v1',
+  signature_hex      TEXT
+);
+CREATE INDEX IF NOT EXISTS skill_state_idx
+  ON skill_packages_view (state, signed_at DESC);
+
+CREATE TABLE IF NOT EXISTS composio_skills (
+  package_id   TEXT PRIMARY KEY,
+  toolkit_slug TEXT NOT NULL,
+  intent_text  TEXT NOT NULL,
+  created_at   TEXT NOT NULL
+);
+"""
+
+_GOVERNANCE_MIGRATIONS = [
+    "ALTER TABLE skill_packages_view ADD COLUMN validated_at TEXT",
+    "ALTER TABLE skill_packages_view ADD COLUMN validated_by TEXT",
+    "ALTER TABLE skill_packages_view ADD COLUMN promoted_at TEXT",
+    "ALTER TABLE skill_packages_view ADD COLUMN promoted_by TEXT",
+    "UPDATE skill_packages_view SET state = 'validated' WHERE state = 'signed'",
+    "ALTER TABLE skill_packages_view ADD COLUMN signing_method TEXT NOT NULL DEFAULT 'v1'",
+    "ALTER TABLE skill_packages_view ADD COLUMN signature_hex TEXT",
+]
+
+
 class SkillGovernanceService:
     """Realiza mutaciones de estado en skills con autoría verificada.
 
     Inyectado en DbusRuntimeServiceWiring como skill_governance.
     No contiene lógica de authZ — eso ya lo aplicó el wiring antes de llamar.
+
+    skill_packages_view is the governance table for promote/deprecate operations.
+    It is NOT used for skill listing (list_skills_native() reads the filesystem).
     """
 
     def __init__(self, *, db_path: Path) -> None:
         self._db_path = db_path
-        # Ensure the skills schema exists. In the desktop the shell-server's
-        # audit_api.init_schema creates skill_packages_view at startup; in the
-        # terminal variant the shell-server is masked, so the daemon must ensure
-        # it here (idempotent CREATE IF NOT EXISTS) or list_skills raises
-        # "no such table: skill_packages_view". Fail-soft: never block boot.
+        # Ensure governance schema (skill_packages_view) exists. This table is
+        # used exclusively for promote/deprecate state mutations and composio skill
+        # rows. It is NOT the source of truth for listing (that is the filesystem).
         try:
-            from hermes.shell_server.audit_api import init_schema  # noqa: PLC0415
-
-            init_schema(db_path)
+            self._ensure_governance_schema(db_path)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("skill schema ensure failed (non-fatal): %s", exc)
+            logger.warning("skill governance schema ensure failed (non-fatal): %s", exc)
+
+    def _ensure_governance_schema(self, db_path: Path) -> None:
+        """Create skill_packages_view and run idempotent migrations."""
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        with _conn(db_path) as conn:
+            conn.executescript("PRAGMA journal_mode=WAL;")
+            conn.executescript(_GOVERNANCE_SCHEMA)
+        with _conn(db_path) as conn:
+            for sql in _GOVERNANCE_MIGRATIONS:
+                try:
+                    conn.execute(sql)
+                except Exception as exc:  # noqa: BLE001
+                    if "duplicate column" not in str(exc).lower():
+                        logger.debug("governance migration skipped: %s — %s", sql[:60], exc)
 
     def list_skills(self) -> list[dict]:
         """Retorna metadatos de todas las skills (sin payload/intent) — supervisión."""
@@ -104,8 +156,14 @@ class SkillGovernanceService:
         Fail-closed: si signature_hex está ausente, es v1, o no verifica →
         SkillSignatureVerificationFailed. Nunca se promueve sin firma válida.
 
+        For cage-signed skills written directly to disk via SkillStoreAdapter
+        (which no longer writes to skill_packages_view), falls back to the
+        SKILL.md frontmatter on disk: reads the package, verifies the signature,
+        then inserts a row into skill_packages_view before promoting.
+        Composio skills continue to use the pure-DB path.
+
         Raises:
-            SkillNotFound: si el package_id no existe.
+            SkillNotFound: si el package_id no existe en DB ni en disco.
             SkillStateTransitionForbidden: si el estado actual no permite la transición.
             SkillSignatureVerificationFailed: si la firma no verifica (fail-closed).
         """
@@ -129,9 +187,47 @@ class SkillGovernanceService:
                 """,
                 (package_id,),
             ).fetchone()
+
             if row is None:
-                conn.execute("ROLLBACK")
-                raise SkillNotFound(package_id)
+                # Not in DB — check if it's a cage-signed skill on disk (Finding #2).
+                disk_row = _find_disk_skill_by_package_id(package_id)
+                if disk_row is None:
+                    conn.execute("ROLLBACK")
+                    raise SkillNotFound(package_id)
+                # Verify signature before writing a governance row.
+                _verify_disk_skill_signature_for_promotion(disk_row, package_id)
+                # Insert a governance row so the UPDATE below can proceed.
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO skill_packages_view (
+                      package_id, skill_id, skill_name, version, state,
+                      surface_kinds, signed_at, signature_short,
+                      signing_method, signature_hex, validated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        disk_row["package_id"],
+                        disk_row["skill_id"],
+                        disk_row["skill_name"],
+                        disk_row["version"],
+                        disk_row["state"],
+                        ",".join(disk_row.get("surface_kinds") or []),
+                        disk_row["signed_at"],
+                        disk_row.get("signature_short"),
+                        disk_row.get("signing_method", "v2"),
+                        disk_row.get("signature_hex"),
+                        disk_row.get("validated_at"),
+                    ),
+                )
+                # Re-fetch the newly inserted row so promote logic below is uniform.
+                row = conn.execute(
+                    """
+                    SELECT spv.*, NULL AS toolkit_slug, NULL AS intent_text
+                      FROM skill_packages_view spv
+                     WHERE spv.package_id = ?
+                    """,
+                    (package_id,),
+                ).fetchone()
 
             current = _coerce_state(row["state"])
             try:
@@ -404,3 +500,137 @@ def _verify_recorded_signature(
         "skill_governance.recorded_skill_promotion_gate_passed package_id=%s",
         package_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# Disk-skill helpers for promote_skill (Finding #2 fix)
+# ---------------------------------------------------------------------------
+
+
+def _find_disk_skill_by_package_id(package_id: str) -> "dict | None":
+    """Scan $HERMES_HOME/skills/ for a SKILL.md whose frontmatter.metadata.package_id matches.
+
+    Returns a DTO-shaped dict when found, None when not found or env is unset.
+    This is the fallback path in promote_skill for cage-signed skills that
+    live only on disk (not in skill_packages_view).
+    """
+    import os as _os  # noqa: PLC0415
+    from pathlib import Path as _Path  # noqa: PLC0415
+
+    try:
+        import yaml as _yaml  # noqa: PLC0415
+    except ImportError:
+        return None
+
+    hermes_home = _os.environ.get("HERMES_HOME", "")
+    if not hermes_home:
+        return None
+
+    skills_root = _Path(hermes_home) / "skills"
+    if not skills_root.is_dir():
+        return None
+
+    for skill_md in skills_root.rglob("SKILL.md"):
+        try:
+            text = skill_md.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if not text.startswith("---"):
+            continue
+        end = text.find("---", 3)
+        if end == -1:
+            continue
+        try:
+            fm = _yaml.safe_load(text[3:end]) or {}
+        except Exception:  # noqa: BLE001
+            continue
+        if not isinstance(fm, dict):
+            continue
+        meta: dict = fm.get("metadata") or {}
+        if meta.get("package_id") == package_id:
+            sig_hex = meta.get("signature_hex") or None
+            return {
+                "package_id": package_id,
+                "skill_id": meta.get("skill_id") or "",
+                "skill_name": skill_md.parent.name,
+                "version": int(meta.get("version") or 1),
+                "state": meta.get("state") or "validated",
+                "surface_kinds": meta.get("surface_kinds") or ["skill_store"],
+                "signed_at": meta.get("signed_at") or "",
+                "signature_short": sig_hex[:12] if sig_hex else None,
+                "signing_method": meta.get("signing_method") or "v2",
+                "signature_hex": sig_hex,
+                "validated_at": meta.get("validated_at"),
+                # Fields for HMAC re-derivation
+                "_meta": meta,
+            }
+    return None
+
+
+def _verify_disk_skill_signature_for_promotion(disk_row: dict, package_id: str) -> None:
+    """Verify the HMAC-SHA256 v2 signature of a disk-based skill before promoting.
+
+    Fail-closed: any failure raises SkillSignatureVerificationFailed.
+    Re-derives the canonical payload from the stored frontmatter fields
+    (which include all fields used by build_canonical_payload).
+
+    Raises:
+        SkillSignatureVerificationFailed: on any verification failure.
+    """
+    import hashlib as _hashlib  # noqa: PLC0415
+    import hmac as _hmac  # noqa: PLC0415
+    import json as _json  # noqa: PLC0415
+
+    signing_method = disk_row.get("signing_method")
+    signature_hex = disk_row.get("signature_hex")
+
+    if signing_method != "v2":
+        raise SkillSignatureVerificationFailed(
+            f"Disk skill {package_id}: signing_method='{signing_method}' — "
+            "solo se aceptan firmas v2 para promover a AUTONOMOUS (fail-closed)."
+        )
+    if not signature_hex or len(signature_hex) != 64:
+        raise SkillSignatureVerificationFailed(
+            f"Disk skill {package_id}: signature_hex ausente o incompleto — "
+            "no se puede verificar (fail-closed)."
+        )
+
+    try:
+        from hermes.shell_server.skills.native_keystore_adapter import (  # noqa: PLC0415
+            NativeKeyStoreAdapter,
+        )
+        signing_key = NativeKeyStoreAdapter().get_signing_key_sync()
+    except Exception as exc:
+        raise SkillSignatureVerificationFailed(
+            f"Disk skill {package_id}: no se pudo obtener la clave de firma — {exc}"
+        ) from exc
+
+    meta: dict = disk_row.get("_meta") or {}
+    try:
+        payload_dict = {
+            "replay_script_id": meta["replay_script_id"],
+            "decision_rule_ids": sorted(meta.get("decision_rule_ids") or []),
+            "voice_narrative_id": meta["voice_narrative_id"],
+            "content_hash": meta["content_hash"],
+            "tenant_id": meta["tenant_id"],
+            "compiled_by_operator_id": meta["compiled_by_operator_id"],
+            "created_at": meta["created_at"],
+            "runtime_version": meta["runtime_version"],
+        }
+    except KeyError as exc:
+        raise SkillSignatureVerificationFailed(
+            f"Disk skill {package_id}: frontmatter is missing HMAC field {exc} — "
+            "this skill was signed before Finding #1 fix; re-create to get verifiable "
+            "governance metadata (fail-closed)."
+        ) from exc
+
+    canonical = _json.dumps(payload_dict, sort_keys=True, separators=(",", ":")).encode()
+    expected = _hmac.new(signing_key, canonical, _hashlib.sha256).hexdigest()
+    if not _hmac.compare_digest(expected, signature_hex):
+        logger.warning(
+            "skill_governance.disk_skill_signature_mismatch package_id=%s", package_id
+        )
+        raise SkillSignatureVerificationFailed(
+            f"Disk skill {package_id}: HMAC v2 no verifica — "
+            "el frontmatter ha sido modificado o la clave no coincide (fail-closed)."
+        )

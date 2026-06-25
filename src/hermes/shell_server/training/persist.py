@@ -1,8 +1,9 @@
-"""Shared persistence helpers for SkillPackage → skill_packages_view.
+"""Shared persistence helpers for the voice-training path.
 
-Extracted so both the REST API (hermes-shell-server) and the GTK4 shell
-process can persist a signed skill into the shared SQLite DB without
-duplicating SQL.
+Compile a SkillPackage from a recorded session and write it to the Neus
+native skills directory as a SKILL.md file with governance metadata embedded
+in the frontmatter. This makes voice-trained skills discoverable via the
+same list_skills_native() path as agent-created skills.
 
 Callers:
   - hermes.shell_server.training.api  (server-side sign endpoint)
@@ -23,9 +24,12 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import sqlite3
+import tempfile
 from pathlib import Path
-from uuid import UUID
+from typing import Any
+from uuid import UUID, uuid4
 
 from hermes.agents_os.application.skill_compiler import SkillCompiler
 from hermes.agents_os.application.training_session_orchestrator import (
@@ -33,6 +37,11 @@ from hermes.agents_os.application.training_session_orchestrator import (
     TrainingSessionState,
     VoiceCaptureRequired,
 )
+from hermes.training.domain.skill_md_document import VALID_NAME_RE, MAX_NAME_LENGTH
+
+
+class InvalidSkillNameError(ValueError):
+    """skill_name contains path-unsafe characters — write rejected."""
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +50,43 @@ def _conn(db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path, isolation_level=None)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _neus_skills_root() -> Path:
+    """Return the Neus native skills root: $HERMES_HOME/skills/."""
+    hermes_home = os.environ.get("HERMES_HOME") or "/var/lib/hermes/hermes-home"
+    return Path(hermes_home) / "skills"
+
+
+def _validate_skill_name(name: str) -> None:
+    """Reject skill names that fail VALID_NAME_RE (path traversal prevention).
+
+    Called before building any filesystem path from a caller-supplied name.
+    Raises InvalidSkillNameError on anything containing '/', '..', NUL, spaces,
+    or uppercase — matching the same rule enforced by SkillMdDocument.__post_init__.
+    """
+    if not name or len(name) > MAX_NAME_LENGTH or not VALID_NAME_RE.match(name):
+        raise InvalidSkillNameError(
+            f"Invalid skill name {name!r}: must match {VALID_NAME_RE.pattern} "
+            f"and be ≤{MAX_NAME_LENGTH} chars. Path traversal sequences are rejected."
+        )
+
+
+def _write_skill_md_atomic(skill_dir: Path, content: str) -> None:
+    """Write SKILL.md to skill_dir atomically (tempfile + os.replace)."""
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    target = skill_dir / "SKILL.md"
+    fd, tmp_path = tempfile.mkstemp(dir=str(skill_dir), prefix=".SKILL.md.tmp.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp_path, target)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def build_signing_key(db_path: Path) -> bytes:
@@ -235,54 +281,22 @@ def compile_and_persist(
     compiler = SkillCompiler(signing_key=key, extra_caption=aggregated_caption or None)
 
     try:
-        # Compute version and persist in one IMMEDIATE transaction to avoid
-        # read-then-write TOCTOU when two callers sign the same skill concurrently.
-        conn = sqlite3.connect(str(db_path), isolation_level=None)
-        conn.row_factory = sqlite3.Row
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            version = _next_version_atomic(conn, sess.skill_id)
-            try:
-                pkg = compiler.compile(session=sess, version=version)
-            except VoiceCaptureRequired:
-                conn.execute("ROLLBACK")
-                raise
-            except Exception:
-                conn.execute("ROLLBACK")
-                logger.exception("SkillCompiler.compile failed session=%s", session_id)
-                return False
-
-            surface_kinds_str = ",".join(sorted(sk.value for sk in pkg.surface_kinds))
-            full_sig = pkg.signature_hex if pkg.signature_hex else None
-            signature_short = full_sig[:12] if full_sig else None
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO skill_packages_view (
-                  package_id, skill_id, skill_name, version, state,
-                  surface_kinds, signed_at, signature_short, signing_method,
-                  signature_hex
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    str(pkg.package_id),
-                    pkg.skill_id,
-                    skill_name,
-                    pkg.version,
-                    pkg.state.value,
-                    surface_kinds_str,
-                    signed_at,
-                    signature_short,
-                    signing_method,
-                    full_sig,
-                ),
-            )
-            conn.execute("COMMIT")
-        finally:
-            conn.close()
+        pkg = compiler.compile(session=sess, version=1)
     except VoiceCaptureRequired:
         raise
     except Exception:
-        logger.exception("compile_and_persist: transaction failed session=%s", session_id)
+        logger.exception("SkillCompiler.compile failed session=%s", session_id)
+        return False
+
+    try:
+        _persist_as_skill_md(
+            pkg=pkg,
+            skill_name=skill_name,
+            signed_at=signed_at,
+            signing_method=signing_method,
+        )
+    except Exception:
+        logger.exception("compile_and_persist: SKILL.md write failed session=%s", session_id)
         return False
 
     logger.info(
@@ -292,3 +306,67 @@ def compile_and_persist(
         pkg.version,
     )
     return True
+
+
+def _persist_as_skill_md(
+    *,
+    pkg: "Any",
+    skill_name: str,
+    signed_at: str,
+    signing_method: str,
+) -> None:
+    """Write a SKILL.md for a voice-trained skill into the Neus skills dir.
+
+    Produces a minimal-but-valid SKILL.md with governance metadata so the
+    skill is discoverable via list_skills_native(). The body describes the
+    session origin so the viewer shows something meaningful.
+
+    Raises:
+        InvalidSkillNameError: if skill_name fails VALID_NAME_RE — path traversal
+            characters (/, .., NUL, spaces) are rejected before path construction.
+    """
+    _validate_skill_name(skill_name)
+    import yaml as _yaml  # noqa: PLC0415
+
+    surface_kinds = sorted(sk.value for sk in pkg.surface_kinds) if pkg.surface_kinds else []
+    governance_meta: dict = {
+        "package_id": str(pkg.package_id),
+        "skill_id": str(pkg.skill_id),
+        "state": pkg.state.value,
+        "signing_method": signing_method,
+        "signature_hex": pkg.signature_hex or "",
+        "signed_at": signed_at,
+        "validated_at": signed_at,
+        "surface_kinds": surface_kinds,
+        "version": pkg.version,
+        # Fields required for HMAC re-verification (Finding #1 / CWE-345).
+        # build_canonical_payload() in training.application.skill_signer uses all of
+        # these. They may be absent on the agents_os.application.skill_compiler
+        # SkillPackage variant (which has a different schema). Use getattr+default so
+        # voice-trained skills are still written; the frontmatter will lack HMAC fields
+        # and _skill_md_to_dto() will keep state as-is (key-unavailable path).
+        "content_hash": getattr(pkg, "content_hash", None) or "",
+        "tenant_id": str(pkg.tenant_id) if getattr(pkg, "tenant_id", None) else str(UUID(int=0)),
+        "compiled_by_operator_id": str(getattr(pkg, "compiled_by_operator_id", None) or UUID(int=0)),
+        "created_at": getattr(pkg, "created_at", None) and pkg.created_at.isoformat() or signed_at,
+        "runtime_version": getattr(pkg, "runtime_version", None) or "",
+        "replay_script_id": str(getattr(pkg, "replay_script_id", None) or UUID(int=0)),
+        "voice_narrative_id": str(getattr(pkg, "voice_narrative_id", None) or UUID(int=0)),
+        "decision_rule_ids": [str(r) for r in (getattr(pkg, "decision_rule_ids", None) or [])],
+    }
+    fm_dict: dict = {
+        "name": skill_name,
+        "description": f"Recorded skill (voice-trained session {pkg.skill_id})",
+        "version": str(pkg.version),
+        "metadata": governance_meta,
+    }
+    frontmatter = _yaml.dump(fm_dict, default_flow_style=False, allow_unicode=True).rstrip()
+    body = (
+        "## When\nUse this skill when the trained scenario is triggered.\n\n"
+        "## Procedure\nReplay the recorded session steps.\n\n"
+        f"## Notes\nOrigin: voice-training session `{pkg.skill_id}` "
+        f"| surfaces: {', '.join(surface_kinds) or 'none'}\n"
+    )
+    content = f"---\n{frontmatter}\n---\n\n{body}"
+    skill_dir = _neus_skills_root() / skill_name
+    _write_skill_md_atomic(skill_dir, content)

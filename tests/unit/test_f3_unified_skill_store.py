@@ -167,9 +167,12 @@ class TestSkillManageCreateWritesSignedSkill:
         skill_file = skill_root / "pay-invoice" / "SKILL.md"
         assert skill_file.exists(), "SKILL.md must be written to disk"
 
-    async def test_create_persists_v2_signature_to_db(
+    async def test_create_persists_v2_signature_to_skill_md(
         self, tmp_path: Path
     ) -> None:
+        """Governance fields are embedded in SKILL.md frontmatter.metadata."""
+        import yaml as _yaml
+
         db_path = tmp_path / "audit.db"
         skill_root = tmp_path / "skills"
         _init_db(db_path)
@@ -179,22 +182,25 @@ class TestSkillManageCreateWritesSignedSkill:
         outcome = await adapter.replay(action)
 
         assert outcome.status == ReplayStatus.EXECUTED_OK
-        conn = sqlite3.connect(str(db_path))
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute("SELECT * FROM skill_packages_view").fetchall()
-        conn.close()
+        skill_file = skill_root / "pay-invoice" / "SKILL.md"
+        assert skill_file.exists()
 
-        assert len(rows) == 1, "exactly one skill row in DB"
-        row = rows[0]
-        assert row["signing_method"] == "v2", "must be v2 signature"
-        assert row["signature_hex"] is not None, "signature_hex must be present"
-        assert len(row["signature_hex"]) == 64, "HMAC-SHA256 = 64 hex chars"
-        assert row["state"] == "validated", "initial state must be validated"
+        content = skill_file.read_text()
+        assert content.startswith("---")
+        end = content.find("---", 3)
+        fm = _yaml.safe_load(content[3:end]) or {}
+        meta = fm.get("metadata") or {}
+        assert meta.get("signing_method") == "v2", "must be v2 signature"
+        assert meta.get("signature_hex"), "signature_hex must be present"
+        assert len(meta["signature_hex"]) == 64, "HMAC-SHA256 = 64 hex chars"
+        assert meta.get("state") == "validated", "initial state must be validated"
 
     async def test_create_never_writes_unsigned_skill(
         self, tmp_path: Path
     ) -> None:
-        """Fail-closed: if signing were disabled, skill must not be in DB."""
+        """Fail-closed: signing always runs; governance written to frontmatter."""
+        import yaml as _yaml
+
         db_path = tmp_path / "audit.db"
         skill_root = tmp_path / "skills"
         _init_db(db_path)
@@ -202,19 +208,14 @@ class TestSkillManageCreateWritesSignedSkill:
 
         action = _make_captured_action(action="create", name="unsigned-skill")
         outcome = await adapter.replay(action)
-        # Outcome may succeed (signing works with fake KMS)
-        # but we verify the DB row has v2 sig
         if outcome.status == ReplayStatus.EXECUTED_OK:
-            conn = sqlite3.connect(str(db_path))
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                "SELECT * FROM skill_packages_view WHERE skill_name=?",
-                ("unsigned-skill",)
-            ).fetchall()
-            conn.close()
-            for row in rows:
-                assert row["signing_method"] == "v2", "must always be v2"
-                assert row["signature_hex"] is not None
+            skill_file = skill_root / "unsigned-skill" / "SKILL.md"
+            content = skill_file.read_text()
+            end = content.find("---", 3)
+            fm = _yaml.safe_load(content[3:end]) or {}
+            meta = fm.get("metadata") or {}
+            assert meta.get("signing_method") == "v2", "must always be v2"
+            assert meta.get("signature_hex") is not None
 
     async def test_create_with_bad_frontmatter_returns_failed(
         self, tmp_path: Path
@@ -579,9 +580,10 @@ class TestTeachingPathSkillMdConvergence:
 
 
 class TestBothPathsUseUnifiedStore:
-    async def test_autonomous_path_writes_to_skill_packages_view(
+    async def test_autonomous_path_writes_skill_md_to_native_dir(
         self, tmp_path: Path
     ) -> None:
+        """SkillStoreAdapter writes to the native skills dir (not only the DB)."""
         db_path = tmp_path / "audit.db"
         skill_root = tmp_path / "skills"
         _init_db(db_path)
@@ -591,15 +593,19 @@ class TestBothPathsUseUnifiedStore:
         outcome = await adapter.replay(action)
 
         assert outcome.status == ReplayStatus.EXECUTED_OK
-        # SkillGovernanceService reads from the same table
-        svc = SkillGovernanceService(db_path=db_path)
-        skills = svc.list_skills()
-        names = [s["skill_name"] for s in skills]
-        assert "auto-skill" in names
+        # The SKILL.md must exist on disk in the native skills dir
+        skill_file = skill_root / "auto-skill" / "SKILL.md"
+        assert skill_file.exists(), "SKILL.md must be written to the native dir"
 
-    async def test_governance_service_list_reflects_autonomous_skill(
+    async def test_native_list_reflects_autonomous_skill_with_governance(
         self, tmp_path: Path
     ) -> None:
+        """list_skills_native() includes cage-signed skills with their governance."""
+        import yaml as _yaml
+        from hermes.agents_os.infrastructure.dbus_runtime_service import (
+            _list_native_skills_primary,
+        )
+
         db_path = tmp_path / "audit.db"
         skill_root = tmp_path / "skills"
         _init_db(db_path)
@@ -609,14 +615,14 @@ class TestBothPathsUseUnifiedStore:
         outcome = await adapter.replay(action)
         assert outcome.status == ReplayStatus.EXECUTED_OK
 
-        svc = SkillGovernanceService(db_path=db_path)
-        skills = svc.list_skills()
+        # Enumerate via the native scanner pointing at our test skill_root
+        skills = _list_native_skills_primary(skills_root=skill_root)
         skill = next((s for s in skills if s["skill_name"] == "listed-skill"), None)
-        assert skill is not None
+        assert skill is not None, "cage-created skill must appear in native list"
         assert skill["signing_method"] == "v2"
         assert skill["state"] == "validated"
 
-    async def test_delete_action_archives_in_db_and_removes_from_disk(
+    async def test_delete_action_removes_skill_from_disk(
         self, tmp_path: Path
     ) -> None:
         db_path = tmp_path / "audit.db"
@@ -624,7 +630,6 @@ class TestBothPathsUseUnifiedStore:
         _init_db(db_path)
         adapter = _make_adapter(db_path, skill_root)
 
-        # Create first
         create_action = _make_captured_action(action="create", name="delete-me")
         outcome = await adapter.replay(create_action)
         assert outcome.status == ReplayStatus.EXECUTED_OK
@@ -632,26 +637,17 @@ class TestBothPathsUseUnifiedStore:
         skill_file = skill_root / "delete-me" / "SKILL.md"
         assert skill_file.exists()
 
-        # Delete
         delete_action = _make_captured_action(action="delete", name="delete-me")
         del_outcome = await adapter.replay(delete_action)
         assert del_outcome.status == ReplayStatus.EXECUTED_OK
-        assert not skill_file.exists()
-
-        # DB state = archived
-        conn = sqlite3.connect(str(db_path))
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT state FROM skill_packages_view WHERE skill_name=?",
-            ("delete-me",)
-        ).fetchall()
-        conn.close()
-        assert all(r["state"] == "archived" for r in rows)
+        assert not skill_file.exists(), "SKILL.md must be removed on delete"
 
     async def test_skill_manage_skill_not_autonomous_until_promoted(
         self, tmp_path: Path
     ) -> None:
         """Autonomous path starts at validated, never at autonomous (constitución)."""
+        import yaml as _yaml
+
         db_path = tmp_path / "audit.db"
         skill_root = tmp_path / "skills"
         _init_db(db_path)
@@ -661,17 +657,15 @@ class TestBothPathsUseUnifiedStore:
         outcome = await adapter.replay(action)
         assert outcome.status == ReplayStatus.EXECUTED_OK
 
-        conn = sqlite3.connect(str(db_path))
-        conn.row_factory = sqlite3.Row
-        row = conn.execute(
-            "SELECT state FROM skill_packages_view WHERE skill_name=?",
-            ("needs-promote",)
-        ).fetchone()
-        conn.close()
+        skill_file = skill_root / "needs-promote" / "SKILL.md"
+        content = skill_file.read_text()
+        end = content.find("---", 3)
+        fm = _yaml.safe_load(content[3:end]) or {}
+        meta = fm.get("metadata") or {}
 
-        # Must be validated, NOT autonomous — requires SkillGovernanceService.promote_skill
-        assert row["state"] == "validated"
-        assert row["state"] != "autonomous"
+        # Must be validated, NOT autonomous — requires promote to advance
+        assert meta.get("state") == "validated"
+        assert meta.get("state") != "autonomous"
 
 
 # ---------------------------------------------------------------------------
@@ -680,11 +674,15 @@ class TestBothPathsUseUnifiedStore:
 
 
 class TestProgressiveLoadingSignedSkills:
-    """list_skills() returns signed skills; unsigned skills never enter the store."""
+    """list_skills_native() returns signed skills; unsigned skills never enter the store."""
 
     async def test_list_skills_returns_signed_skill(
         self, tmp_path: Path
     ) -> None:
+        from hermes.agents_os.infrastructure.dbus_runtime_service import (
+            _list_native_skills_primary,
+        )
+
         db_path = tmp_path / "audit.db"
         skill_root = tmp_path / "skills"
         _init_db(db_path)
@@ -694,38 +692,41 @@ class TestProgressiveLoadingSignedSkills:
         outcome = await adapter.replay(action)
         assert outcome.status == ReplayStatus.EXECUTED_OK
 
-        svc = SkillGovernanceService(db_path=db_path)
-        skills = svc.list_skills()
+        skills = _list_native_skills_primary(skills_root=skill_root)
         assert len(skills) == 1
         assert skills[0]["skill_name"] == "loadable-skill"
 
     def test_empty_store_returns_empty_list(self, tmp_path: Path) -> None:
-        db_path = tmp_path / "audit.db"
-        _init_db(db_path)
-        svc = SkillGovernanceService(db_path=db_path)
-        skills = svc.list_skills()
+        from hermes.agents_os.infrastructure.dbus_runtime_service import (
+            _list_native_skills_primary,
+        )
+
+        empty_root = tmp_path / "skills"
+        skills = _list_native_skills_primary(skills_root=empty_root)
         assert skills == []
 
-    async def test_archived_skill_still_visible_in_list(
+    async def test_deleted_skill_not_in_native_list(
         self, tmp_path: Path
     ) -> None:
-        """Archived skills are listed (governance visibility); state=archived."""
+        """Deleted skills are removed from disk and do not appear in native list."""
+        from hermes.agents_os.infrastructure.dbus_runtime_service import (
+            _list_native_skills_primary,
+        )
+
         db_path = tmp_path / "audit.db"
         skill_root = tmp_path / "skills"
         _init_db(db_path)
         adapter = _make_adapter(db_path, skill_root)
 
-        create_action = _make_captured_action(action="create", name="arch-skill")
+        create_action = _make_captured_action(action="create", name="gone-skill")
         await adapter.replay(create_action)
 
-        delete_action = _make_captured_action(action="delete", name="arch-skill")
+        delete_action = _make_captured_action(action="delete", name="gone-skill")
         await adapter.replay(delete_action)
 
-        svc = SkillGovernanceService(db_path=db_path)
-        skills = svc.list_skills()
-        archived = [s for s in skills if s["skill_name"] == "arch-skill"]
-        assert archived, "archived skill must still appear in list for audit"
-        assert archived[0]["state"] == "archived"
+        skills = _list_native_skills_primary(skills_root=skill_root)
+        names = [s["skill_name"] for s in skills]
+        assert "gone-skill" not in names, "deleted skill must not appear in native list"
 
 
 # ---------------------------------------------------------------------------

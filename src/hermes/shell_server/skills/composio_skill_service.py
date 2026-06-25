@@ -231,6 +231,12 @@ def persist_composio_skill(
     """
     _validate_inputs(skill_name, toolkit_slug, intent_text)
 
+    # Ensure skill_packages_view schema (governance table for composio rows).
+    from hermes.shell_server.skills.skill_governance_service import (  # noqa: PLC0415
+        SkillGovernanceService,
+    )
+    SkillGovernanceService(db_path=db_path)
+
     skill_id = skill_name  # mirrors compile_and_persist: skill_id == skill_name
     package_id = str(uuid4())
     signing_key, signing_method = _resolve_signing_key(db_path)

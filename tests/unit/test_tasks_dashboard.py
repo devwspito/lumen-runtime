@@ -563,23 +563,37 @@ class TestDbusWiringDashboardMethods:
         assert result == []
 
     async def test_list_configured_tasks_returns_dict_list(self) -> None:
-        repo = _make_repo()
-        await _seed_trigger(repo, scope="0 * * * *")
+        # BUG-7 fix: list_configured_tasks reads from Neus cron.jobs, not trigger_repo.
+        # Seed a Neus job (not a trigger_repo row) and verify it appears.
+        import sys
+        import types
+        from unittest.mock import patch
 
-        from hermes.tasks.control_plane.application.control_plane_service import (
-            ControlPlaneService,
-        )
+        neus_job = {
+            "id": "aabb001122cc",
+            "name": "Hourly check",
+            "prompt": "Run hourly check",
+            "schedule": {"kind": "cron", "expr": "0 * * * *", "display": "0 * * * *"},
+            "schedule_display": "0 * * * *",
+            "enabled": True,
+            "next_run_at": None,
+            "last_run_at": None,
+            "last_status": None,
+            "repeat": None,
+        }
 
-        service = ControlPlaneService(
-            queue=_FakeQueue(),
-            agent_state=_FakeAgentState(),
-            authorized_uids=frozenset({os.getuid()}),
-            tenant_id=uuid4(),
-            trigger_repo=repo,
-        )
-        wiring = self._make_wiring(cp_service=service)
+        # Ensure cron.jobs stub exists before patching.
+        if "cron" not in sys.modules:
+            sys.modules["cron"] = types.ModuleType("cron")
+        if "cron.jobs" not in sys.modules:
+            mod = types.ModuleType("cron.jobs")
+            mod.list_jobs = lambda include_disabled=True: []  # type: ignore[attr-defined]
+            sys.modules["cron.jobs"] = mod
 
-        result = await wiring.list_configured_tasks()
+        wiring = self._make_wiring(cp_service=None)
+
+        with patch("cron.jobs.list_jobs", return_value=[neus_job]):
+            result = await wiring.list_configured_tasks()
 
         assert isinstance(result, list)
         assert len(result) == 1
@@ -587,6 +601,7 @@ class TestDbusWiringDashboardMethods:
         assert "trigger_id" in row
         assert "recurrence" in row
         assert "enabled" in row
+        assert row["trigger_id"] == "aabb001122cc"
 
     async def test_list_recent_tasks_returns_dict_list(self) -> None:
         repo = _make_repo()

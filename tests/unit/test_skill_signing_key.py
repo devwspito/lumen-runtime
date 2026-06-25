@@ -20,7 +20,6 @@ from unittest.mock import patch
 
 import pytest
 
-from hermes.shell_server.audit_api import init_schema
 from hermes.shell_server.skills.composio_skill_service import persist_composio_skill
 from hermes.shell_server.training.persist import build_signing_key, resolve_signing_key
 
@@ -137,8 +136,8 @@ class TestNativeKeyStoreAdapterAbsent:
 
 class TestComposioSkillSigningMethod:
     def test_signing_method_column_written(self, tmp_path: Path) -> None:
+        # persist_composio_skill creates skill_packages_view schema internally
         db = tmp_path / "test.db"
-        init_schema(db)
 
         import hermes.shell_server.skills.native_keystore_adapter as _mod  # noqa: PLC0415
 
@@ -162,7 +161,6 @@ class TestComposioSkillSigningMethod:
     def test_raises_when_native_unavailable(self, tmp_path: Path) -> None:
         """persist_composio_skill RAISES when master.key absent — no v1 fallback."""
         db = tmp_path / "test.db"
-        init_schema(db)
 
         import hermes.shell_server.skills.native_keystore_adapter as _mod  # noqa: PLC0415
         from hermes.training.application.skill_signer import SigningKeyError  # noqa: PLC0415
@@ -179,7 +177,6 @@ class TestComposioSkillSigningMethod:
 
     def test_v2_signing_method_when_native_available(self, tmp_path: Path) -> None:
         db = tmp_path / "test.db"
-        init_schema(db)
 
         import hermes.shell_server.skills.native_keystore_adapter as _mod  # noqa: PLC0415
 
@@ -202,8 +199,12 @@ class TestComposioSkillSigningMethod:
 
     def test_v1_and_v2_skills_coexist_in_db(self, tmp_path: Path) -> None:
         """Existing v1 skills remain readable alongside new v2 skills."""
+        from hermes.shell_server.skills.skill_governance_service import (  # noqa: PLC0415
+            SkillGovernanceService,
+        )
+
         db = tmp_path / "test.db"
-        init_schema(db)
+        SkillGovernanceService(db_path=db)  # ensure governance schema
 
         # Insert a legacy v1 skill directly (simulates pre-migration row).
         from uuid import uuid4  # noqa: PLC0415
@@ -259,7 +260,11 @@ class TestComposioSkillSigningMethod:
 
 class TestSigningMethodMigration:
     def test_migration_adds_column_to_existing_db(self, tmp_path: Path) -> None:
-        """init_schema() must add signing_method to a DB without it."""
+        """SkillGovernanceService must add signing_method to a legacy DB without it."""
+        from hermes.shell_server.skills.skill_governance_service import (  # noqa: PLC0415
+            SkillGovernanceService,
+        )
+
         db = tmp_path / "legacy.db"
         # Create old schema WITHOUT signing_method.
         conn = sqlite3.connect(str(db))
@@ -286,8 +291,8 @@ class TestSigningMethodMigration:
         conn.commit()
         conn.close()
 
-        # Running init_schema must add the column (migration).
-        init_schema(db)
+        # Running SkillGovernanceService must add the column (migration).
+        SkillGovernanceService(db_path=db)
 
         conn = sqlite3.connect(str(db))
         row = conn.execute(

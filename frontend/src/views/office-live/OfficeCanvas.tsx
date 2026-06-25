@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
+import { useT } from '../../lib/i18n'
 import type { LumenAgent, LumenRuntimeStatus } from './engine/office-state'
 import { OfficeState } from './engine/office-state'
 import { animateCamera, createCamera, fitZoomForMap, handleMouseDown, handleMouseMove, handleMouseUp, panToAll } from './engine/camera'
@@ -13,6 +14,7 @@ interface Props {
 }
 
 export function OfficeCanvas({ agents, runtimeStatus, onAgentClick }: Props) {
+  const t = useT()
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const officeRef = useRef<OfficeState | null>(null)
@@ -101,6 +103,21 @@ export function OfficeCanvas({ agents, runtimeStatus, onAgentClick }: Props) {
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── Sync furniture labels when locale changes ──────────────
+  useEffect(() => {
+    const office = officeRef.current
+    if (!office) return
+    office.furnitureLabels = {
+      bookshelf: t('agents.canvas.furniture.bookshelf'),
+      whiteboard: t('agents.canvas.furniture.whiteboard'),
+      tv:         t('agents.canvas.furniture.tv'),
+      printer:    t('agents.canvas.furniture.printer'),
+      router:     t('agents.canvas.furniture.router'),
+      toolbox:    t('agents.canvas.furniture.toolbox'),
+      emptydesk:  t('agents.canvas.furniture.emptydesk'),
+    }
+  }, [t])
+
   // ── Sync agents + status when props change ─────────────────
   useEffect(() => {
     const office = officeRef.current
@@ -173,7 +190,7 @@ export function OfficeCanvas({ agents, runtimeStatus, onAgentClick }: Props) {
       office.hoveredAgentId = agentHit.id
       office.hoveredRoomId = null
       office.hoveredFurnitureIdx = -1
-      setTooltip({ x: e.clientX - rect.left, y: e.clientY - rect.top, name: agentHit.agentName, hint: 'ver detalle' })
+      setTooltip({ x: e.clientX - rect.left, y: e.clientY - rect.top, name: agentHit.agentName, hint: t('agents.canvas.hint.detail') })
       canvas.style.cursor = 'pointer'
       return
     }
@@ -193,7 +210,7 @@ export function OfficeCanvas({ agents, runtimeStatus, onAgentClick }: Props) {
     office.hoveredFurnitureIdx = -1
     setTooltip(null)
     canvas.style.cursor = cameraRef.current.isDragging ? 'grabbing' : 'default'
-  }, [])
+  }, [t])
 
   const onMouseUp2 = useCallback(() => {
     wasDraggingRef.current = cameraRef.current.isDragging
@@ -236,7 +253,7 @@ export function OfficeCanvas({ agents, runtimeStatus, onAgentClick }: Props) {
           if (officeRef.current) officeRef.current.hoveredAgentId = null
         }}
         onClick={onClick}
-        aria-label="Vista isométrica de la oficina con los agentes"
+        aria-label={t('agents.canvas.aria')}
         role="img"
       />
       {tooltip && (

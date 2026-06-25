@@ -506,6 +506,15 @@ class Runtime1ServiceInterface(ServiceInterface):
         return json.dumps(self._wiring.list_skills())
 
     @method()
+    async def ListSkillsNative(self) -> "s":  # noqa: N802,F821,UP037
+        """Enumerate all native SKILL.md dirs as SkillPackageDTO-shaped JSON.
+
+        Primary source for audit_api.list_skills() — replaces skill_packages_view
+        reads so that agent-created skills (BUG 3) appear in the Habilidades view.
+        """
+        return json.dumps(self._wiring.list_skills_native())
+
+    @method()
     async def PromoteSkill(self, package_id: "s") -> "s":  # noqa: N802,F821,UP037
         """Promueve skill VALIDATED → AUTONOMOUS. by = UID del bus."""
         sender_uid = await self._resolve_current_sender_uid()
