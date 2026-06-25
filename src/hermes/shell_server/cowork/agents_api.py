@@ -70,7 +70,8 @@ class AgentDraft(BaseModel):
     register: str = Field(default="", max_length=512)
     primary_mission: str = Field(default="", max_length=2000)
     instructions: str = Field(default="", max_length=8000)
-    language: str = Field(default="es-ES", max_length=20)
+    # "auto" → respond in the user's language. BCP-47 tag → fixed locale.
+    language: str = Field(default="auto", max_length=20)
     color: str = Field(default="#6366f1", max_length=30)
     golden_rules: list[str] = Field(default_factory=list)
     forbidden_phrases: list[str] = Field(default_factory=list)
