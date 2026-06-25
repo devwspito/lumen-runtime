@@ -980,6 +980,11 @@ class DbusRuntimeServiceWiring:
             return {"ok": False, "error": f"draft_json inválido: {exc}"}
         sid = str(d.get("server_id") or "").strip()
         argv = [str(a) for a in (d.get("argv") or []) if str(a).strip()]
+        # Owner sovereign override: the UI records the FAIL/WARN approval (with MFA) via
+        # POST /security/decisions, then re-adds with force=True. Rides in the draft so
+        # the D-Bus signature is unchanged. Without this, FAIL/WARN MCPs were PERMANENTLY
+        # blocked even after the owner approved (add had no override path, unlike skills).
+        force = bool(d.get("force"))
         import re as _re  # noqa: PLC0415
         if not _re.fullmatch(r"[a-z0-9]([a-z0-9-]*[a-z0-9])?", sid):
             return {"ok": False, "error": "server_id inválido (minúsculas/dígitos/guiones, patrón ServerSlug)"}
@@ -1021,7 +1026,32 @@ class DbusRuntimeServiceWiring:
             "mcp_server", sid, argv=argv, emit_signals=False,
         )
         if scan_result is not None and scan_result.get("blocked"):
-            return scan_result  # ya incluye ok:False + blocked + error
+            if not force:
+                return scan_result  # ya incluye ok:False + blocked + error
+            # Owner sovereign override (approved with MFA): record ALLOWED on THIS scan,
+            # then re-scan with allow_warn=True so BOTH gates clear — the FAIL auto-block
+            # (via the ALLOWED decision) AND the separate WARN gate. Mirrors the skill path
+            # (_apply_owner_override_and_rescan). FAIL-CLOSED: if the override can't clear
+            # it (no scan_id / re-scan still blocked / error), keep the block.
+            try:
+                from uuid import UUID as _UUID  # noqa: PLC0415
+                scan_svc = self._scan_service_lazy()
+                _sid_scan = scan_result.get("scan_id") or ""
+                if scan_svc is not None and _sid_scan:
+                    scan_svc.allow_target(_UUID(_sid_scan))
+                    logger.warning(
+                        "hermes.dbus.mcp_owner_override server=%s scan_id=%s — install "
+                        "allowed by the owner's SOVEREIGN decision (MFA-gated)", sid, _sid_scan,
+                    )
+                scan_result = self._scan_install_target(
+                    "mcp_server", sid, argv=argv, emit_signals=False, allow_warn=True,
+                )
+                if scan_result is not None and scan_result.get("blocked"):
+                    return scan_result  # override could not clear it
+            except Exception as exc:  # noqa: BLE001 — fail-closed: keep the block
+                logger.error("hermes.dbus.mcp_override_failed server=%s: %s", sid, exc)
+                return {"ok": False, "blocked": True,
+                        "error": f"no se pudo aplicar el override del dueño: {exc}"}
         # C1 PASS-3: PRE-FETCH the scanned package into the shared runner cache NOW, in
         # this trusted install path (daemon, host netns). The MCP RUNTIME then spawns
         # OFFLINE from that cache in its default-deny netns — no registry network at
