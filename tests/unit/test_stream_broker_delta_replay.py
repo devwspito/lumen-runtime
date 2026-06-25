@@ -60,6 +60,43 @@ def test_reattach_multiple_deltas_in_order() -> None:
     asyncio.run(run())
 
 
+def test_reattach_MID_task_replays_deltas_so_far() -> None:
+    """FIX 2026-06-26 (chat en blanco al refrescar a MITAD): un re-attach con la tarea
+    AÚN EN CURSO debe replayar lo ya streameado y luego seguir en vivo, sin duplicar.
+    Antes el replay solo ocurría si la tarea ya había terminado → refrescar a mitad daba
+    pantalla en blanco."""
+    async def run() -> None:
+        broker = StreamBroker()
+        tid = uuid4()
+        # Tarea EN CURSO: status + 2 deltas, SIN done todavía.
+        broker.publish(status_frame(task_id=tid, status="in_progress"))
+        broker.publish(delta_frame(task_id=tid, delta="Los mejores CRM son: "))
+        broker.publish(delta_frame(task_id=tid, delta="1. HubSpot "))
+        got: list = []
+
+        async def sub() -> None:
+            async for f in broker.subscribe(task_id=tid):
+                got.append(f)
+
+        task = asyncio.create_task(sub())
+        await asyncio.sleep(0.05)  # re-engancha + replaya el catch-up
+        # Catch-up: ya tiene lo streameado (NO en blanco).
+        assert [f.payload.get("delta") for f in got if f.kind.value == "delta"] == [
+            "Los mejores CRM son: ", "1. HubSpot ",
+        ]
+        # Sigue en vivo: nuevo delta + done.
+        broker.publish(delta_frame(task_id=tid, delta="2. Salesforce"))
+        broker.close_task(task_id=tid, outcome="completed")
+        await asyncio.wait_for(task, timeout=2)
+        # Sin duplicados: replay + vivo, cada delta una sola vez, en orden.
+        assert [f.payload.get("delta") for f in got if f.kind.value == "delta"] == [
+            "Los mejores CRM son: ", "1. HubSpot ", "2. Salesforce",
+        ]
+        assert got[-1].kind.value == "done"
+
+    asyncio.run(run())
+
+
 def test_live_subscriber_still_gets_deltas() -> None:
     """No-regresión: un suscriptor en vivo sigue recibiendo deltas + done."""
     async def run() -> None:

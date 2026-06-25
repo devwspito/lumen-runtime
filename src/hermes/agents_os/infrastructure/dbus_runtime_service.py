@@ -5367,10 +5367,35 @@ def _prefetch_mcp_package(server_id: str, argv: list[str]) -> None:
         npm = _shutil.which("npm")
         if not npm:
             raise RuntimeError("npm no está disponible para prefetch del paquete MCP")
-        # `npm cache add <spec>` downloads the tarball + its dependency tree into the
-        # shared cache WITHOUT a global install. npx --prefer-offline then resolves the
-        # whole tree from this cache at runtime — no registry network needed.
-        cmd = [npm, "cache", "add", pkg_spec]
+        # Warm the FULL dependency tree into the shared cache. `npm cache add <spec>` only
+        # caches the package's OWN tarball — NOT its deps — so the runtime `npx --offline`
+        # later dies with ENOTCACHED on the first transitive dep (e.g. @modelcontextprotocol
+        # /sdk). A throwaway `npm install` into a temp prefix resolves + downloads the whole
+        # tree (packuments + tarballs) into npm_config_cache; the runtime then spawns
+        # `npx --offline` (cache-only, NEVER contacts the registry) and finds everything.
+        import tempfile as _tempfile  # noqa: PLC0415
+        _tmp_prefix = _tempfile.mkdtemp(prefix="hermes-mcp-prefetch-")
+        try:
+            _r = _subprocess.run(  # noqa: S603 — fixed list, no shell
+                [npm, "install", pkg_spec, "--prefix", _tmp_prefix,
+                 "--no-audit", "--no-fund", "--no-save", "--loglevel=error"],
+                env=env, capture_output=True, text=True,
+                timeout=_MCP_PREFETCH_TIMEOUT_S, check=False,
+            )
+        except (OSError, _subprocess.TimeoutExpired) as exc:
+            _shutil.rmtree(_tmp_prefix, ignore_errors=True)
+            raise RuntimeError(f"prefetch del paquete MCP falló: {exc}") from exc
+        _shutil.rmtree(_tmp_prefix, ignore_errors=True)
+        if _r.returncode != 0:
+            _tail = (_r.stderr or _r.stdout or "").strip()[-500:]
+            raise RuntimeError(
+                f"prefetch del paquete MCP '{pkg_spec}' falló (rc={_r.returncode}): {_tail}"
+            )
+        logger.info(
+            "hermes.dbus.mcp_prefetched server=%s ecosystem=%s pkg=%s (full tree)",
+            server_id, ecosystem, pkg_spec,
+        )
+        return
     elif ecosystem == "pypi":
         uv = _shutil.which("uv")
         if not uv:

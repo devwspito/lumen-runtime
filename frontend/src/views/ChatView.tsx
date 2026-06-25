@@ -8,6 +8,7 @@
  */
 
 import {
+  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -265,7 +266,7 @@ interface UserMessageProps {
   failed?: boolean
 }
 
-function UserMessage({ text, failed }: UserMessageProps) {
+const UserMessage = memo(function UserMessage({ text, failed }: UserMessageProps) {
   const t = useT()
   return (
     <div
@@ -284,13 +285,13 @@ function UserMessage({ text, failed }: UserMessageProps) {
       )}
     </div>
   )
-}
+})
 
 interface AssistantMessageProps {
   message: Extract<ChatMessage, { type: 'assistant' }>
 }
 
-function AssistantMessage({ message }: AssistantMessageProps) {
+const AssistantMessage = memo(function AssistantMessage({ message }: AssistantMessageProps) {
   const { thinkingText, thinkingDone, toolSteps, activityText, renderedHtml, isStreaming } = message
 
   // Suppress the generic spinner when a delegation card is already showing its own live indicator
@@ -328,7 +329,7 @@ function AssistantMessage({ message }: AssistantMessageProps) {
       )}
     </div>
   )
-}
+})
 
 function lastLine(text: string): string {
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean)

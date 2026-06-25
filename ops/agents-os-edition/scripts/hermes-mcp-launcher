@@ -195,14 +195,15 @@ _MCP_PROPERTIES: tuple[str, ...] = (
 # network-MCP needs) still flow through the proxy via the normal egress-grant model.
 #
 # Offline flags are injected SERVER-SIDE (here), right after the runner, so the caller
-# cannot disable them. npx: --prefer-offline (resolve from cache; the prefetch warmed
-# the whole tree, so no network is needed — --prefer-offline avoids a hard failure if a
-# transitive dep was already globally cached elsewhere, while still never reaching out
-# when the cache is complete). uvx: --offline (uv supports a hard offline mode; the
-# prefetch built the tool into UV_CACHE_DIR). Idempotent: we skip injection if the flag
-# is already present.
+# cannot disable them. npx: --offline (HARD cache-only — NEVER contacts the registry;
+# the install-time prefetch `npm install`s the WHOLE tree into the shared cache, so the
+# runtime resolves everything offline). NOTE: --prefer-offline is NOT enough — it still
+# does a registry GET to check for a newer version, which the default-deny MCP netns
+# answers with 403, killing the handshake ("Connection closed"). --offline forbids any
+# network and uses the cache only. uvx: --offline (uv hard offline; the prefetch built
+# the tool into UV_CACHE_DIR). Idempotent: we skip injection if the flag is already present.
 _OFFLINE_FLAGS: dict[str, str] = {
-    "npx": "--prefer-offline",
+    "npx": "--offline",
     "uvx": "--offline",
 }
 
