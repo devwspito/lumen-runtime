@@ -172,7 +172,7 @@ export default function McpView() {
     ? new Set(state.servers.map(s => s.server_id ?? s.id ?? ''))
     : new Set<string>()
 
-  async function doAddMcpServer(entry: McpRegistryEntry, collectedEnv: Record<string, string>, onDone: () => void) {
+  async function doAddMcpServer(entry: McpRegistryEntry, collectedEnv: Record<string, string>, onDone: () => void, force = false) {
     const argv = Array.isArray(entry.argv)
       ? entry.argv
       : String(entry.argv ?? '').split(/\s+/).filter(Boolean)
@@ -183,6 +183,9 @@ export default function McpView() {
         label: entry.label ?? entry.name,
         argv,
         env: { ...collectedEnv },
+        // Owner sovereign override after a FAIL/WARN scan was approved with MFA — the
+        // daemon's add gate re-blocks FAIL/WARN unless force carries the approval.
+        force,
       })
       const name = entry.label ?? entry.name ?? ''
       if (res && res.tool_count === 0) {
@@ -244,7 +247,7 @@ export default function McpView() {
         risks_json: JSON.stringify(scan.risks),
         totp: factors.totp,
       })
-      await doAddMcpServer(entry, collectedEnv, onDone)
+      await doAddMcpServer(entry, collectedEnv, onDone, true)
     } catch (e) {
       show(e instanceof Error ? e.message : 'Error al registrar la decisión', 'error')
       onDone()
