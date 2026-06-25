@@ -1191,7 +1191,7 @@ function EgressSection() {
               {state.mode === 'allow' ? (
                 <AllowModePanel
                   key="allow"
-                  denyList={state.deny}
+                  denyList={state.deny ?? []}
                   blocklistCount={state.blocklist_count}
                   onAdd={handleBlock}
                   onRemove={handleUnblock}
@@ -1199,7 +1199,7 @@ function EgressSection() {
               ) : (
                 <DenyModePanel
                   key="deny"
-                  allowList={state.domains}
+                  allowList={state.domains ?? []}
                   onGrant={handleGrant}
                   onRevoke={handleRevoke}
                 />

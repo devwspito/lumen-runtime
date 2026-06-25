@@ -36,6 +36,23 @@ logger = logging.getLogger("hermes.shell_server.egress")
 _GRANTS_PATH = Path("/var/lib/hermes/egress-grants.json")
 _DENY_PATH = Path("/var/lib/hermes/egress-denylist.json")
 _MODE_PATH = Path("/var/lib/hermes/egress-mode.json")
+# System malicious-domain blocklist (baked at build, loaded by the proxy at boot). The
+# shell-server reads it ONLY to report the count for the "N maliciosos bloqueados" badge.
+_BLOCKLIST_PATH = Path("/usr/share/hermes/egress-blocklist.txt")
+
+
+def _blocklist_count() -> int:
+    """Count of non-comment domains in the system malicious blocklist (0 if absent)."""
+    try:
+        n = 0
+        with _BLOCKLIST_PATH.open(encoding="utf-8") as fh:
+            for line in fh:
+                s = line.strip()
+                if s and not s.startswith("#"):
+                    n += 1
+        return n
+    except Exception:  # noqa: BLE001 — badge is cosmetic; never fail the egress API
+        return 0
 # C1 PASS-4: MCP-plane grants persist in a SEPARATE file so they never cross into the
 # browser plane. The proxy entrypoint reads this exact path at boot to seed the MCP pin.
 _MCP_GRANTS_PATH = Path("/var/lib/hermes/mcp-egress-grants.json")
@@ -309,6 +326,7 @@ def create_egress_router(mfa: MfaStore | None = None) -> APIRouter:
             "mode": mode,
             "domains": _load(),
             "denylist": _load_denylist(),
+            "blocklist_count": _blocklist_count(),
         }
 
     @router.post("/domains/grant")
