@@ -443,9 +443,29 @@ def _translate_dbus_error(exc: Exception) -> None:
         raise EnqueueNotAuthorized(
             f"UID del shell-server no autorizado por el daemon: {exc}"
         ) from exc
-    # Gate rejections (proposal not found / already resolved / MFA) surface as a clear
-    # 4xx, NOT a generic 503 "agente no disponible" — the daemon IS reachable; the
-    # approval is just no longer valid. (The D-Bus error string carries the gate class.)
+
+    # Gate rejections: the daemon encodes the gate reason in the D-Bus error name as
+    # org.hermes.Error.ApprovalGate.<reason> (fixed 2026-06-25: the previous code
+    # matched on "approvalgateerror" in the human-readable message and always used
+    # reason="proposal_invalid", masking the real reason — mfa_required, invalid_totp,
+    # mfa_not_enrolled — and making a VALID TOTP approval look like a missing proposal).
+    # Primary path: structured error name (org.hermes.Error.ApprovalGate.*).
+    error_name = getattr(exc, "type", None) or getattr(exc, "error_name", None) or ""
+    if not isinstance(error_name, str):
+        error_name = ""
+    _GATE_PREFIX = "org.hermes.error.approvalgate."  # lower-cased for matching
+    if error_name.lower().startswith(_GATE_PREFIX):
+        reason = error_name[len(_GATE_PREFIX):]  # e.g. "mfa_required", "proposal_invalid"
+        reason = reason or "approval_failed"
+        from hermes.capabilities.infrastructure.sqlite_approval_gate import (  # noqa: PLC0415
+            ApprovalGateError,
+        )
+        raise ApprovalGateError(
+            str(exc),
+            reason=reason,
+        ) from exc
+    # Fallback: legacy path — error name not structured; check the message string.
+    # Only used if the daemon is an older version that raised an untyped error.
     if "approvalgateerror" in err_str:
         from hermes.capabilities.infrastructure.sqlite_approval_gate import (  # noqa: PLC0415
             ApprovalGateError,
