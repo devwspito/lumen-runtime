@@ -10,7 +10,7 @@ Contract:
   - Computes content_hash over the SKILL.md bytes (deterministic).
   - Signs with SkillSigner v2 (content-bound HMAC-SHA256) via NativeKeyStoreAdapter.
   - Writes SKILL.md atomically to the on-disk store (skill_store_root/<name>/SKILL.md).
-  - Persists metadata to skill_packages_view with state=validated (not autonomous).
+  - Embeds governance metadata (state, signature_hex, etc.) into the SKILL.md frontmatter.
   - Only create/edit/patch produce signed artefacts; delete archives.
 
 State lifecycle:
@@ -36,7 +36,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
-import sqlite3
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -80,11 +79,19 @@ class SkillStoreAdapter:
     Injected into SurfaceAdapterDispatcher under SurfaceKind.SKILL_STORE.
     Called by CapabilityBroker.dispatch() after HITL approval for skill_manage.
 
+    Writes signed SKILL.md files to the Neus native skills directory so that
+    both cage-approved skills and agent-created skills live in the same place.
+    Governance fields (state, signing_method, signature_hex, package_id, etc.)
+    are embedded in the SKILL.md frontmatter.metadata block — no separate DB
+    table is used for the skill list. The composio_skills table is kept for
+    Composio-origin skills (they have no on-disk SKILL.md).
+
     Args:
         kms:             KmsSigningKeyPort — provides v2 HMAC key material.
-        db_path:         Path to the SQLite DB hosting skill_packages_view.
+        db_path:         Path to the SQLite DB (used only for composio_skills).
         skill_store_root: Root directory for SKILL.md files on disk.
-                         Default: /var/lib/hermes/skills (OS convention).
+                         Default: $HERMES_HOME/skills (Neus native dir).
+                         Falls back to /var/lib/hermes/hermes-home/skills.
         runtime_version: Embedded in SkillPackage for traceability.
     """
 
@@ -98,24 +105,19 @@ class SkillStoreAdapter:
     ) -> None:
         self._signer = SkillSigner(kms=kms)
         self._db_path = db_path
-        self._skill_store_root = skill_store_root or Path("/var/lib/hermes/skills")
+        self._skill_store_root = skill_store_root or _neus_skills_root()
         self._runtime_version = runtime_version
-        # Ensure skill_packages_view schema + migrations exist in the shared DB
-        # before the first _persist_to_db call. Without this, the daemon can
-        # process a HITL-approved skill_manage before SkillGovernanceService or
-        # the shell-server has run init_schema, causing the INSERT to fail with
-        # "no such table: skill_packages_view" (schema missing) or a missing-column
-        # error (validated_at / signing_method not yet migrated). Same pattern as
-        # SkillGovernanceService.__init__: fail-soft so a misconfigured keystore
-        # never blocks boot, only rejects individual proposals.
+        # Ensure the governance schema (skill_packages_view + composio_skills) exists
+        # so that promote/deprecate operations work without the shell-server having
+        # pre-created the DB. Fail-soft: schema errors are non-fatal at init.
         try:
-            from hermes.shell_server.audit_api import init_schema  # noqa: PLC0415
-            init_schema(db_path)
+            from hermes.shell_server.skills.skill_governance_service import (  # noqa: PLC0415
+                SkillGovernanceService,
+            )
+            SkillGovernanceService(db_path=db_path)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "hermes.skill_store.schema_ensure_failed: %s — "
-                "skill_manage proposals may fail until the shell-server initialises the schema",
-                exc,
+                "hermes.skill_store.governance_schema_init_failed db=%s: %s", db_path, exc
             )
 
     @property
@@ -239,9 +241,10 @@ class SkillStoreAdapter:
                 f"Signing failed for skill {skill_name!r}: {exc}"
             ) from exc
 
+        now = datetime.now(tz=UTC).isoformat()
+        doc_with_governance = self._embed_governance(doc, package, now)
         skill_dir = self._skill_dir(skill_name)
-        self._write_skill_md_atomic(skill_dir, doc)
-        self._persist_to_db(package, doc)
+        self._write_skill_md_atomic(skill_dir, doc_with_governance)
 
         logger.info(
             "hermes.skill_store.upserted name=%s package_id=%s state=%s",
@@ -325,7 +328,7 @@ class SkillStoreAdapter:
                 error=f"Skill {skill_name!r} not found — cannot delete",
             )
 
-        self._archive_in_db(skill_name)
+        self._archive_skill_md(skill_name)
         _remove_skill_dir(self._skill_dir(skill_name))
 
         logger.info("hermes.skill_store.deleted name=%s", skill_name)
@@ -386,53 +389,78 @@ class SkillStoreAdapter:
         return signed
 
     # ------------------------------------------------------------------
-    # Persistence
+    # Governance persistence — frontmatter, not a separate DB table
     # ------------------------------------------------------------------
 
-    def _persist_to_db(self, package: SkillPackage, doc: SkillMdDocument) -> None:
-        """Upsert the signed skill into skill_packages_view (state=validated)."""
-        now = datetime.now(tz=UTC).isoformat()
-        short_sig = package.signature_hex[:12] if package.signature_hex else None
+    def _embed_governance(
+        self,
+        doc: SkillMdDocument,
+        package: SkillPackage,
+        signed_at: str,
+    ) -> SkillMdDocument:
+        """Return a new SkillMdDocument with governance fields in metadata.
 
-        with _db_conn(self._db_path) as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            conn.execute(
-                """
-                INSERT INTO skill_packages_view (
-                  package_id, skill_id, skill_name, version, state,
-                  surface_kinds, signed_at, signature_short,
-                  signing_method, signature_hex, validated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(package_id) DO UPDATE SET
-                  state=excluded.state,
-                  signature_hex=excluded.signature_hex,
-                  signature_short=excluded.signature_short,
-                  signing_method=excluded.signing_method,
-                  signed_at=excluded.signed_at,
-                  validated_at=excluded.validated_at
-                """,
-                (
-                    str(package.package_id),
-                    str(package.skill_id),
-                    doc.name,
-                    1,
-                    SkillState.VALIDATED.value,
-                    "skill_store",
-                    now,
-                    short_sig,
-                    "v2",
-                    package.signature_hex,
-                    now,
-                ),
+        Merges the existing metadata with cage-issued governance fields so the
+        SKILL.md file is the single source of truth for both skill instructions
+        and provenance. list_skills_native() reads these back at query time.
+
+        All fields used by build_canonical_payload() are stored here so that
+        _skill_md_to_dto() can reconstruct the payload and re-verify the HMAC
+        without a DB lookup (Finding #1 / CWE-345).
+        """
+        from uuid import UUID as _UUID  # noqa: PLC0415
+        governance = {
+            "package_id": str(package.package_id),
+            "skill_id": str(package.skill_id),
+            "state": SkillState.VALIDATED.value,
+            "signing_method": "v2",
+            "signature_hex": package.signature_hex or "",
+            "signed_at": signed_at,
+            "validated_at": signed_at,
+            "surface_kinds": ["skill_store"],
+            "version": 1,
+            # Fields required for HMAC re-verification (Finding #1 / CWE-345).
+            # build_canonical_payload() covers all of these.
+            "content_hash": package.content_hash or "",
+            "tenant_id": str(package.tenant_id) if package.tenant_id else str(_UUID(int=0)),
+            "compiled_by_operator_id": str(package.compiled_by_operator_id) if package.compiled_by_operator_id else str(_UUID(int=0)),
+            "created_at": package.created_at.isoformat() if package.created_at else signed_at,
+            "runtime_version": package.runtime_version or "",
+            "replay_script_id": str(package.replay_script_id) if package.replay_script_id else str(package.package_id),
+            "voice_narrative_id": str(package.voice_narrative_id) if package.voice_narrative_id else str(package.package_id),
+            "decision_rule_ids": [str(r) for r in (package.decision_rule_ids or [])],
+        }
+        merged_meta = {**doc.metadata, **governance}
+        return SkillMdDocument(
+            name=doc.name,
+            description=doc.description,
+            version=doc.version,
+            body=doc.body,
+            metadata=merged_meta,
+        )
+
+    def _archive_skill_md(self, skill_name: str) -> None:
+        """Update state=archived in the SKILL.md frontmatter.metadata."""
+        skill_file = self._skill_dir(skill_name) / "SKILL.md"
+        if not skill_file.exists():
+            return
+        try:
+            content = skill_file.read_text(encoding="utf-8")
+            doc = parse_skill_md(content)
+            archived_meta = {**doc.metadata, "state": "archived"}
+            archived_doc = SkillMdDocument(
+                name=doc.name,
+                description=doc.description,
+                version=doc.version,
+                body=doc.body,
+                metadata=archived_meta,
             )
-            conn.execute("COMMIT")
-
-    def _archive_in_db(self, skill_name: str) -> None:
-        """Set state=archived for all versions of the skill."""
-        with _db_conn(self._db_path) as conn:
-            conn.execute(
-                "UPDATE skill_packages_view SET state='archived' WHERE skill_name=?",
-                (skill_name,),
+            self._write_skill_md_atomic(skill_file.parent, archived_doc)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "hermes.skill_store.archive_frontmatter_failed name=%s: %s",
+                skill_name,
+                exc,
             )
 
     # ------------------------------------------------------------------
@@ -469,10 +497,14 @@ class SkillStoreAdapter:
 # ---------------------------------------------------------------------------
 
 
-def _db_conn(db_path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(str(db_path), isolation_level=None)
-    conn.row_factory = sqlite3.Row
-    return conn
+def _neus_skills_root() -> Path:
+    """Return the Neus native skills root: $HERMES_HOME/skills/.
+
+    Falls back to /var/lib/hermes/hermes-home/skills when HERMES_HOME is unset
+    (matches the daemon's production value).
+    """
+    hermes_home = os.environ.get("HERMES_HOME") or "/var/lib/hermes/hermes-home"
+    return Path(hermes_home) / "skills"
 
 
 def _remove_skill_dir(skill_dir: Path) -> None:

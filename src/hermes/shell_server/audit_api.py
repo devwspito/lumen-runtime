@@ -18,7 +18,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from hermes.agents_os.application.consent_manager import Capability, ConsentScope
@@ -39,24 +39,6 @@ CREATE TABLE IF NOT EXISTS audit_entries_view (
 CREATE INDEX IF NOT EXISTS audit_ts_idx
   ON audit_entries_view (timestamp DESC);
 
-CREATE TABLE IF NOT EXISTS skill_packages_view (
-  package_id         TEXT PRIMARY KEY,
-  skill_id           TEXT NOT NULL,
-  skill_name         TEXT NOT NULL,
-  version            INTEGER NOT NULL,
-  state              TEXT NOT NULL,
-  surface_kinds      TEXT NOT NULL,
-  signed_at          TEXT NOT NULL,
-  signature_short    TEXT,
-  validated_at       TEXT,
-  validated_by       TEXT,
-  promoted_at        TEXT,
-  promoted_by        TEXT,
-  signing_method     TEXT NOT NULL DEFAULT 'v1'
-);
-CREATE INDEX IF NOT EXISTS skill_state_idx
-  ON skill_packages_view (state, signed_at DESC);
-
 CREATE TABLE IF NOT EXISTS composio_skills (
   package_id   TEXT PRIMARY KEY,
   toolkit_slug TEXT NOT NULL,
@@ -76,22 +58,17 @@ CREATE TABLE IF NOT EXISTS consents_view (
 );
 """
 
-# Idempotent migrations for skill_packages_view (spec 004 / US3 + P0-4).
-_SKILL_PACKAGES_MIGRATIONS = [
-    "ALTER TABLE skill_packages_view ADD COLUMN validated_at TEXT",
-    "ALTER TABLE skill_packages_view ADD COLUMN validated_by TEXT",
-    "ALTER TABLE skill_packages_view ADD COLUMN promoted_at TEXT",
-    "ALTER TABLE skill_packages_view ADD COLUMN promoted_by TEXT",
-    # Backfill: treat legacy 'signed' state as 'validated' (plan.md §3).
-    "UPDATE skill_packages_view SET state = 'validated' WHERE state = 'signed'",
-    # P0-4: signing_method column — 'v1'=path-HMAC (legacy), 'v2'=native keystore.
-    # Default 'v1' applies to all rows that pre-date this migration.
-    "ALTER TABLE skill_packages_view ADD COLUMN signing_method TEXT NOT NULL DEFAULT 'v1'",
-    # Security hardening: full 64-char HMAC-SHA256 hex stored for verification
-    # at promotion time (promote_skill re-verifies before AUTONOMOUS transition).
-    # NULL for rows written before this migration (treated as unverifiable → v1).
-    "ALTER TABLE skill_packages_view ADD COLUMN signature_hex TEXT",
-]
+# skill_packages_view has been removed as the source of truth for native/recorded
+# skills. Governance (state, signing_method, signature_hex) now lives in the
+# SKILL.md frontmatter.metadata block written by SkillStoreAdapter. The list
+# endpoint reads from the daemon (list_skills_native D-Bus verb) so that
+# agent-created skills (which only exist on disk) always appear in Habilidades.
+# Composio skills (no on-disk SKILL.md) retain their composio_skills row.
+#
+# Keep skill_packages_view compatible DDL for existing DBs (CREATE IF NOT EXISTS
+# is safe to omit — the table may still exist from before this migration).
+# Existing rows will be ignored: list_skills reads the daemon, not the table.
+_SKILL_PACKAGES_MIGRATIONS: list[str] = []
 
 
 def _conn(db: Path) -> sqlite3.Connection:
@@ -291,25 +268,38 @@ def _row_to_skill_dto(row) -> SkillPackageDTO:
 
 def _row_to_skill_dto_from_dict(d: dict) -> SkillPackageDTO:
     """Map a SkillGovernanceService result dict to SkillPackageDTO."""
+    return _dict_to_skill_dto(d)
+
+
+def _dict_to_skill_dto(d: dict) -> SkillPackageDTO:
+    """Map a daemon list_skills_native result dict to SkillPackageDTO.
+
+    Handles both native skills (from SKILL.md frontmatter) and composio
+    skills (from the DB via the daemon wiring). Coerces surface_kinds from
+    CSV string or list. Derives skill_kind from toolkit_slug presence.
+    """
     surface_kinds = d.get("surface_kinds") or []
     if isinstance(surface_kinds, str):
         surface_kinds = surface_kinds.split(",") if surface_kinds else []
     toolkit_slug = d.get("toolkit_slug")
     skill_kind = "composio" if toolkit_slug else "recorded"
+    state = d.get("state") or "native"
+    if state == "signed":
+        state = "validated"
     return SkillPackageDTO(
         package_id=d["package_id"],
         skill_id=d["skill_id"],
         skill_name=d["skill_name"],
-        version=int(d["version"]),
-        state=d["state"],
+        version=int(d.get("version") or 1),
+        state=state,
         surface_kinds=surface_kinds,
         skill_kind=skill_kind,
         toolkit_slug=toolkit_slug,
-        signed_at=d["signed_at"],
+        signed_at=d.get("signed_at") or "",
         signature_short=d.get("signature_short"),
         validated_at=d.get("validated_at"),
         promoted_at=d.get("promoted_at"),
-        signing_method=d.get("signing_method", "v1"),
+        signing_method=d.get("signing_method") or "none",
     )
 
 
@@ -318,6 +308,22 @@ _DEFAULT_HERMES_HOME = "/var/lib/hermes/hermes-home"
 
 def _hermes_home() -> Path:
     return Path(os.environ.get("HERMES_HOME") or _DEFAULT_HERMES_HOME)
+
+
+def _local_skill_governance(db_path: Path) -> "object | None":
+    """Return a minimal SkillGovernanceService-compatible object for the fallback
+    composio scan. Returns None if the DB doesn't exist (so _list_composio_skills
+    stays fail-soft).
+    """
+    if not db_path.exists():
+        return None
+    try:
+        from hermes.shell_server.skills.skill_governance_service import (  # noqa: PLC0415
+            SkillGovernanceService,
+        )
+        return SkillGovernanceService(db_path=db_path)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _skill_id_to_slug(skill_id: str) -> str:
@@ -368,43 +374,76 @@ def create_audit_router(db_path: Path) -> APIRouter:
 
     # ---------------- Skills ----------------
     @router.get("/skills", response_model=list[SkillPackageDTO])
-    async def list_skills() -> list[SkillPackageDTO]:
-        with _conn(db_path) as c:
-            rows = c.execute(
-                """
-                SELECT spv.*, cs.toolkit_slug
-                  FROM skill_packages_view spv
-                  LEFT JOIN composio_skills cs ON cs.package_id = spv.package_id
-                 ORDER BY spv.signed_at DESC
-                """
-            ).fetchall()
-        return [_row_to_skill_dto(r) for r in rows]
+    async def list_skills(request: Request) -> list[SkillPackageDTO]:
+        """List all skills from the daemon's native skill registry.
+
+        Primary source: daemon list_skills_native (reads $HERMES_HOME/skills/).
+        This ensures agent-created skills (which only exist on disk) always
+        appear — the old skill_packages_view missed them (BUG 3).
+        Composio skills (no on-disk SKILL.md) come from the daemon as well
+        (the wiring merges them in list_skills → list_skills_native + composio).
+
+        Fallback: when the daemon is unreachable, reads $HERMES_HOME/skills/
+        directly (same filesystem scan the daemon would perform). This keeps
+        the endpoint functional when D-Bus is not available (unit tests, CI,
+        container pre-boot), without introducing a second source of truth.
+
+        Fail-soft: returns [] when the daemon is unreachable AND HERMES_HOME
+        is not set or the skills dir does not exist.
+        """
+        from hermes.agents_os.infrastructure.dbus_runtime_service import (  # noqa: PLC0415
+            _list_composio_skills,
+            _list_native_skills_primary,
+        )
+        from hermes.tasks.control_plane.domain.ports import AgentUnavailable  # noqa: PLC0415
+
+        proxy = getattr(request.app.state, "dbus_proxy", None)
+        raw: list[dict] = []
+        if proxy is not None:
+            try:
+                raw = await proxy.call_list("list_skills_native")
+            except AgentUnavailable:
+                raw = []
+            except Exception:  # noqa: BLE001
+                raw = []
+
+        if not raw:
+            # Daemon unavailable — read the filesystem directly (same logic the
+            # daemon executes in list_skills_native). Also include composio skills
+            # from the local DB (no on-disk SKILL.md for those).
+            raw = _list_native_skills_primary()
+            composio = _list_composio_skills(_local_skill_governance(db_path))
+            seen_names = {s["skill_name"] for s in raw}
+            raw += [s for s in composio if s["skill_name"] not in seen_names]
+
+        return [_dict_to_skill_dto(d) for d in raw]
 
     @router.get("/skills/{package_id}/details", response_model=SkillDetailsDTO)
-    async def get_skill_details(package_id: str) -> SkillDetailsDTO:
+    async def get_skill_details(package_id: str, request: Request) -> SkillDetailsDTO:
         """Return full skill metadata + SKILL.md content for the skill viewer.
 
+        Looks up the skill by package_id from the daemon's native list.
         The instructions field contains the raw SKILL.md text read from
-        $HERMES_HOME/skills/<slug>/SKILL.md.  It is None when the file does not
-        exist (Composio skills have no on-disk document; synthesized skills written
-        by skill_synthesis.py do).
+        $HERMES_HOME/skills/<slug>/SKILL.md. Composio skills have no on-disk
+        document; instructions will be None for them.
 
-        Returns 404 if the package_id is not found in skill_packages_view.
+        Returns 404 if the package_id is not found.
         """
-        with _conn(db_path) as c:
-            row = c.execute(
-                """
-                SELECT spv.*, cs.toolkit_slug
-                  FROM skill_packages_view spv
-                  LEFT JOIN composio_skills cs ON cs.package_id = spv.package_id
-                 WHERE spv.package_id = ?
-                """,
-                (package_id,),
-            ).fetchone()
-        if row is None:
+        from hermes.tasks.control_plane.domain.ports import AgentUnavailable  # noqa: PLC0415
+
+        proxy = getattr(request.app.state, "dbus_proxy", None)
+        raw: list[dict] = []
+        if proxy is not None:
+            try:
+                raw = await proxy.call_list("list_skills_native")
+            except (AgentUnavailable, Exception):  # noqa: BLE001
+                raw = []
+
+        matched = next((d for d in raw if d.get("package_id") == package_id), None)
+        if matched is None:
             raise HTTPException(404, "skill not found")
 
-        base = _row_to_skill_dto(row)
+        base = _dict_to_skill_dto(matched)
         instructions, instructions_path = _read_skill_instructions(base.skill_id)
         return SkillDetailsDTO(
             package_id=base.package_id,

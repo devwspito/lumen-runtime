@@ -335,10 +335,11 @@ class TestApiWiring:
         assert coord._ended
 
     def test_sign_persists_skill_package_with_steps(
-        self, tmp_path: Path
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Full flow: start→capture step→stop→sign → skill appears in DB."""
-        import sqlite3  # noqa: PLC0415
+        """Full flow: start→capture step→stop→sign → skill appears on disk (SKILL.md)."""
+        # Set HERMES_HOME so _persist_as_skill_md() writes to tmp_path/skills/
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
         db_path = tmp_path / "training.db"
 
@@ -394,21 +395,21 @@ class TestApiWiring:
         assert data["signed_at"] is not None
         assert data["step_count"] == 1
 
-        # Verify the SkillPackage landed in skill_packages_view.
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT * FROM skill_packages_view WHERE skill_id = 'subir-iva-303'"
-        ).fetchall()
-        conn.close()
-        assert len(rows) == 1
-        pkg = rows[0]
-        assert pkg["version"] == 1
-        # compile_and_persist uses SkillPackageState.SIGNED internally;
-        # the DB read path in audit_api normalizes 'signed' → 'validated'.
-        assert pkg["state"] in ("signed", "validated")
-        assert pkg["signature_short"] is not None
-        assert pkg["signing_method"] == "v2"
+        # Verify the SkillPackage landed in $HERMES_HOME/skills/subir-iva-303/SKILL.md.
+        # compile_and_persist now writes to the Neus native skills dir, not skill_packages_view.
+        import yaml as _yaml  # noqa: PLC0415
+        skill_md_path = tmp_path / "skills" / "subir-iva-303" / "SKILL.md"
+        assert skill_md_path.exists(), (
+            f"SKILL.md not found at {skill_md_path} — compile_and_persist must write here"
+        )
+        text = skill_md_path.read_text()
+        end = text.find("---", 3)
+        fm = _yaml.safe_load(text[3:end]) or {}
+        meta = fm.get("metadata") or {}
+        # State is written verbatim from pkg.state.value (SkillPackageState.SIGNED = "signed")
+        assert meta.get("state") in ("signed", "validated")
+        assert meta.get("signing_method") == "v2"
+        assert meta.get("signature_hex"), "signature_hex must be present"
 
     def test_sign_rejects_mute_skill_when_mic_active(
         self, tmp_path: Path

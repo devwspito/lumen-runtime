@@ -659,27 +659,34 @@ class TestComposioSkillRoute:
         assert r2.status_code == 409
 
     def test_recorded_skills_in_list_have_kind_recorded(
-        self, tmp_path: Path
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Existing recorded skills in the list must have skill_kind='recorded'."""
+        """Recorded skills on disk must appear with skill_kind='recorded' (no toolkit_slug)."""
+        import yaml as _yaml  # noqa: PLC0415
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         db = tmp_path / "test.db"
         app = FastAPI()
         app.include_router(create_audit_router(db))
         client = TestClient(app)
 
-        # Insert a recorded skill directly into DB.
-        conn = sqlite3.connect(str(db))
-        conn.execute(
-            """
-            INSERT INTO skill_packages_view
-              (package_id, skill_id, skill_name, version, state, surface_kinds, signed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (str(uuid4()), "pay-invoice", "pay-invoice", 1, "validated",
-             "browser", "2026-06-01T00:00:00+00:00"),
+        # Write a recorded skill as SKILL.md on disk (new architecture).
+        skill_dir = tmp_path / "skills" / "pay-invoice"
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        fm = {
+            "name": "pay-invoice",
+            "description": "A recorded skill",
+            "version": "1",
+            "metadata": {
+                "state": "validated",
+                "signing_method": "none",
+                "surface_kinds": ["browser"],
+            },
+        }
+        (skill_dir / "SKILL.md").write_text(
+            f"---\n{_yaml.dump(fm).rstrip()}\n---\n\n"
+            "## When\n- always\n\n## Procedure\n1. run\n"
         )
-        conn.commit()
-        conn.close()
 
         r = client.get("/api/v1/skills")
         assert r.status_code == 200

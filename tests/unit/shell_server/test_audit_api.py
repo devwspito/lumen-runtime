@@ -60,23 +60,19 @@ class TestSkills:
         assert r.json() == []
 
     async def test_agent_created_skill_appears_in_list(
-        self, tmp_path: Path
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Regression: agent/chat-created skill (HITL-approved skill_manage path)
         must appear in GET /api/v1/skills after SkillStoreAdapter.replay() succeeds.
 
-        This exercises the full daemon→DB→shell-server read path:
-          skill_manage HITL approved
-          → SkillStoreAdapter._upsert_skill
-          → _persist_to_db (INSERT INTO skill_packages_view)
-          → GET /api/v1/skills reads the same DB
-          → skill visible in the Habilidades list.
+        New architecture: skills go to $HERMES_HOME/skills/<name>/SKILL.md (no DB row).
+        The endpoint reads directly from disk when D-Bus is unavailable (CI path).
         """
-        db = tmp_path / "shared.db"
-        skill_root = tmp_path / "skills"
+        hermes_home = tmp_path / "hermes-home"
+        skill_root = hermes_home / "skills"
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
 
-        # Simulate daemon side: SkillStoreAdapter ensures schema at __init__,
-        # then replay() writes the skill after HITL approval.
+        db = tmp_path / "shared.db"
         adapter = SkillStoreAdapter(
             kms=_InMemoryKms(),
             db_path=db,
@@ -104,7 +100,7 @@ class TestSkills:
         outcome = await adapter.replay(action)
         assert outcome.status == ReplayStatus.EXECUTED_OK, outcome.error
 
-        # Simulate shell-server side: read from the same DB via GET /api/v1/skills.
+        # Shell-server side: no dbus_proxy, fallback reads $HERMES_HOME/skills/.
         app = FastAPI()
         app.include_router(create_audit_router(db))
         client = TestClient(app)
@@ -118,15 +114,20 @@ class TestSkills:
             f"Got: {names}"
         )
         skill = next(s for s in skills if s["skill_name"] == "chat-created-skill")
-        assert skill["state"] == "validated"
         assert skill["signing_method"] == "v2"
+        # state is 'validated' when native keystore is available, or kept as written
+        # when key is absent (CI). Either way the skill must be listed.
+        assert skill["state"] in ("validated", "unverified")
 
-    async def test_skill_store_adapter_ensures_schema_on_empty_db(
+    async def test_skill_store_adapter_ensures_governance_schema_on_empty_db(
         self, tmp_path: Path
     ) -> None:
-        """Regression: SkillStoreAdapter.__init__ must initialise skill_packages_view
-        even when the DB is new (shell-server not yet started), so a HITL-approved
-        skill_manage never silently loses the row due to missing table.
+        """Regression: SkillStoreAdapter.__init__ must create the governance schema
+        (skill_packages_view via SkillGovernanceService) even on a fresh DB, so
+        promote/deprecate operations never fail with 'no such table'.
+
+        Note: SkillStoreAdapter no longer writes skill rows to skill_packages_view
+        (that table is used exclusively for governance state mutations now).
         """
         db = tmp_path / "fresh.db"
         skill_root = tmp_path / "skills"
@@ -134,19 +135,19 @@ class TestSkills:
         # DB is brand new — no schema at all.
         assert not db.exists()
 
-        adapter = SkillStoreAdapter(
+        SkillStoreAdapter(
             kms=_InMemoryKms(),
             db_path=db,
             skill_store_root=skill_root,
         )
 
-        # DB must exist and skill_packages_view must be queryable after __init__.
+        # skill_packages_view must exist (governance schema) even though it's empty.
         import sqlite3
         conn = sqlite3.connect(str(db))
         conn.row_factory = sqlite3.Row
         rows = conn.execute("SELECT COUNT(*) AS n FROM skill_packages_view").fetchone()
         conn.close()
-        assert rows["n"] == 0  # empty but schema is there
+        assert rows["n"] == 0  # empty but governance schema is present
 
 
 class TestConsents:

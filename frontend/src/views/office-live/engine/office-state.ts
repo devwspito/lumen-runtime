@@ -141,6 +141,7 @@ export class OfficeState {
   particlePool = new ParticlePool()
   frameCount = 0
   furnitureBadges: Map<number, number> = new Map()
+  furnitureLabels: Record<string, string> | undefined = undefined
 
   private paletteCounter = 0
   _activeA2A: Map<string, { fromId: string; toId: string }> = new Map()
@@ -346,6 +347,7 @@ export class OfficeState {
       this.hoveredAgentId, this.bubbles, this.frameCount,
       this.emotes, this.particlePool, this._activeA2A,
       this.hoveredRoomId, this.hoveredFurnitureIdx, this.furnitureBadges,
+      this.furnitureLabels,
     )
   }
 

@@ -275,6 +275,17 @@ const translations = {
     'agents.dept.new':            'Nuevo departamento…',
     'agents.dept.new.placeholder':'Nombre del nuevo departamento',
     'agents.dept.clear.aria':     'Borrar búsqueda',
+
+    // Agents / Office view — live canvas
+    'agents.canvas.aria':                'Vista isométrica de la oficina con los agentes',
+    'agents.canvas.hint.detail':         'ver detalle',
+    'agents.canvas.furniture.bookshelf': 'Conocimiento',
+    'agents.canvas.furniture.whiteboard':'Reglas',
+    'agents.canvas.furniture.tv':        'Workflows',
+    'agents.canvas.furniture.printer':   'Auditoría',
+    'agents.canvas.furniture.router':    'Gateway',
+    'agents.canvas.furniture.toolbox':   'Herramientas',
+    'agents.canvas.furniture.emptydesk': 'Nuevo Agente',
   },
 
   en: {
@@ -531,6 +542,17 @@ const translations = {
     'agents.dept.new':            'New department…',
     'agents.dept.new.placeholder':'New department name',
     'agents.dept.clear.aria':     'Clear',
+
+    // Agents / Office view — live canvas
+    'agents.canvas.aria':                'Isometric office view with agents',
+    'agents.canvas.hint.detail':         'view details',
+    'agents.canvas.furniture.bookshelf': 'Knowledge',
+    'agents.canvas.furniture.whiteboard':'Rules',
+    'agents.canvas.furniture.tv':        'Workflows',
+    'agents.canvas.furniture.printer':   'Audit',
+    'agents.canvas.furniture.router':    'Gateway',
+    'agents.canvas.furniture.toolbox':   'Tools',
+    'agents.canvas.furniture.emptydesk': 'New Agent',
   },
 } as const
 

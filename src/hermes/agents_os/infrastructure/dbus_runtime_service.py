@@ -932,24 +932,67 @@ class DbusRuntimeServiceWiring:
     # El pipeline de ejecución YA existe (McpServerManager → capability
     # registry → surface adapter → broker → mcp_tool_specs → LLM); esto añade
     # la pieza que faltaba: configurar/persistir/conectar servidores.
-    # Persistencia: mcp-servers.json junto a la DB del daemon (daemon-owned).
+    # Persistencia: config.yaml de Neus (hermes_cli.config), clave mcp_servers.
+    # Neus es la single source of truth; Lumen gates installs (scan/MFA) y
+    # luego escribe a Neus — nunca mantiene su propio store paralelo.
     # ------------------------------------------------------------------
 
     async def list_mcp_servers(self) -> list[dict]:
-        """Servidores MCP configurados + salud + nº tools (read-only)."""
-        out = []
-        for entry in _load_mcp_config():
-            sid = entry["server_id"]
-            health = "disconnected"
-            tools = 0
-            if self._mcp_manager is not None:
-                try:
-                    health = self._mcp_manager.health(_mcp_id(sid))
-                    if health == "healthy":
-                        tools = len(await self._mcp_manager.list_tools(_mcp_id(sid)))
-                except Exception:  # noqa: BLE001 — server no conectado
-                    health = "disconnected"
-            out.append({**entry, "health": health, "tool_count": tools})
+        """Servidores MCP configurados + salud + nº tools (read-only).
+
+        Reads Neus's native registry as the single source of truth:
+          - get_mcp_status()    → live-connected entries with tool counts
+          - _neus_load_config() → configured-but-not-yet-connected entries
+
+        The two are merged (status wins for connected servers) so every
+        configured entry appears exactly once regardless of connection state.
+        """
+        try:
+            from tools.mcp_tool import (  # noqa: PLC0415
+                get_mcp_status,
+                _load_mcp_config as _neus_load_cfg,
+            )
+        except ImportError:
+            logger.warning("hermes.dbus.list_mcp_servers: tools.mcp_tool unavailable — []")
+            return []
+
+        try:
+            live_statuses: list[dict] = get_mcp_status()  # sync — uses background loop
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.list_mcp_servers get_mcp_status failed: %s", exc)
+            live_statuses = []
+
+        try:
+            neus_cfg: dict[str, dict] = _neus_load_cfg()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.list_mcp_servers _load_mcp_config failed: %s", exc)
+            neus_cfg = {}
+
+        # Build output: live statuses first (they carry tool_count), then any
+        # configured-but-not-connected entries not already in the live list.
+        seen: set[str] = set()
+        out: list[dict] = []
+        for status in live_statuses:
+            sid = status.get("name", "")
+            seen.add(sid)
+            argv = _neus_argv(neus_cfg.get(sid, {}))
+            out.append({
+                "server_id": sid,
+                "label": sid,
+                "argv": argv,
+                "health": "healthy" if status.get("connected") else "disconnected",
+                "tool_count": status.get("tools", 0),
+            })
+        for sid, cfg in neus_cfg.items():
+            if sid in seen:
+                continue
+            out.append({
+                "server_id": sid,
+                "label": sid,
+                "argv": _neus_argv(cfg),
+                "health": "disconnected",
+                "tool_count": 0,
+            })
         return out
 
     async def add_mcp_server(self, *, draft_json: str, sender_uid: int) -> dict:
@@ -1066,16 +1109,14 @@ class DbusRuntimeServiceWiring:
             server = await _mcp_connect(self._mcp_manager, sid, argv, env=byok_env)
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": f"conexión falló: {exc}"}
-        entries = [e for e in _load_mcp_config() if e["server_id"] != sid]
-        entry: dict = {
-            "server_id": sid,
-            "label": str(d.get("label") or sid),
-            "argv": argv,
-        }
-        if byok_env:
-            entry["env"] = byok_env
-        entries.append(entry)
-        _save_mcp_config(entries)
+        # GATE PASSED — persist to Neus's native registry (single source of truth).
+        # The cage (scan/MFA) runs BEFORE this write; a poisoned command would be
+        # RCE, so persistence ONLY happens after all gates clear.
+        try:
+            _neus_write_mcp_entry(sid, argv, env=byok_env)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("hermes.dbus.mcp_neus_write_failed server=%s: %s", sid, exc)
+            return {"ok": False, "error": f"persistencia en Neus falló: {exc}"}
         # Log connection without exposing secret values.
         _log_env_keys = sorted(byok_env.keys())
         logger.info(
@@ -1092,9 +1133,7 @@ class DbusRuntimeServiceWiring:
                 await self._mcp_manager.disconnect(_mcp_id(server_id))
             except Exception:  # noqa: BLE001 — ya desconectado
                 pass
-        _save_mcp_config(
-            [e for e in _load_mcp_config() if e["server_id"] != server_id]
-        )
+        _neus_remove_mcp_entry(server_id)
         return {"ok": True}
 
     async def search_mcp_registry(self, *, query: str, limit: int) -> list[dict]:
@@ -2252,24 +2291,32 @@ class DbusRuntimeServiceWiring:
     def list_skills(self) -> list[dict]:
         """Lista skills (read-only). No requiere authZ.
 
-        Merges two sources:
-          1. DB (skill_packages_view) — skills created via SkillStoreAdapter
-             (broker-gated, signed, versioned).
-          2. On-disk SKILL.md files in $HERMES_HOME/skills/ — skills written
-             directly by hermes-agent's skill_manage tool. These are NOT in
-             the DB; we surface them so the UI shows them instead of "No hay skills".
+        Primary source: Neus native skill dirs via list_skills_native().
+        Secondary source: composio_skills table (separate concern — connected
+        integration skills have no on-disk SKILL.md).
 
-        DB entries take precedence: on-disk skills with the same name are skipped.
-
-        The native scan only runs when HERMES_HOME is explicitly set in env
-        (the daemon always sets it; tests and CI do not).
+        The DB skill_packages_view is no longer used as the source of truth
+        for listing (BUG 3 fix): agent-created skills exist only on disk, so
+        reading the DB missed them. list_skills_native() covers all origins.
         """
-        db_skills: list[dict] = []
-        if self._skill_governance is not None:
-            db_skills = self._skill_governance.list_skills()
+        native = self.list_skills_native()
+        composio = _list_composio_skills(self._skill_governance)
+        seen_names = {s["skill_name"] for s in native}
+        extras = [s for s in composio if s["skill_name"] not in seen_names]
+        return native + extras
 
-        native_skills = _list_native_hermes_agent_skills(db_skills)
-        return db_skills + native_skills
+    def list_skills_native(self) -> list[dict]:
+        """Enumerate Neus native skill dirs and return SkillPackageDTO-shaped dicts.
+
+        Reads $HERMES_HOME/skills/<name>/SKILL.md for every skill directory.
+        Governance fields (state, signing_method, signature_hex) are read from
+        the SKILL.md frontmatter.metadata block (written by SkillStoreAdapter
+        after signing). Skills without governance metadata are surfaced as
+        state='native' (agent-created, not cage-signed).
+
+        Fail-soft: returns [] on any error.
+        """
+        return _list_native_skills_primary()
 
     async def promote_skill(self, *, package_id: str, sender_uid: int) -> dict:
         """Promueve una skill VALIDATED → AUTONOMOUS. by = UID del bus (CWE-862).
@@ -2689,34 +2736,23 @@ class DbusRuntimeServiceWiring:
         }
 
     async def list_configured_tasks(self, *, limit: int = 200) -> list[dict]:
-        """Configured tasks dashboard (one row per authorized trigger).
+        """Configured tasks dashboard (one row per Neus cron job).
 
         Read-only supervision — no authZ required (CTRL-P1-5).
         Returns only trigger metadata + last-run info; no payload, no credentials.
 
-        Usa el MISMO trigger_repo que create_scheduled_task (lazy del wiring) para
-        garantizar coherencia create↔list. El cp_service del composition root se
-        construyó sin trigger_repo → su list_configured_tasks devolvía siempre ()
-        (tablero vacío aunque se crearan tareas). Reusamos la lógica de vistas
-        (next_run_at + recurrence_human) de control_plane_service.
-        """
-        try:
-            repo = self._require_trigger_repo()
-        except Exception as exc:  # noqa: BLE001 — read-only: vacío honesto
-            logger.warning("hermes.dbus.list_configured_tasks_no_repo: %s", exc)
-            return []
-        from datetime import UTC, datetime  # noqa: PLC0415
+        BUG-7 ROOT FIX: reads from Neus cron/jobs.json (single source of truth)
+        instead of the Lumen trigger_repo. The agent's `cronjob` tool writes to
+        jobs.json; the UI creates via create_scheduled_task (which now also writes
+        to jobs.json). Both paths write to the SAME store, so the dashboard is
+        always consistent regardless of who created the job.
 
-        from hermes.tasks.control_plane.application.control_plane_service import (  # noqa: PLC0415
-            _build_configured_task_view,
-        )
-        rows = repo.list_triggers_with_last_run(limit=limit)
-        now = datetime.now(tz=UTC)
-        views = [
-            _build_configured_task_view(trigger, last_run_at, last_status, now)
-            for trigger, last_run_at, last_status in rows
-        ]
-        return [_configured_task_to_dict(v) for v in views]
+        The trigger_repo (SqliteAuthorizedTriggerRepository) is NOT consulted here
+        — it owns the AUTHORIZATION allow-list that TriggerGate.enqueue_from_trigger
+        reads. That security gate is untouched.
+        """
+        jobs = _neus_cron_list_jobs(include_disabled=True)
+        return [_neus_job_to_task_dict(job) for job in jobs[:limit]]
 
     async def list_recent_tasks(self, *, limit: int = 50) -> list[dict]:
         """Recent work items across all statuses (activity log).
@@ -3022,10 +3058,24 @@ class DbusRuntimeServiceWiring:
             title=title,
         )
 
+        # BUG-7 fix: also write to Neus jobs.json (the catalog read by list_configured_tasks).
+        # The trigger_repo.authorize() above recorded the AUTHORIZATION row (security gate).
+        # The Neus job is the CATALOG entry that the dashboard reads. Both must be written.
+        # Fail-soft: a Neus write error must not roll back the authorization (the agent
+        # can still approve, the HITL gate is already passed; catalog inconsistency is
+        # less harmful than denying the whole operation).
+        neus_job_id = _neus_cron_create_job(
+            prompt=task_instruction,
+            schedule=cron,
+            name=title or task_instruction[:50],
+            one_shot=one_shot,
+        )
+
         logger.info(
             "hermes.dbus.scheduled_task_created",
             extra={
                 "trigger_id": str(trigger.trigger_instance_id),
+                "neus_job_id": neus_job_id or "unavailable",
                 "cron": cron,
                 "one_shot": one_shot,
                 "by_uid": sender_uid,
@@ -5481,31 +5531,241 @@ def _validate_url(value: str, *, field: str) -> None:
         raise ValueError(f"{field} debe incluir un host (netloc vacío)")
 
 
-def _mcp_config_path():
-    import os as _os  # noqa: PLC0415
-    from pathlib import Path as _Path  # noqa: PLC0415
-    return _Path(
-        _os.environ.get("HERMES_MCP_CONFIG", "/var/lib/hermes/mcp-servers.json")
+# ---------------------------------------------------------------------------
+# Neus MCP registry bridge — Lumen reads/writes via hermes_cli.config so
+# config.yaml (mcp_servers) is the single source of truth.  The old
+# mcp-servers.json (Lumen parallel store) is DELETED; these helpers replace it.
+# ---------------------------------------------------------------------------
+
+def _neus_argv(neus_cfg: dict) -> list[str]:
+    """Convert a Neus server config entry to a Lumen-style argv list.
+
+    Neus stores command + args separately; Lumen uses a flat argv.
+    """
+    cmd = str(neus_cfg.get("command") or "")
+    args = [str(a) for a in (neus_cfg.get("args") or [])]
+    return [cmd, *args] if cmd else args
+
+
+def _neus_load_entries() -> list[dict]:
+    """Return Neus mcp_servers as a list of Lumen-compatible dicts.
+
+    Shape: [{server_id, label, argv, env?}, ...]. Fail-soft: returns []
+    on any import or parse error so boot reconnect is never fatal.
+    """
+    try:
+        from tools.mcp_tool import _load_mcp_config as _neus_cfg  # noqa: PLC0415
+    except ImportError:
+        logger.warning("hermes.dbus.neus_load_entries: tools.mcp_tool unavailable")
+        return []
+    try:
+        neus_map: dict[str, dict] = _neus_cfg()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("hermes.dbus.neus_load_entries failed: %s", exc)
+        return []
+    entries: list[dict] = []
+    for sid, cfg in neus_map.items():
+        entry: dict = {
+            "server_id": sid,
+            "label": sid,
+            "argv": _neus_argv(cfg),
+        }
+        if cfg.get("env"):
+            entry["env"] = {k: v for k, v in cfg["env"].items()}
+        entries.append(entry)
+    return entries
+
+
+def _neus_write_mcp_entry(server_id: str, argv: list[str], *, env: dict | None = None) -> None:
+    """Persist a new/updated MCP server entry into Neus's config.yaml.
+
+    Gate contract: this function MUST only be called AFTER the Lumen security
+    gate (scan/MFA) has passed. A poisoned argv[0] here is RCE because Neus
+    will spawn it. The caller (add_mcp_server) enforces this ordering.
+
+    Neus format under mcp_servers.<server_id>:
+      command: argv[0]
+      args: argv[1:]
+      env: {...}   (omitted when empty)
+    """
+    from hermes_cli.config import load_config, save_config  # noqa: PLC0415
+
+    cfg = load_config()
+    mcp_servers: dict = cfg.setdefault("mcp_servers", {})
+    entry: dict = {
+        "command": argv[0] if argv else "",
+        "args": list(argv[1:]),
+    }
+    if env:
+        entry["env"] = dict(env)
+    mcp_servers[server_id] = entry
+    save_config(cfg)
+
+    # Notify Neus's live registry so the server is available immediately
+    # without restarting the daemon. register_mcp_servers is idempotent for
+    # already-connected servers but activates the newly written entry.
+    try:
+        from tools.mcp_tool import register_mcp_servers  # noqa: PLC0415
+        register_mcp_servers({server_id: entry})
+    except Exception as exc:  # noqa: BLE001 — connection already happened via _mcp_connect
+        logger.debug("hermes.dbus.neus_register_after_write server=%s: %s", server_id, exc)
+
+
+def _neus_remove_mcp_entry(server_id: str) -> None:
+    """Remove a server entry from Neus's config.yaml (mcp_servers dict)."""
+    try:
+        from hermes_cli.config import load_config, save_config  # noqa: PLC0415
+    except ImportError:
+        logger.warning("hermes.dbus.neus_remove: hermes_cli.config unavailable")
+        return
+    try:
+        cfg = load_config()
+        mcp_servers: dict = cfg.get("mcp_servers") or {}
+        mcp_servers.pop(server_id, None)
+        cfg["mcp_servers"] = mcp_servers
+        save_config(cfg)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("hermes.dbus.neus_remove_failed server=%s: %s", server_id, exc)
+
+
+# ---------------------------------------------------------------------------
+# Neus cron bridge — single source of truth for the job CATALOG (BUG-7 fix)
+#
+# AUTHORIZATION vs CATALOG SPLIT (explicit):
+#   AUTHORIZATION (stays in Lumen):
+#     SqliteAuthorizedTriggerRepository (authorized_trigger_instances table).
+#     Consulted by TriggerGate.enqueue_from_trigger → is_authorized() on EVERY
+#     autonomous trigger attempt. Fail-closed. Revocable instantly. The cage gate.
+#     NOT changed by this fix.
+#
+#   CATALOG (moved to Neus jobs.json):
+#     cron.jobs.list_jobs / create_job / remove_job.
+#     The agent's `cronjob` tool writes here. The UI's create_scheduled_task now
+#     also writes here. list_configured_tasks reads ONLY here.
+#     Previously list_configured_tasks read trigger_repo → showed 0 rows for
+#     agent-created jobs (BUG-7). Now it reads jobs.json → both sources visible.
+# ---------------------------------------------------------------------------
+
+
+def _neus_cron_list_jobs(*, include_disabled: bool = True) -> list[dict]:
+    """Return Neus cron jobs as a list of raw job dicts.
+
+    Fail-soft: returns [] on ImportError (cron.jobs not installed) or any
+    other error so the dashboard degrades gracefully.
+    """
+    try:
+        from cron.jobs import list_jobs  # noqa: PLC0415
+    except ImportError:
+        logger.warning("hermes.dbus.neus_cron_list_jobs: cron.jobs unavailable")
+        return []
+    try:
+        return list_jobs(include_disabled=include_disabled)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("hermes.dbus.neus_cron_list_jobs failed: %s", exc)
+        return []
+
+
+def _neus_cron_create_job(
+    *,
+    prompt: str,
+    schedule: str,
+    name: str,
+    one_shot: bool,
+) -> str | None:
+    """Write a new job to Neus cron/jobs.json. Returns the Neus job id or None.
+
+    Gate contract: MUST only be called AFTER the Lumen security gate
+    (trigger_repo.authorize) has passed. Fail-soft: logs and returns None on
+    any error so the outer create_scheduled_task can still succeed (auth row
+    already committed).
+    """
+    try:
+        from cron.jobs import create_job  # noqa: PLC0415
+    except ImportError:
+        logger.warning("hermes.dbus.neus_cron_create_job: cron.jobs unavailable")
+        return None
+    try:
+        repeat = 1 if one_shot else None
+        job = create_job(prompt=prompt, schedule=schedule, name=name, repeat=repeat)
+        return str(job.get("id", ""))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("hermes.dbus.neus_cron_create_job failed: %s", exc)
+        return None
+
+
+def _neus_job_to_task_dict(job: dict) -> dict:
+    """Map a Neus cron job dict to the ConfiguredTaskView wire shape.
+
+    The wire shape is defined by _configured_task_to_dict. Unknown schedule
+    shapes render recurrence_human as 'schedule unavailable' rather than
+    dropping the row (honest-empty policy, CTRL-P1-5).
+
+    SECURITY: this function reads metadata only. prompt is NOT exposed in
+    the return value — only the title/label (same as CTRL-P1-5 on the
+    trigger_repo path which capped task_instruction at 120 chars in the
+    label derivation). We truncate prompt to 120 chars max for the label.
+    """
+    from datetime import UTC, datetime  # noqa: PLC0415
+
+    from hermes.tasks.control_plane.application.control_plane_service import (  # noqa: PLC0415
+        _cron_next_fire,
+        _cron_recurrence_human,
     )
 
+    job_id = str(job.get("id") or "")
+    name = str(job.get("name") or "").strip()
+    prompt = str(job.get("prompt") or "").strip()
+    label = name or prompt[:120] or job_id or "cron job"
 
-def _load_mcp_config() -> list[dict]:
-    try:
-        raw = json.loads(_mcp_config_path().read_text(encoding="utf-8"))
-        return [e for e in raw if isinstance(e, dict) and e.get("server_id")]
-    except FileNotFoundError:
-        return []
-    except Exception as exc:  # noqa: BLE001 — config corrupta ≠ daemon caído
-        logger.warning("hermes.dbus.mcp_config_unreadable: %s", exc)
-        return []
+    schedule = job.get("schedule") or {}
+    schedule_display = str(job.get("schedule_display") or "").strip()
+    cron_expr = ""
+    recurrence_human = ""
+    next_run_at = str(job.get("next_run_at") or "")
 
+    if isinstance(schedule, dict):
+        kind = schedule.get("kind", "")
+        if kind == "cron":
+            cron_expr = str(schedule.get("expr") or schedule.get("display") or "").strip()
+        elif kind == "once":
+            cron_expr = str(schedule.get("run_at") or schedule.get("display") or "").strip()
+        elif kind == "interval":
+            cron_expr = str(schedule.get("display") or "").strip()
+        else:
+            cron_expr = schedule_display
+    elif schedule:
+        cron_expr = str(schedule)
 
-def _save_mcp_config(entries: list[dict]) -> None:
-    import os as _os  # noqa: PLC0415
-    path = _mcp_config_path()
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(entries, indent=2), encoding="utf-8")
-    _os.replace(tmp, path)
+    if not cron_expr:
+        cron_expr = schedule_display or "schedule unavailable"
+
+    if cron_expr and " " in cron_expr and not recurrence_human:
+        now = datetime.now(tz=UTC)
+        recurrence_human = _cron_recurrence_human(cron_expr)
+        if not next_run_at:
+            next_dt = _cron_next_fire(cron_expr, after=now)
+            next_run_at = next_dt.isoformat() if next_dt else ""
+
+    enabled = bool(job.get("enabled", True))
+    last_run_at = str(job.get("last_run_at") or "")
+    last_status = str(job.get("last_status") or "")
+
+    return {
+        "trigger_id": job_id,
+        "label": label,
+        "trigger_type": "timer",
+        "recurrence": cron_expr,
+        "recurrence_human": recurrence_human,
+        "enabled": enabled,
+        "risk_ceiling": "low",
+        "last_run_at": last_run_at,
+        "last_status": last_status,
+        "next_run_at": next_run_at,
+        "target_agent_id": "",
+        "task_instruction": "",
+        "one_shot": bool(job.get("repeat", {}).get("times") == 1 if isinstance(job.get("repeat"), dict) else False),
+        "title": name,
+    }
 
 
 def _mcp_id(server_id: str):
@@ -5751,15 +6011,15 @@ def _normalize_registry_entry(item: dict) -> dict:
 async def reconnect_persisted_mcp_servers(manager) -> None:
     """Reconecta al boot los servidores MCP configurados (fail-soft por server).
 
-    Llamado como task asyncio desde runtime/__main__ tras construir el manager.
-    Un servidor caído NO bloquea el boot ni a los demás: queda "disconnected"
-    en ListMcpServers y el operador lo ve en la app MCP.
+    Reads Neus's native mcp_servers (config.yaml) as the single source of
+    truth. Llamado como task asyncio desde runtime/__main__ tras construir
+    el manager. Un servidor caído NO bloquea el boot ni a los demás.
 
     BYOK env: si la entrada persiste un campo "env" (p.ej. OD_DAEMON_URL para
     open-design), se pasa a _mcp_connect para que llegue al launcher y al
     proceso del servidor. Sin esto, servidores BYOK fallan tras reiniciar.
     """
-    entries = _load_mcp_config()
+    entries = _neus_load_entries()
     if not entries:
         return
     for entry in entries:
@@ -5799,11 +6059,11 @@ async def reconnect_byok_empty_openai_mcp_servers(manager) -> None:
     empty. We force a reconnect (disconnect, then _mcp_connect) ONLY for these
     entries so the auto-wire now fills them from the active provider. We do NOT
     reconnect every server, and we never persist the filled keys back to config
-    (they stay empty in mcp-servers.json; only the live process gets them).
+    (they stay empty in Neus config.yaml; only the live process gets them).
     """
     if manager is None:
         return
-    entries = _load_mcp_config()
+    entries = _neus_load_entries()
     if not entries:
         return
     for entry in entries:
@@ -6057,3 +6317,241 @@ def _extract_skill_description(skill_md: "Any") -> str:
             value = line[len("description:"):].strip().strip('"').strip("'")
             return value[:200]
     return ""
+
+
+def _parse_skill_md_frontmatter(skill_md_path: "Any") -> dict:
+    """Parse all YAML frontmatter fields from a SKILL.md file.
+
+    Returns a dict with name, description, version, and metadata sub-dict.
+    Never raises — returns {} on any error.
+    """
+    try:
+        import yaml as _yaml  # noqa: PLC0415
+        text = skill_md_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        return {}
+
+    if not text.startswith("---"):
+        return {}
+    end = text.find("---", 3)
+    if end == -1:
+        return {}
+    try:
+        parsed = _yaml.safe_load(text[3:end]) or {}
+    except Exception:  # noqa: BLE001
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _list_native_skills_primary(
+    *,
+    skills_root: "Any | None" = None,
+) -> list[dict]:
+    """Enumerate all SKILL.md files under $HERMES_HOME/skills/ as DTO dicts.
+
+    This is the PRIMARY source for list_skills_native(). Every skill dir
+    (whether created by the agent's skill_manage tool OR by SkillStoreAdapter
+    after HITL approval) is included. Governance fields (state, signing_method,
+    signature_hex, signature_short) are read from frontmatter.metadata so that
+    cage-signed skills surface their provenance without a separate DB table.
+
+    Skills without governance metadata are surfaced with state='native'
+    (agent-created, not cage-signed).
+
+    Args:
+        skills_root: Override the scan root (tests). When None: uses
+                     $HERMES_HOME/skills/ only when HERMES_HOME is set.
+    """
+    import os as _os  # noqa: PLC0415
+    from pathlib import Path as _Path  # noqa: PLC0415
+
+    if skills_root is None:
+        hermes_home_env = _os.environ.get("HERMES_HOME", "")
+        if not hermes_home_env:
+            return []
+        skills_root = _Path(hermes_home_env) / "skills"
+    else:
+        skills_root = _Path(skills_root)
+
+    if not skills_root.is_dir():
+        return []
+
+    results: list[dict] = []
+    for skill_md in sorted(skills_root.rglob("SKILL.md")):
+        entry = _skill_md_to_dto(skill_md)
+        if entry:
+            results.append(entry)
+    return results
+
+
+def _skill_md_to_dto(skill_md_path: "Any") -> "dict | None":
+    """Convert a SKILL.md file to a SkillPackageDTO-shaped dict.
+
+    Reads governance fields from frontmatter.metadata (written by SkillStoreAdapter).
+    For v2-signed skills, re-verifies the HMAC using the native keystore — if the
+    signature does not verify the skill is downgraded to state='unverified'/
+    source='disk' and still listed (BUG 3 fix is preserved). This prevents a
+    locally modified SKILL.md from surfacing as state='validated' (CWE-345).
+
+    Returns None on unrecoverable parse error.
+    """
+    skill_name = skill_md_path.parent.name
+    fm = _parse_skill_md_frontmatter(skill_md_path)
+    if not fm:
+        return None
+
+    meta: dict = fm.get("metadata") or {}
+    signed_at = meta.get("signed_at") or _iso_mtime(skill_md_path)
+    state = meta.get("state") or "native"
+    signing_method = meta.get("signing_method") or "none"
+    signature_hex = meta.get("signature_hex") or None
+    signature_short = signature_hex[:12] if signature_hex else None
+    package_id = meta.get("package_id") or f"native:{skill_name}"
+    skill_id = meta.get("skill_id") or f"native:{skill_name}"
+    validated_at = meta.get("validated_at") or (signed_at if state != "native" else None)
+    promoted_at = meta.get("promoted_at") or None
+    source = "hermes_agent" if state == "native" else "cage"
+
+    # Re-verify HMAC for v2-signed skills (CWE-345: do not trust self-asserted
+    # provenance). Downgrade only when the key is available and the signature
+    # FAILS — if the key is simply unavailable (no master.key in CI/dev env)
+    # we keep the on-disk state (cannot forge without the key anyway).
+    if signing_method == "v2" and signature_hex and len(signature_hex) == 64:
+        verified = _verify_skill_md_signature(meta, signature_hex, skill_name)
+        if verified is False:  # key available but signature mismatch
+            state = "unverified"
+            source = "disk"
+            validated_at = None
+
+    return {
+        "package_id": package_id,
+        "skill_id": skill_id,
+        "skill_name": skill_name,
+        "version": int(meta.get("version") or 1),
+        "state": state,
+        "surface_kinds": meta.get("surface_kinds") or ["skill_manage"],
+        "signed_at": signed_at,
+        "signature_short": signature_short,
+        "validated_at": validated_at,
+        "promoted_at": promoted_at,
+        "signing_method": signing_method,
+        "toolkit_slug": None,
+        "description": fm.get("description") or "",
+        "source": source,
+    }
+
+
+def _verify_skill_md_signature(
+    meta: dict, stored_signature_hex: str, skill_name: str
+) -> "bool | None":
+    """Re-compute HMAC-SHA256 v2 over the canonical payload stored in frontmatter.metadata.
+
+    Returns:
+        True  — computed HMAC matches stored_signature_hex (verified).
+        False — key available but HMAC does not match (forgery / tampering detected).
+        None  — key unavailable (no master.key in env) — cannot verify, cannot forge;
+                caller keeps the on-disk state as-is.
+
+    This tri-state lets `_skill_md_to_dto` downgrade only on *confirmed* mismatch,
+    not on *infrastructure unavailability* (e.g. CI environments without master.key).
+    """
+    import hashlib as _hashlib  # noqa: PLC0415
+    import hmac as _hmac  # noqa: PLC0415
+    import json as _json  # noqa: PLC0415
+
+    try:
+        from hermes.shell_server.skills.native_keystore_adapter import (  # noqa: PLC0415
+            NativeKeyStoreAdapter,
+        )
+        signing_key = NativeKeyStoreAdapter().get_signing_key_sync()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "hermes.skill_md_verify.key_unavailable skill=%s: %s", skill_name, exc
+        )
+        return None  # Cannot verify — key absent, not a forgery signal
+
+    try:
+        payload_dict = {
+            "replay_script_id": meta["replay_script_id"],
+            "decision_rule_ids": sorted(meta.get("decision_rule_ids") or []),
+            "voice_narrative_id": meta["voice_narrative_id"],
+            "content_hash": meta["content_hash"],
+            "tenant_id": meta["tenant_id"],
+            "compiled_by_operator_id": meta["compiled_by_operator_id"],
+            "created_at": meta["created_at"],
+            "runtime_version": meta["runtime_version"],
+        }
+    except KeyError as exc:
+        logger.debug(
+            "hermes.skill_md_verify.payload_field_missing skill=%s field=%s",
+            skill_name,
+            exc,
+        )
+        # Missing fields with a present key is a tamper signal — downgrade.
+        return False
+
+    canonical = _json.dumps(payload_dict, sort_keys=True, separators=(",", ":")).encode()
+    expected = _hmac.new(signing_key, canonical, _hashlib.sha256).hexdigest()
+    result = _hmac.compare_digest(expected, stored_signature_hex)
+    if not result:
+        logger.warning(
+            "hermes.skill_md_verify.signature_mismatch skill=%s — downgrading to unverified",
+            skill_name,
+        )
+    return result
+
+
+def _list_composio_skills(skill_governance: "Any | None") -> list[dict]:
+    """Return Composio skills from the DB (separate concern from native skills).
+
+    Composio skills have no on-disk SKILL.md — they live purely in the
+    composio_skills table. This supplements the native list for those skills.
+    Fail-soft: returns [] when skill_governance is None or the DB is unavailable.
+    """
+    if skill_governance is None:
+        return []
+    try:
+        import sqlite3 as _sqlite3  # noqa: PLC0415
+
+        db_path = skill_governance._db_path
+        conn = _sqlite3.connect(str(db_path), isolation_level=None)
+        conn.row_factory = _sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT spv.package_id, spv.skill_id, spv.skill_name,
+                   spv.version, spv.state, spv.surface_kinds,
+                   spv.signed_at, spv.signature_short,
+                   spv.validated_at, spv.promoted_at,
+                   COALESCE(spv.signing_method, 'v1') AS signing_method,
+                   cs.toolkit_slug
+              FROM skill_packages_view spv
+              JOIN composio_skills cs ON cs.package_id = spv.package_id
+             ORDER BY spv.signed_at DESC
+            """
+        ).fetchall()
+        conn.close()
+        return [_composio_row_to_dict(r) for r in rows]
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("hermes.dbus.composio_skills_unreadable: %s", exc)
+        return []
+
+
+def _composio_row_to_dict(row: "Any") -> dict:
+    """Map a composio_skills JOIN row to a SkillPackageDTO-shaped dict."""
+    keys = row.keys()
+    return {
+        "package_id": row["package_id"],
+        "skill_id": row["skill_id"],
+        "skill_name": row["skill_name"],
+        "version": int(row["version"]),
+        "state": row["state"],
+        "surface_kinds": (row["surface_kinds"] or "").split(",") if row["surface_kinds"] else [],
+        "signed_at": row["signed_at"],
+        "signature_short": row["signature_short"],
+        "validated_at": row["validated_at"] if "validated_at" in keys else None,
+        "promoted_at": row["promoted_at"] if "promoted_at" in keys else None,
+        "signing_method": row["signing_method"] if "signing_method" in keys else "v1",
+        "toolkit_slug": row["toolkit_slug"],
+        "description": "",
+        "source": "composio",
+    }

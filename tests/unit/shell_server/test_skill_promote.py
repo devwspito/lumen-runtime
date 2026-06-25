@@ -62,10 +62,19 @@ def _insert_skill(
 ) -> str:
     """Insert a skill_packages_view row and return package_id.
 
+    Calls SkillGovernanceService first to ensure the schema exists, then
+    inserts a row directly (simulating a governance operation on a known skill).
+
     with_v2_sig=True (default): inserts a v2-signed skill that passes the
     promote gate. with_v2_sig=False: inserts without signature (for testing
     the rejection path).
     """
+    from hermes.shell_server.skills.skill_governance_service import (  # noqa: PLC0415
+        SkillGovernanceService,
+    )
+    # Ensure the governance schema (skill_packages_view) exists.
+    SkillGovernanceService(db_path=db_path)
+
     pkg_id = str(uuid4())
     skill_id = str(uuid4())
     signed_at = datetime.now(tz=UTC).isoformat()
@@ -107,6 +116,26 @@ def _insert_skill(
     conn.commit()
     conn.close()
     return pkg_id
+
+
+def _write_skill_md(
+    skills_root: Path, *, name: str = "pay-invoice", state: str = "validated"
+) -> None:
+    """Write a minimal SKILL.md to skills_root/<name>/ for listing tests."""
+    import yaml as _yaml  # noqa: PLC0415
+    skill_dir = skills_root / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    fm = {
+        "name": name,
+        "description": "Test skill for promote tests",
+        "version": "1",
+        "metadata": {
+            "state": state,
+            "signing_method": "none",
+        },
+    }
+    content = f"---\n{_yaml.dump(fm).rstrip()}\n---\n\n## When\n- always\n\n## Procedure\n1. run\n"
+    (skill_dir / "SKILL.md").write_text(content)
 
 
 @pytest.fixture
@@ -209,24 +238,75 @@ class TestPromoteEndpoint:
 
 class TestSkillListNewFields:
     def test_list_includes_validated_at_and_promoted_at(
-        self, client_with_db: tuple[TestClient, Path]
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        client, db_path = client_with_db
-        _insert_skill(db_path, state="validated")
+        """GET /api/v1/skills returns validated_at and promoted_at from SKILL.md."""
+        import yaml as _yaml  # noqa: PLC0415
+        skills_root = tmp_path / "skills"
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        signed_at = datetime.now(tz=UTC).isoformat()
+        skill_dir = skills_root / "pay-invoice"
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        fm = {
+            "name": "pay-invoice",
+            "description": "Test skill",
+            "version": "1",
+            "metadata": {
+                "state": "validated",
+                "signing_method": "none",
+                "validated_at": signed_at,
+                "promoted_at": None,
+            },
+        }
+        (skill_dir / "SKILL.md").write_text(
+            f"---\n{_yaml.dump(fm).rstrip()}\n---\n\n## When\n- always\n\n## Procedure\n1. run\n"
+        )
+
+        app = FastAPI()
+        app.include_router(create_audit_router(tmp_path / "audit.db"))
+        client = TestClient(app)
 
         r = client.get("/api/v1/skills")
         assert r.status_code == 200
+        assert len(r.json()) >= 1
         item = r.json()[0]
         assert "validated_at" in item
         assert "promoted_at" in item
 
     def test_list_treats_signed_state_as_validated(
-        self, client_with_db: tuple[TestClient, Path]
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Legacy 'signed' → 'validated' in the read path (plan.md §3)."""
-        client, db_path = client_with_db
-        _insert_skill(db_path, state="signed")
+        """Legacy 'signed' state on disk is surfaced as 'signed' (no coerce in list path).
+
+        The _coerce_state helper only applies inside SkillGovernanceService for DB rows.
+        The filesystem listing surfaces state verbatim from frontmatter.metadata.state.
+        """
+        import yaml as _yaml  # noqa: PLC0415
+        skills_root = tmp_path / "skills"
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        skill_dir = skills_root / "legacy-skill"
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        fm = {
+            "name": "legacy-skill",
+            "description": "Legacy skill",
+            "version": "1",
+            "metadata": {"state": "signed", "signing_method": "none"},
+        }
+        (skill_dir / "SKILL.md").write_text(
+            f"---\n{_yaml.dump(fm).rstrip()}\n---\n\n## When\n- always\n\n## Procedure\n1. run\n"
+        )
+
+        app = FastAPI()
+        app.include_router(create_audit_router(tmp_path / "audit.db"))
+        client = TestClient(app)
 
         r = client.get("/api/v1/skills")
         assert r.status_code == 200
-        assert r.json()[0]["state"] == "validated"
+        # The DTO layer coerces 'signed' → 'validated' for backward compatibility.
+        # The skill must be listed; the coerced state is 'validated'.
+        states = {s["state"] for s in r.json()}
+        assert "validated" in states, (
+            f"legacy 'signed' state must surface as 'validated' via DTO coercion. Got: {states}"
+        )

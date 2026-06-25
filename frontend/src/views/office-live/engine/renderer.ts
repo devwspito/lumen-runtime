@@ -72,7 +72,8 @@ export function renderFrame(
   a2aMeetings?: Map<string, A2AMeeting>,
   hoveredRoomId?: string | null,
   hoveredFurnitureIdx?: number,
-  furnitureBadges?: Map<number, number>
+  furnitureBadges?: Map<number, number>,
+  furnitureLabels?: Record<string, string>
 ): void {
   // Blueprint grid background
   ctx.fillStyle = "#1a1a2e"
@@ -248,7 +249,7 @@ export function renderFrame(
     toolbox: "🔧",
     emptydesk: "➕",
   }
-  const FURNITURE_LABELS: Record<string, string> = {
+  const FURNITURE_LABELS: Record<string, string> = furnitureLabels ?? {
     bookshelf: "Conocimiento",
     whiteboard: "Reglas",
     tv: "Workflows",
