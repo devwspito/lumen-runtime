@@ -114,48 +114,26 @@ def create_approvals_router(mfa: MfaStore | None = None) -> APIRouter:
             except AgentUnavailable as exc:
                 raise _unavailable(proposal_id, exc) from exc
 
-        # APPROVE — escalated MFA model (owner decision 2026-06-25).
-        # Resolve the tier from the pending rows to decide if TOTP is needed.
-        # The tier comes from the stored tool_name (server-side, not client-supplied).
-        mfa_factors: MfaFactors | None = None
-        pending_rows = []
-        try:
-            pending_rows = await request.app.state.control_plane.list_hitl_pending()
-        except Exception:  # noqa: BLE001 — degraded but safe: treat as simple
-            pass
-
-        target_tool = ""
-        for r in pending_rows:
-            if str(r.get("proposal_id", "")) == proposal_id:
-                target_tool = r.get("tool_name", "")
-                break
-
-        needs_mfa = is_mfa_required(target_tool) if target_tool else False
-
-        if needs_mfa:
-            # mfa-tier: TOTP required. Pre-verify here for a friendly error; also
-            # forward factors to the gate (the single enforcement point).
-            if not store.is_enrolled():
-                raise HTTPException(status_code=403, detail={"code": "mfa_not_enrolled",
-                    "message": "Configura el MFA antes de aprobar esta acción "
-                    "(requiere verificación por ser una acción de alta delicadeza)."})
-            ok, reason = store.verify(level=ProtectionLevel.MFA, totp=body.totp or "")
-            if not ok:
-                logger.warning(
-                    "hermes.cowork.approvals.mfa_denied proposal=%s tool=%s reason=%s",
-                    proposal_id, target_tool, reason,
-                )
-                raise HTTPException(status_code=401, detail={"code": reason,
-                    "message": _mfa_reason_message(reason)})
-            mfa_factors = MfaFactors(totp=body.totp or "")
+        # APPROVE — ALWAYS forward the owner's TOTP if provided. The GATE is the single
+        # MFA enforcement point: it decides FROM THE STORED tool_name whether MFA is
+        # required and verifies it. (Bug fixed 2026-06-25: this used to re-fetch the
+        # pending list and STRING-MATCH the proposal_id to decide whether to forward the
+        # TOTP. When that match missed — e.g. id-format/timing — an mfa-tier approval was
+        # sent with mfa_factors=None and the gate DENIED a VALID approval with mfa_required.
+        # The owner "entered the right TOTP" and it was dropped before the gate. We now
+        # forward whatever the owner signed and let the gate be the source of truth + return
+        # the precise reason [mfa_required|invalid_totp|mfa_not_enrolled] for a friendly msg.)
+        mfa_factors: MfaFactors | None = (
+            MfaFactors(totp=body.totp) if (body.totp and body.totp.strip()) else None
+        )
 
         try:
             await request.app.state.control_plane.approve(
                 channel=channel, proposal_id=parsed_id,
                 mfa_factors=mfa_factors)
             logger.info(
-                "hermes.cowork.approvals.approved proposal=%s tier=%s",
-                proposal_id, "mfa" if needs_mfa else "simple",
+                "hermes.cowork.approvals.approved proposal=%s totp=%s",
+                proposal_id, "yes" if mfa_factors else "no",
             )
             return {"ok": True, "decision": body.decision}
         except ApprovalGateError as exc:

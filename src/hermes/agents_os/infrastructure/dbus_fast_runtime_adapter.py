@@ -239,13 +239,30 @@ class Runtime1ServiceInterface(ServiceInterface):
 
         `totp` = owner's TOTP code, forwarded to the gate so the gate (the single MFA
         enforcement point for ALL surfaces — red-team 2026-06-19, finding 3) verifies it.
-        Empty string = no factor (the gate rejects, fail-closed)."""
-        sender_uid = await self._resolve_current_sender_uid()
-        result = await self._wiring.approve_action(
-            proposal_id=UUID(proposal_id),
-            sender_uid=sender_uid,
-            totp=totp or None,
+        Empty string = no factor (the gate rejects, fail-closed).
+
+        ApprovalGateError is caught here and re-raised as a structured D-Bus error whose
+        error name encodes the gate reason (e.g. org.hermes.Error.ApprovalGate.mfa_required)
+        so that the client adapter (_translate_dbus_error) can reconstruct the exact reason
+        code without string-matching the human-readable message."""
+        from hermes.capabilities.infrastructure.sqlite_approval_gate import (  # noqa: PLC0415
+            ApprovalGateError,
         )
+
+        sender_uid = await self._resolve_current_sender_uid()
+        try:
+            result = await self._wiring.approve_action(
+                proposal_id=UUID(proposal_id),
+                sender_uid=sender_uid,
+                totp=totp or None,
+            )
+        except ApprovalGateError as exc:
+            # Encode the machine-readable reason into the D-Bus error name so
+            # _translate_dbus_error on the client can reconstruct it exactly.
+            reason = getattr(exc, "reason", "approval_failed")
+            raise DBusError(
+                f"org.hermes.Error.ApprovalGate.{reason}", str(exc)
+            ) from exc
         return result.approval_token
 
     @method()
