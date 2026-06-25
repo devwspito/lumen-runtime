@@ -29,6 +29,8 @@ import type {
   SecurityScan,
   AuditHead,
   EgressDomainsResponse,
+  EgressMode,
+  EgressModeResponse,
   PendingApproval,
   MfaStatus,
   PoliciesResponse,
@@ -555,6 +557,47 @@ export function grantEgressDomain(domain: string): Promise<unknown> {
 
 export function revokeEgressDomain(domain: string): Promise<unknown> {
   return request<unknown>('/egress/domains/revoke', {
+    method: 'POST',
+    body: JSON.stringify({ domain }),
+  })
+}
+
+/**
+ * Fetch the current egress mode plus both allow-list and deny-list.
+ * Falls back to a legacy GET /egress/domains shape if the backend does not
+ * yet expose GET /egress/mode (returns mode='deny' with the existing allow-list).
+ */
+export async function getEgressMode(): Promise<EgressModeResponse> {
+  try {
+    return await request<EgressModeResponse>('/egress/mode')
+  } catch {
+    // Backend has not shipped the mode endpoint yet — synthesise from legacy response
+    const legacy = await listEgressDomains()
+    return { mode: 'deny', domains: legacy.domains, deny: [] }
+  }
+}
+
+/**
+ * Change the egress mode.  Always requires a valid TOTP code (MFA gate).
+ */
+export function setEgressMode(mode: EgressMode, totp: string): Promise<unknown> {
+  return request<unknown>('/egress/mode', {
+    method: 'POST',
+    body: JSON.stringify({ mode, totp }),
+  })
+}
+
+/** Add a domain to the manual block-list (mode=allow only, no MFA required). */
+export function blockEgressDomain(domain: string): Promise<unknown> {
+  return request<unknown>('/egress/deny/add', {
+    method: 'POST',
+    body: JSON.stringify({ domain }),
+  })
+}
+
+/** Remove a domain from the manual block-list (mode=allow only, no MFA required). */
+export function unblockEgressDomain(domain: string): Promise<unknown> {
+  return request<unknown>('/egress/deny/remove', {
     method: 'POST',
     body: JSON.stringify({ domain }),
   })

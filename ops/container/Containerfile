@@ -147,6 +147,21 @@ COPY ops/agents-os-edition/dbus/org.hermes.Runtime1.conf /usr/share/dbus-1/syste
 COPY ops/agents-os-edition/netns/          /etc/nftables/hermes/
 COPY ops/agents-os-edition/modules-load.d/ /etc/modules-load.d/
 COPY ops/agents-os-edition/seed/mcp-servers.json /usr/share/hermes/seed/
+
+# ── Egress blocklist (hagezi "light" — bundled at build time) ─────────────────
+# Proxy reads /usr/share/hermes/egress-blocklist.txt at boot and applies it as an
+# immutable system-level blocklist in OPEN_LOGGED (ALLOW) mode. The file is plain
+# text, one domain per line, comments with '#'. Fail-soft: curl or download failure
+# leaves an empty file — the proxy starts, log shows 0 blocklist entries.
+# TODO: add hermes-egress-blocklist-refresh.timer to re-download daily at runtime.
+RUN mkdir -p /usr/share/hermes && \
+    ( curl -LsSf --max-time 60 \
+        "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/domains/light.txt" \
+        -o /usr/share/hermes/egress-blocklist.txt \
+      && wc -l /usr/share/hermes/egress-blocklist.txt \
+      && echo "INFO: hagezi light blocklist bundled" ) \
+    || ( echo "WARN: blocklist download failed — using empty list (fail-soft)" \
+         && touch /usr/share/hermes/egress-blocklist.txt )
 # scripts → /usr/libexec/hermes + /usr/bin (the launchers + jail + landlock assert)
 COPY ops/agents-os-edition/scripts/hermes-mcp-launcher    /usr/libexec/hermes/hermes-mcp-launcher
 COPY ops/agents-os-edition/scripts/hermes-browser-launcher /usr/libexec/hermes/hermes-browser-launcher

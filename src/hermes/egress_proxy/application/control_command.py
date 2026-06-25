@@ -58,6 +58,7 @@ def parse_control_command(raw: str | bytes) -> SessionPolicy:
     session_id = _require_str(data, "session_id")
     mode_raw = _require_str(data, "mode")
     domains_raw = data.get("domains", [])
+    deny_raw = data.get("deny", [])
 
     try:
         mode = EgressMode(mode_raw)
@@ -74,14 +75,25 @@ def parse_control_command(raw: str | bytes) -> SessionPolicy:
             f"demasiados domains: {len(domains_raw)} (máx {_MAX_DOMAINS})"
         )
 
+    if not isinstance(deny_raw, list):
+        raise ControlCommandError("El campo 'deny' debe ser una lista")
+    if len(deny_raw) > _MAX_DOMAINS:
+        raise ControlCommandError(
+            f"demasiados dominios en 'deny': {len(deny_raw)} (máx {_MAX_DOMAINS})"
+        )
+
     domains: frozenset[str] = frozenset(
         d.lower().strip() for d in domains_raw if isinstance(d, str) and d.strip()
+    )
+    deny: frozenset[str] = frozenset(
+        d.lower().strip() for d in deny_raw if isinstance(d, str) and d.strip()
     )
 
     return SessionPolicy(
         session_id=session_id,
         mode=mode,
         domains_whitelist=domains,
+        domains_denylist=deny,
     )
 
 

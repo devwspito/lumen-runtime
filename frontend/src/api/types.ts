@@ -323,6 +323,18 @@ export interface EgressDomainsResponse {
   domains: string[]
 }
 
+export type EgressMode = 'allow' | 'deny'
+
+export interface EgressModeResponse {
+  mode: EgressMode
+  /** allow-list (used when mode === 'deny') */
+  domains: string[]
+  /** manual block-list (used when mode === 'allow') */
+  deny: string[]
+  /** count of threat-intelligence blocked domains active in the system */
+  blocklist_count?: number
+}
+
 export interface PendingApproval {
   proposal_id: string
   kind?: string

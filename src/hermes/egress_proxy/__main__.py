@@ -53,6 +53,7 @@ import sys
 
 from hermes.egress_proxy.domain.policy import EgressMode, EgressPolicyEngine, SessionPolicy
 from hermes.egress_proxy.infrastructure.audit_sink import StructlogAuditSink
+from hermes.egress_proxy.infrastructure.blocklist_loader import load_blocklist_file
 from hermes.egress_proxy.infrastructure.control_socket import ControlSocketServer
 from hermes.egress_proxy.infrastructure.proxy_handler import ProxyConnectionHandler
 
@@ -61,9 +62,17 @@ _LISTEN_PORT = int(os.environ.get("HERMES_EGRESS_LISTEN_PORT", "3128"))
 _CONTROL_SOCK = os.environ.get(
     "HERMES_EGRESS_CONTROL_SOCK", "/run/hermes/egress-proxy.sock"
 )
-# Fix-5: default = DEFAULT_DENY (fail-closed). Use HERMES_EGRESS_MODE=open-logged
-# explicitly for discovery mode — must never be the production default.
-_EGRESS_MODE_RAW = os.environ.get("HERMES_EGRESS_MODE", EgressMode.DEFAULT_DENY)
+# Network-mode default = OPEN_LOGGED (the owner's "ALLOW" toggle).
+# The blocklist + denylist enforce safety within open-logged; the owner switches to
+# DEFAULT_DENY via the /api/v1/egress/mode endpoint (MFA-gated).
+# HERMES_EGRESS_MODE can still override at the systemd unit level for deployments
+# that want to start in deny mode.
+_EGRESS_MODE_RAW = os.environ.get("HERMES_EGRESS_MODE", EgressMode.OPEN_LOGGED)
+
+# Path to the bundled malicious-domain blocklist baked into the image.
+_BLOCKLIST_PATH = os.environ.get(
+    "HERMES_EGRESS_BLOCKLIST", "/usr/share/hermes/egress-blocklist.txt"
+)
 
 # C1 PASS-2: the MCP children live in a SEPARATE netns (hermes-mcp). The proxy also
 # listens on that netns' host-side gateway and PINS the MCP source IP to an immutable
@@ -148,12 +157,13 @@ def _resolve_global_mode() -> EgressMode:
     try:
         return EgressMode(_EGRESS_MODE_RAW)
     except ValueError:
-        # Fix-5: fail-closed on invalid mode — default to DEFAULT_DENY, not open.
+        # Fail to OPEN_LOGGED (the owner's default "ALLOW" intent) rather than
+        # DEFAULT_DENY so the product works out of the box. The blocklist still applies.
         logger.warning(
-            "HERMES_EGRESS_MODE valor inválido %r — usando default-deny (fail-closed)",
+            "HERMES_EGRESS_MODE valor inválido %r — usando open-logged (modo ALLOW por defecto)",
             _EGRESS_MODE_RAW,
         )
-        return EgressMode.DEFAULT_DENY
+        return EgressMode.OPEN_LOGGED
 
 
 async def _run(*, systemd_notify: bool) -> None:
@@ -166,6 +176,18 @@ async def _run(*, systemd_notify: bool) -> None:
         mode=global_mode,
     )
     policy_engine = EgressPolicyEngine(global_policy=global_policy)
+
+    # Load the system blocklist (hagezi "light", baked into the image at build time).
+    # Fail-soft: missing file → empty blocklist (logged); never crashes the proxy.
+    # The blocklist is IMMUTABLE from the browser plane — only the proxy entrypoint
+    # (here) can populate it, and it runs as hermes-egress (not reachable by the agent).
+    from pathlib import Path  # noqa: PLC0415
+    blocklist_domains = load_blocklist_file(Path(_BLOCKLIST_PATH))
+    policy_engine.load_blocklist(blocklist_domains)
+    logger.info(
+        "hermes.egress_proxy.blocklist_applied entries=%d",
+        policy_engine.blocklist_size,
+    )
 
     # C1 PASS-4/5: PIN the MCP source IP to default-deny + (curated BYOK hosts ∪ owner
     # grants). The MCP plane stays DEFAULT_DENY — ONLY those explicit hosts pass; a

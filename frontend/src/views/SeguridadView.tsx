@@ -18,11 +18,15 @@ import {
   setPolicyTools,
   setMfaOnDangers,
   getSecurityScans,
-  listEgressDomains,
   grantEgressDomain,
   revokeEgressDomain,
+  getEgressMode,
+  setEgressMode,
+  blockEgressDomain,
+  unblockEgressDomain,
   recordInstallDecision,
 } from '../api/client'
+import type { EgressMode, EgressModeResponse } from '../api/types'
 import type {
   PendingApproval,
   MfaStatus,
@@ -838,95 +842,371 @@ function GovernanceSection() {
 
 // ── Egress section ────────────────────────────────────────────────────────────
 
-function EgressSection() {
-  const [domains, setDomains] = useState<string[]>([])
-  const [loading, setLoading] = useState(true)
+// ── Mode toggle pill ──────────────────────────────────────────────────────────
+
+interface EgressModeToggleProps {
+  mode: EgressMode
+  busy: boolean
+  onRequest: (next: EgressMode) => void
+}
+
+function EgressModeToggle({ mode, busy, onRequest }: EgressModeToggleProps) {
+  return (
+    <div className="seg-egress-mode-toggle" role="group" aria-label="Modo de acceso a red">
+      <button
+        type="button"
+        className={`seg-egress-mode-toggle__btn ${mode === 'allow' ? 'seg-egress-mode-toggle__btn--active' : ''}`}
+        aria-pressed={mode === 'allow'}
+        disabled={busy || mode === 'allow'}
+        onClick={() => onRequest('allow')}
+      >
+        Permitido
+      </button>
+      <button
+        type="button"
+        className={`seg-egress-mode-toggle__btn ${mode === 'deny' ? 'seg-egress-mode-toggle__btn--active seg-egress-mode-toggle__btn--deny' : ''}`}
+        aria-pressed={mode === 'deny'}
+        disabled={busy || mode === 'deny'}
+        onClick={() => onRequest('deny')}
+      >
+        Bloqueado
+      </button>
+    </div>
+  )
+}
+
+// ── Allow-mode panel (manual block-list) ──────────────────────────────────────
+
+interface AllowModeProps {
+  denyList: string[]
+  blocklistCount: number | undefined
+  onAdd: (domain: string) => Promise<void>
+  onRemove: (domain: string) => Promise<void>
+}
+
+function AllowModePanel({ denyList, blocklistCount, onAdd, onRemove }: AllowModeProps) {
   const [input, setInput] = useState('')
 
-  const loadDomains = useCallback(async () => {
-    const res = await listEgressDomains()
-    setDomains(res.domains ?? [])
-    setLoading(false)
-  }, [])
+  async function handleAdd() {
+    const d = input.trim().toLowerCase()
+    if (!d) return
+    await onAdd(d)
+    setInput('')
+  }
 
-  useEffect(() => { loadDomains() }, [loadDomains])
+  return (
+    <motion.div
+      key="allow-panel"
+      initial={{ opacity: 0, y: 6 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -6 }}
+      transition={TWEEN}
+    >
+      <p className="seg-card__intro">
+        El agente puede acceder a internet. El sistema bloquea automaticamente
+        sitios maliciosos conocidos, y tu puedes bloquear sitios concretos.
+      </p>
+
+      {blocklistCount != null && blocklistCount > 0 && (
+        <div className="seg-egress-system-badge" aria-label={`${blocklistCount} sitios maliciosos bloqueados por el sistema`}>
+          <span className="seg-egress-system-badge__dot" aria-hidden="true" />
+          {blocklistCount} sitios maliciosos bloqueados por el sistema
+        </div>
+      )}
+
+      <div className="seg-pol-sub-label" style={{ marginTop: 'var(--sp-3)' }}>
+        Sitios bloqueados manualmente
+      </div>
+
+      <div className="cv-form-inline" style={{ marginBottom: 'var(--sp-2)' }}>
+        <input
+          id="egress-block-input"
+          className="cv-input"
+          type="text"
+          placeholder="dominio (ej. ejemplo.com)"
+          autoComplete="off"
+          spellCheck={false}
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') { void handleAdd() } }}
+          aria-label="Dominio a bloquear"
+        />
+        <button
+          className="cv-btn cv-btn--secondary"
+          onClick={() => { void handleAdd() }}
+          type="button"
+          disabled={!input.trim()}
+        >
+          Bloquear
+        </button>
+      </div>
+
+      {denyList.length === 0 ? (
+        <p className="cv-empty">Ningun dominio bloqueado manualmente.</p>
+      ) : (
+        <ul className="cv-list" aria-label="Dominios bloqueados manualmente">
+          <AnimatePresence initial={false}>
+            {denyList.map(d => (
+              <AnimatedListItem key={d} className="seg-egress-row">
+                <code className="seg-egress-row__domain">{d}</code>
+                <button
+                  className="cv-btn cv-btn--ghost cv-btn--sm"
+                  onClick={() => { void onRemove(d) }}
+                  type="button"
+                  aria-label={`Desbloquear dominio ${d}`}
+                >
+                  Desbloquear
+                </button>
+              </AnimatedListItem>
+            ))}
+          </AnimatePresence>
+        </ul>
+      )}
+    </motion.div>
+  )
+}
+
+// ── Deny-mode panel (allow-list) ──────────────────────────────────────────────
+
+interface DenyModeProps {
+  allowList: string[]
+  onGrant: (domain: string) => Promise<void>
+  onRevoke: (domain: string) => Promise<void>
+}
+
+function DenyModePanel({ allowList, onGrant, onRevoke }: DenyModeProps) {
+  const [input, setInput] = useState('')
 
   async function handleGrant() {
     const d = input.trim().toLowerCase()
     if (!d) return
+    await onGrant(d)
+    setInput('')
+  }
+
+  return (
+    <motion.div
+      key="deny-panel"
+      initial={{ opacity: 0, y: 6 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -6 }}
+      transition={TWEEN}
+    >
+      <p className="seg-card__intro">
+        Por defecto el agente no puede acceder a ningun sitio web. Autoriza
+        dominios concretos (p.ej. <code>pypi.org</code>, <code>github.com</code>).
+        Aplica al navegador y al terminal del agente.
+      </p>
+
+      <div className="cv-form-inline" style={{ marginBottom: 'var(--sp-2)' }}>
+        <input
+          id="egress-grant-input"
+          className="cv-input"
+          type="text"
+          placeholder="dominio (ej. github.com)"
+          autoComplete="off"
+          spellCheck={false}
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') { void handleGrant() } }}
+          aria-label="Dominio a autorizar"
+        />
+        <button
+          className="cv-btn cv-btn--primary"
+          onClick={() => { void handleGrant() }}
+          type="button"
+          disabled={!input.trim()}
+        >
+          Autorizar
+        </button>
+      </div>
+
+      {allowList.length === 0 ? (
+        <p className="cv-empty">Ningun dominio autorizado — el agente no accede a la red.</p>
+      ) : (
+        <ul className="cv-list" aria-label="Dominios autorizados">
+          <AnimatePresence initial={false}>
+            {allowList.map(d => (
+              <AnimatedListItem key={d} className="seg-egress-row">
+                <code className="seg-egress-row__domain">{d}</code>
+                <button
+                  className="cv-btn cv-btn--ghost cv-btn--sm"
+                  onClick={() => { void onRevoke(d) }}
+                  type="button"
+                  aria-label={`Revocar dominio ${d}`}
+                >
+                  Revocar
+                </button>
+              </AnimatedListItem>
+            ))}
+          </AnimatePresence>
+        </ul>
+      )}
+    </motion.div>
+  )
+}
+
+// ── EgressSection ─────────────────────────────────────────────────────────────
+
+function EgressSection() {
+  const [state, setState] = useState<EgressModeResponse | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+  // MFA modal: holds the requested next mode while waiting for TOTP
+  const [pendingMode, setPendingMode] = useState<EgressMode | null>(null)
+
+  const load = useCallback(async () => {
+    const res = await getEgressMode()
+    setState(res)
+    setLoading(false)
+  }, [])
+
+  useEffect(() => { void load() }, [load])
+
+  // ── Mode change (requires MFA) ──────────────────────────────────────────────
+
+  function requestModeChange(next: EgressMode) {
+    setPendingMode(next)
+  }
+
+  async function handleModeSign(factors: MfaFactors) {
+    if (!pendingMode || !state) return
+    const prev = state
+    // Optimistic update
+    setState(s => s ? { ...s, mode: pendingMode } : s)
+    setPendingMode(null)
+    setBusy(true)
     try {
-      await grantEgressDomain(d)
-      sileo.success({ title: `${d} autorizado` })
-      setInput('')
-      await loadDomains()
+      await setEgressMode(pendingMode, factors.totp)
+      sileo.success({
+        title: pendingMode === 'allow'
+          ? 'Modo Permitido activado'
+          : 'Modo Bloqueado activado',
+      })
+      await load()
     } catch (err) {
+      // Revert
+      setState(prev)
+      sileo.error({ title: `No se pudo cambiar el modo: ${err instanceof Error ? err.message : err}` })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // ── Allow-list (DENY mode) ─────────────────────────────────────────────────
+
+  async function handleGrant(domain: string) {
+    if (!state) return
+    const prev = state
+    setState(s => s ? { ...s, domains: [...s.domains, domain] } : s)
+    try {
+      await grantEgressDomain(domain)
+      sileo.success({ title: `${domain} autorizado` })
+      await load()
+    } catch (err) {
+      setState(prev)
       sileo.error({ title: `No se pudo autorizar: ${err instanceof Error ? err.message : err}` })
     }
   }
 
-  async function handleRevoke(d: string) {
+  async function handleRevoke(domain: string) {
+    if (!state) return
+    const prev = state
+    setState(s => s ? { ...s, domains: s.domains.filter(d => d !== domain) } : s)
     try {
-      await revokeEgressDomain(d)
-      sileo.success({ title: `${d} revocado` })
-      await loadDomains()
+      await revokeEgressDomain(domain)
+      sileo.success({ title: `${domain} revocado` })
+      await load()
     } catch (err) {
+      setState(prev)
       sileo.error({ title: `No se pudo revocar: ${err instanceof Error ? err.message : err}` })
+    }
+  }
+
+  // ── Block-list (ALLOW mode) ────────────────────────────────────────────────
+
+  async function handleBlock(domain: string) {
+    if (!state) return
+    const prev = state
+    setState(s => s ? { ...s, deny: [...s.deny, domain] } : s)
+    try {
+      await blockEgressDomain(domain)
+      sileo.success({ title: `${domain} bloqueado` })
+      await load()
+    } catch (err) {
+      setState(prev)
+      sileo.error({ title: `No se pudo bloquear: ${err instanceof Error ? err.message : err}` })
+    }
+  }
+
+  async function handleUnblock(domain: string) {
+    if (!state) return
+    const prev = state
+    setState(s => s ? { ...s, deny: s.deny.filter(d => d !== domain) } : s)
+    try {
+      await unblockEgressDomain(domain)
+      sileo.success({ title: `${domain} desbloqueado` })
+      await load()
+    } catch (err) {
+      setState(prev)
+      sileo.error({ title: `No se pudo desbloquear: ${err instanceof Error ? err.message : err}` })
     }
   }
 
   return (
     <section className="cv-section">
-      <div className="cv-section-label">Permisos de red — dominios permitidos</div>
+      <div className="cv-section-label">Permisos de red</div>
+
+      {/* MFA modal for mode change — rendered outside the card so it layers above */}
+      {pendingMode && (
+        <MfaModal
+          title={pendingMode === 'allow' ? 'Activar modo Permitido' : 'Activar modo Bloqueado'}
+          onSign={handleModeSign}
+          onCancel={() => setPendingMode(null)}
+        />
+      )}
+
       <div className="seg-card">
-        <p className="seg-card__intro">
-          Por defecto el agente no puede acceder a ningún sitio web. Añade aquí los dominios
-          a los que quieras darle acceso (p.ej. <code>pypi.org</code>, <code>github.com</code>).
-          Aplica al navegador y al terminal del agente.
-        </p>
-        <div className="cv-form-inline">
-          <input
-            id="egress-domain-input"
-            className="cv-input"
-            type="text"
-            placeholder="dominio (ej. github.com)"
-            autoComplete="off"
-            spellCheck={false}
-            value={input}
-            onChange={e => setInput(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') handleGrant() }}
-            aria-label="Dominio a autorizar"
-          />
-          <button
-            className="cv-btn cv-btn--primary"
-            onClick={handleGrant}
-            type="button"
-          >
-            Autorizar
-          </button>
-        </div>
         {loading ? (
-          <div className="cv-skeleton" aria-busy="true" />
-        ) : domains.length === 0 ? (
-          <p className="cv-empty">Ningún dominio autorizado — el agente no accede a la red.</p>
-        ) : (
-          <ul className="cv-list" aria-label="Dominios autorizados">
-            <AnimatePresence initial={false}>
-              {domains.map(d => (
-                <AnimatedListItem key={d} className="seg-egress-row">
-                  <code className="seg-egress-row__domain">{d}</code>
-                  <button
-                    className="cv-btn cv-btn--ghost cv-btn--sm"
-                    onClick={() => handleRevoke(d)}
-                    type="button"
-                    aria-label={`Revocar dominio ${d}`}
-                  >
-                    Revocar
-                  </button>
-                </AnimatedListItem>
-              ))}
+          <div className="cv-skeleton" aria-busy="true" aria-label="Cargando permisos de red..." />
+        ) : state != null ? (
+          <>
+            {/* Mode toggle */}
+            <div className="seg-egress-mode-row">
+              <div className="seg-egress-mode-row__info">
+                <span className="seg-egress-mode-row__label">Modo de acceso</span>
+                <span className="seg-egress-mode-row__hint">
+                  Cambiar el modo requiere tu codigo MFA.
+                </span>
+              </div>
+              <EgressModeToggle
+                mode={state.mode}
+                busy={busy}
+                onRequest={requestModeChange}
+              />
+            </div>
+
+            {/* Panel content transitions between ALLOW and DENY */}
+            <AnimatePresence mode="wait" initial={false}>
+              {state.mode === 'allow' ? (
+                <AllowModePanel
+                  key="allow"
+                  denyList={state.deny}
+                  blocklistCount={state.blocklist_count}
+                  onAdd={handleBlock}
+                  onRemove={handleUnblock}
+                />
+              ) : (
+                <DenyModePanel
+                  key="deny"
+                  allowList={state.domains}
+                  onGrant={handleGrant}
+                  onRevoke={handleRevoke}
+                />
+              )}
             </AnimatePresence>
-          </ul>
-        )}
+          </>
+        ) : null}
       </div>
     </section>
   )

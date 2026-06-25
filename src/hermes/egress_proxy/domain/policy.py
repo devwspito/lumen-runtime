@@ -4,11 +4,15 @@ No hay I/O aquí.  La política se construye en la capa de infraestructura
 y se consulta desde el servidor proxy.
 
 Dos modos (§3 del diseño):
-  - EgressMode.OPEN_LOGGED:   permite cualquier dominio; registra cada destino.
+  - EgressMode.OPEN_LOGGED:   permite cualquier dominio EXCEPTO los que estén en la
+                              denylist de sesión o en la blocklist global de maliciosos.
   - EgressMode.DEFAULT_DENY:  solo dominios en ``domains_whitelist``; el resto → deny.
 
-El modo y la whitelist son por-sesión (session_id) y se actualizan
+El modo y las listas son por-sesión (session_id) y se actualizan
 desde el socket de control root ``/run/hermes/egress-proxy.sock``.
+
+La ``blocklist`` global es de sólo lectura desde el plano del browser: cargada al
+boot del proxy, aplicada SIEMPRE en OPEN_LOGGED, inmutable desde el socket de control.
 """
 
 from __future__ import annotations
@@ -72,11 +76,17 @@ class EgressDecision:
 
 @dataclass(frozen=True, slots=True)
 class SessionPolicy:
-    """Política por sesión empujada desde el socket de control."""
+    """Política por sesión empujada desde el socket de control.
+
+    ``domains_denylist`` sólo se aplica en OPEN_LOGGED (es la deny-list manual del
+    dueño, complementaria a la blocklist global del engine). En DEFAULT_DENY se ignora
+    (el modo ya deniega todo lo que no esté en ``domains_whitelist``).
+    """
 
     session_id: str
     mode: EgressMode
     domains_whitelist: FrozenSet[str] = field(default_factory=frozenset)
+    domains_denylist: FrozenSet[str] = field(default_factory=frozenset)
 
 
 class EgressPolicyEngine:
@@ -138,6 +148,26 @@ class EgressPolicyEngine:
         #   - revoke can remove an owner grant but NEVER a curated host (it stays in seed).
         # The seed is registered at ``pin_policy`` time and is immutable thereafter.
         self._pinned_seed: dict[str, FrozenSet[str]] = {}
+        # Global blocklist of malicious domains — applied ALWAYS in OPEN_LOGGED.
+        # Loaded at proxy boot via ``load_blocklist``; immutable from the control socket.
+        # Stores normalized lowercase domains (the same format used by the whitelist).
+        self._blocklist: FrozenSet[str] = frozenset()
+
+    def load_blocklist(self, domains: set[str]) -> None:
+        """Replace the global blocklist with ``domains`` (normalized).
+
+        Called ONCE at proxy boot from the entrypoint after reading the bundled
+        blocklist file. NEVER callable from the control socket or the browser plane —
+        the blocklist is read-only at runtime from the browser's perspective.
+        """
+        self._blocklist = frozenset(
+            d.lower().strip().rstrip(".") for d in domains if d.strip()
+        )
+
+    @property
+    def blocklist_size(self) -> int:
+        """Number of entries in the global malicious-domain blocklist."""
+        return len(self._blocklist)
 
     def pin_policy(
         self,
@@ -241,6 +271,9 @@ class EgressPolicyEngine:
 
         Resolution order (most specific first): pinned client policy → session
         policy → global policy. Normaliza el dominio a minúsculas antes de comparar.
+
+        In OPEN_LOGGED the global blocklist and the session's denylist are checked
+        BEFORE allowing. The blocklist is never passed through the control socket.
         """
         policy = (
             self._pinned.get(session_id)
@@ -248,7 +281,9 @@ class EgressPolicyEngine:
             or self._global
         )
         normalized = domain.lower().rstrip(".")
-        return _apply_policy(policy=policy, domain=normalized)
+        return _apply_policy(
+            policy=policy, domain=normalized, blocklist=self._blocklist
+        )
 
     @property
     def global_policy(self) -> SessionPolicy:
@@ -291,22 +326,30 @@ class EgressPolicyEngine:
         self._global = policy
 
 
-def _apply_policy(*, policy: SessionPolicy, domain: str) -> EgressDecision:
-    """Aplica la política al dominio — función pura."""
+def _apply_policy(
+    *,
+    policy: SessionPolicy,
+    domain: str,
+    blocklist: FrozenSet[str] = frozenset(),
+) -> EgressDecision:
+    """Aplica la política al dominio — función pura.
+
+    OPEN_LOGGED: permite todo SALVO dominios en (denylist ∪ blocklist). Las dos listas
+    usan la misma lógica de subdominio que la whitelist de DEFAULT_DENY.
+
+    DEFAULT_DENY: comprueba whitelist + subdominios (sin cambios respecto al diseño
+    original; blocklist y denylist no se aplican aquí porque el modo ya deniega todo
+    lo no-whitelisted).
+    """
     if policy.mode == EgressMode.OPEN_LOGGED:
-        return EgressDecision(
-            allowed=True,
-            domain=domain,
-            session_id=policy.session_id,
-            mode=policy.mode,
-            reason="open-logged: any domain allowed",
-        )
+        return _apply_open_logged(policy=policy, domain=domain, blocklist=blocklist)
+
     # C1 PASS-3: NO package-registry baseline. The MCP runtime is pure default-deny —
     # packages are pre-fetched + scanned at INSTALL time and the runtime spawns offline
     # from the cache, so the runtime never needs npm/PyPI. This closes the npm-PUT exfil
     # residual: there is no standing registry allow to ride a published-package upload on.
     # DEFAULT_DENY: comprueba whitelist + subdominios
-    if _matches_whitelist(domain=domain, whitelist=policy.domains_whitelist):
+    if _matches_list(domain=domain, entries=policy.domains_whitelist):
         return EgressDecision(
             allowed=True,
             domain=domain,
@@ -323,15 +366,46 @@ def _apply_policy(*, policy: SessionPolicy, domain: str) -> EgressDecision:
     )
 
 
-def _matches_whitelist(*, domain: str, whitelist: FrozenSet[str]) -> bool:
-    """Devuelve True si ``domain`` coincide exactamente o es subdominio de algún
-    dominio en ``whitelist``.
+def _apply_open_logged(
+    *,
+    policy: SessionPolicy,
+    domain: str,
+    blocklist: FrozenSet[str],
+) -> EgressDecision:
+    """OPEN_LOGGED evaluation: allow unless blocked by blocklist or denylist."""
+    if _matches_list(domain=domain, entries=blocklist):
+        return EgressDecision(
+            allowed=False,
+            domain=domain,
+            session_id=policy.session_id,
+            mode=policy.mode,
+            reason=f"open-logged: blocked by malicious-blocklist ({domain})",
+        )
+    if _matches_list(domain=domain, entries=policy.domains_denylist):
+        return EgressDecision(
+            allowed=False,
+            domain=domain,
+            session_id=policy.session_id,
+            mode=policy.mode,
+            reason=f"open-logged: blocked by owner-denylist ({domain})",
+        )
+    return EgressDecision(
+        allowed=True,
+        domain=domain,
+        session_id=policy.session_id,
+        mode=policy.mode,
+        reason="open-logged: domain allowed",
+    )
 
-    Ejemplos:
-      - ``example.com`` en whitelist → ``example.com`` OK, ``sub.example.com`` OK.
-      - ``evil.com`` NOT en whitelist → deny.
+
+def _matches_list(*, domain: str, entries: FrozenSet[str]) -> bool:
+    """Return True if ``domain`` matches exactly or is a subdomain of any entry.
+
+    Examples:
+      - ``evil.com`` in entries → ``evil.com`` matches, ``sub.evil.com`` matches.
+      - ``notevil.com`` NOT in entries (suffix-only match is rejected).
     """
-    for allowed in whitelist:
-        if domain == allowed or domain.endswith("." + allowed):
+    for entry in entries:
+        if domain == entry or domain.endswith("." + entry):
             return True
     return False
