@@ -72,7 +72,8 @@ class AgentDraft:
     primary_mission: str = ""
     instructions: str = ""
     color: str = _DEFAULT_COLOR
-    language: str = "es-ES"
+    # "auto" → respond in the user's language (adaptive). BCP-47 tag → fixed locale.
+    language: str = "auto"
     golden_rules: tuple[str, ...] = ()
     forbidden_phrases: tuple[str, ...] = ()
     autonomy_level: AutonomyLevel = _DEFAULT_AUTONOMY
@@ -91,7 +92,8 @@ class Agent:
     primary_mission: str = ""
     instructions: str = ""
     color: str = _DEFAULT_COLOR
-    language: str = "es-ES"
+    # "auto" → respond in the user's language (adaptive). BCP-47 tag → fixed locale.
+    language: str = "auto"
     golden_rules: tuple[str, ...] = ()
     forbidden_phrases: tuple[str, ...] = ()
     is_default: bool = False
@@ -123,7 +125,7 @@ class Agent:
         return PersonaSpec(
             name=self.name.strip() or "Lumen",
             role=self.role.strip() or _FALLBACK_ROLE,
-            language=self.language or "es-ES",
+            language=self.language or "auto",
             register=self.register.strip() or "cercano, claro y resolutivo; tutea al usuario",
             primary_mission=self.primary_mission.strip() or _FALLBACK_MISSION,
             golden_rules=rules,
@@ -333,7 +335,7 @@ def default_agent() -> Agent:
         primary_mission=mission,
         instructions="",
         color=_DEFAULT_COLOR,
-        language="es-ES",
+        language="auto",
         # AUTONOMOUS: el Cerebro actúa solo en lo reversible/seguro. Solo lo
         # irreversible/peligroso pasa por la tarjeta de aprobación — nunca un
         # "no puedo".

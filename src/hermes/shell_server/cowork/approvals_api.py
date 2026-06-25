@@ -33,6 +33,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from hermes.capabilities.infrastructure.sqlite_approval_gate import ApprovalGateError
+from hermes.capabilities.proposal_summary import human_summary
 from hermes.capabilities.tool_delicacy import is_mfa_required
 from hermes.shell_server.security.mfa import MfaStore, ProtectionLevel
 from hermes.shell_server.security.mfa_tool_tier import MfaFactors
@@ -188,14 +189,19 @@ def _to_frontend(row: dict, store: MfaStore) -> dict:
     tool_name = row.get("tool_name", "")
     risk = row.get("risk", "")
     mfa_state = store.state()
+    parameters = row.get("parameters_redacted", {})
     return {
         "proposal_id": row.get("proposal_id", ""),
         "kind": risk,
-        "summary": row.get("justification", ""),
+        # Human-facing title built from the tool name — never raw technical justification.
+        # Raw justification + parameters remain available as "technical_detail" for the
+        # "Ver detalles técnicos" panel in the frontend.
+        "summary": human_summary(tool_name, parameters),
+        "technical_detail": row.get("justification", ""),
         "target": tool_name,
         # Show WHAT is being approved (redacted), not just the tool name (red-team
         # finding 5 transparency: the owner approves a specific action).
-        "parameters": row.get("parameters_redacted", {}),
+        "parameters": parameters,
         # C — chat anchor: the REAL chat conversation_id (None for pre-migration
         # rows or non-chat cycles like scheduled/autonomous tasks).
         "conversation_id": row.get("conversation_id") or None,
