@@ -99,6 +99,15 @@ _MCP_GRANTS_PATH = os.environ.get(
 _CURATED_MCP_HOSTS: frozenset[str] = frozenset({
     "replicate.com",      # Replicate MCP (replicate-mcp): api.replicate.com
     "context7.com",       # Context7 MCP: docs endpoint
+    # OWNER DECISION 2026-06-26 (Opción B): los registros de paquetes pre-concedidos SOLO
+    # al netns MCP para que `npx --prefer-offline` / `uvx` puedan resolver/bajar lo que el
+    # prefetch no haya cacheado, a través del proxy auditado. Antes el runtime era offline
+    # puro (sin registro) y el install era frágil ("Connection closed"). El plano sigue
+    # default-deny: SOLO estos hosts (+ los BYOK + los grants del dueño) pasan; el browser
+    # y el terminal NO los heredan (plano de política por-cliente, este es el netns MCP).
+    "registry.npmjs.org",     # npm registry (API + tarballs) — npx
+    "pypi.org",               # PyPI index — uvx
+    "files.pythonhosted.org", # PyPI package downloads — uvx
 })
 
 logger = logging.getLogger("hermes.egress_proxy")

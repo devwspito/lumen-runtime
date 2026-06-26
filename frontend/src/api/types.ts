@@ -110,6 +110,8 @@ export interface ConversationMessage {
   role: 'user' | 'assistant' | 'tool'
   content: string
   tool_call?: ToolCallDescriptor
+  /** task_id of the backend task that produced this assistant turn; null for user messages */
+  task_id?: string | null
 }
 
 export interface ConversationDetail {
@@ -351,6 +353,8 @@ export interface PendingApproval {
   required_level?: string
   /** Whether the owner has enrolled a TOTP secret */
   mfa_enrolled?: boolean
+  /** ISO-8601 creation timestamp. Used client-side to discard stale ghost cards. */
+  created_at?: string | null
 }
 
 export interface MfaStatus {
@@ -481,10 +485,12 @@ export interface MemoryEntryDetail {
 }
 
 // Frames emitted by the WebSocket stream — discriminated by `kind`.
+// `seq` is a monotonically increasing integer per task_id, added to every frame
+// so the client can deduplicate replay on reconnect (discard seq <= lastSeq).
 export type StreamFrame =
-  | { kind: 'delta';          delta?: string; text?: string }
-  | { kind: 'thinking_delta'; thinking?: string; delta?: string; text?: string }
-  | { kind: 'tool_call';      tool_call?: ToolCallDescriptor; tool?: string; label?: string; target?: string }
-  | { kind: 'status';         message?: string; status?: string }
-  | { kind: 'done' }
-  | { kind: 'error';          message?: string }
+  | { kind: 'delta';          delta?: string; text?: string; seq?: number }
+  | { kind: 'thinking_delta'; thinking?: string; delta?: string; text?: string; seq?: number }
+  | { kind: 'tool_call';      tool_call?: ToolCallDescriptor; tool?: string; label?: string; target?: string; seq?: number }
+  | { kind: 'status';         message?: string; status?: string; seq?: number }
+  | { kind: 'done';           seq?: number }
+  | { kind: 'error';          message?: string; seq?: number }

@@ -222,6 +222,9 @@ def _to_frontend(row: dict, store: MfaStore) -> dict:
         # C — chat anchor: the REAL chat conversation_id (None for pre-migration
         # rows or non-chat cycles like scheduled/autonomous tasks).
         "conversation_id": row.get("conversation_id") or None,
+        # When the row was created (ISO). The frontend uses it to hide stale ghost
+        # cards (older than the owner-wait window) that a timed-out thread may leave.
+        "created_at": row.get("created_at") or None,
         # Escalated MFA model: mfa-tier tools require TOTP; simple-tier do not.
         "required_level": _LEVEL_MFA if is_mfa_required(tool_name) else _LEVEL_SIMPLE,
         "mfa_enrolled": mfa_state.enrolled,

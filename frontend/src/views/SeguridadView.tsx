@@ -56,6 +56,15 @@ import {
 
 const POLL_INTERVAL_MS = 3000
 
+// Backend approval window is 600 s (10 min). Discard anything older client-side
+// so ghost cards never render even if a poll cycle lags. null/absent = keep (back-compat).
+const APPROVAL_MAX_AGE_MS = 11 * 60 * 1000
+
+function isApprovalFresh(createdAt: string | null | undefined): boolean {
+  if (!createdAt) return true
+  return Date.now() - new Date(createdAt).getTime() < APPROVAL_MAX_AGE_MS
+}
+
 function ApprovalsSection({ mfaDisabled }: { mfaDisabled: boolean }) {
   const t = useT()
   const [approvals, setApprovals] = useState<PendingApproval[]>([])
@@ -63,7 +72,8 @@ function ApprovalsSection({ mfaDisabled }: { mfaDisabled: boolean }) {
 
   const load = useCallback(async () => {
     const data = await listPendingApprovals()
-    setApprovals(Array.isArray(data) ? data : [])
+    const fresh = Array.isArray(data) ? data.filter(a => isApprovalFresh(a.created_at)) : []
+    setApprovals(fresh)
     setLoading(false)
   }, [])
 
@@ -547,21 +557,21 @@ function GovernanceSection() {
   }
 
   function requestMfaDangersToggle(checked: boolean) {
-    if (checked) {
-      void (async () => {
-        setBusy(true)
-        try {
-          await setMfaOnDangers(true, '')
-          sileo.success({ title: t('seg.dangers.on.ok') })
-          setPol(prev => prev ? { ...prev, mfa_on_dangers: true } : prev)
-        } catch (err) {
+    if (mfaDisabled) {
+      // MFA not enrolled/disabled: persist directly without a verification modal
+      setBusy(true)
+      void setMfaOnDangers(checked, '')
+        .then(() => {
+          sileo.success({ title: checked ? t('seg.dangers.on.ok') : t('seg.dangers.off.ok') })
+          setPol(prev => prev ? { ...prev, mfa_on_dangers: checked } : prev)
+        })
+        .catch(err => {
           sileo.error({ title: t('seg.preset.err').replace('{err}', err instanceof Error ? err.message : String(err)) })
-        } finally {
-          setBusy(false)
-        }
-      })()
+        })
+        .finally(() => setBusy(false))
     } else {
-      setPendingAction({ kind: 'mfa_dangers', enabled: false })
+      // Open the MFA modal regardless of direction — backend requires TOTP to change this policy
+      setPendingAction({ kind: 'mfa_dangers', enabled: checked })
     }
   }
 
@@ -589,7 +599,9 @@ function GovernanceSection() {
             pendingAction.kind === 'preset'
               ? t('seg.mfa_modal.preset').replace('{preset}', pendingAction.preset)
               : pendingAction.kind === 'mfa_dangers'
-              ? t('seg.mfa_modal.dangers_off')
+              ? pendingAction.enabled
+                ? t('seg.policies.dangers.label')
+                : t('seg.mfa_modal.dangers_off')
               : t('seg.mfa_modal.tools')
           }
           onSign={handleSign}

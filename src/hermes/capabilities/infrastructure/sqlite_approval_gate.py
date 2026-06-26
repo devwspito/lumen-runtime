@@ -311,6 +311,22 @@ class SqliteApprovalGate:
             description=f"HITL rejected proposal {proposal_id}: {reason}",
         )
 
+    async def expire(self, *, proposal_id: UUID) -> None:
+        """Marca una propuesta 'pending' como 'expired' (caducó la espera del dueño).
+
+        Solo afecta filas en estado 'pending' — una aprobada/rechazada no se toca.
+        La saca de list_hitl_pending (que filtra status='pending') para que NO quede
+        como TARJETA FANTASMA cuando el hilo bloqueado caducó sin decisión del dueño.
+        Idempotente y silenciosa: sin audit, sin raise (no es una resolución del dueño).
+        """
+        now = datetime.now(tz=UTC).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE pending_approvals SET status='expired', resolved_at=? "
+                "WHERE proposal_id=? AND status='pending'",
+                (now, str(proposal_id)),
+            )
+
     async def verify_token(self, *, proposal_id: UUID, token: str) -> bool:
         """Verifica criptográficamente el token y lo marca consumido en DB (I1/CTRL-1).
 

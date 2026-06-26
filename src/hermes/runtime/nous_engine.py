@@ -86,7 +86,7 @@ import logging
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from hermes.domain.cycle_output import CycleOutput, TokenUsage
 from hermes.domain.decision_context import DecisionContext
@@ -1416,14 +1416,121 @@ class GovernedAIAgent:
             )
             return self._blocked(function_name, "broker no configurado — fail-closed")
 
+        conversation_id = get_conversation_for_task(effective_task_id)
         outcome = _dispatch_via_bridge(
             proposal=proposal,
             broker=self._broker,
             consent_context=self._consent_context,
             engine_loop=self._engine_loop,
-            conversation_id=get_conversation_for_task(effective_task_id),
+            conversation_id=conversation_id,
         )
 
+        # Block-and-resume (Mandato 1): si quedó pendiente de aprobación Y hay una
+        # conversación de chat ACTIVA mirando, retenemos el hilo aquí hasta que el dueño
+        # apruebe/rechace y RE-DESPACHAMOS la MISMA llamada con el token → se ejecuta y el
+        # turno continúa en el MISMO stream (sin "HECHO", sin re-encolar mudo). En autónomo/
+        # scheduled (sin conversation_id) se mantiene el modelo de cola no-bloqueante.
+        from hermes.capabilities.domain.ports import ExecutionStatus  # noqa: PLC0415
+        if outcome.status is ExecutionStatus.PENDING_APPROVAL and conversation_id:
+            return self._await_owner_and_resume(proposal, conversation_id)
+
+        return self._handle_outcome(proposal, outcome)
+
+    def _await_owner_and_resume(
+        self, proposal: ToolCallProposal, conversation_id: str
+    ) -> str:
+        """Bloquea el hilo de la conversación hasta la decisión del dueño y reanuda.
+
+        El broker ya registró la fila pendiente (la tarjeta aparece en el chat). Aquí
+        usamos el MISMO registro de Events que el hook de native dangers — approve_action /
+        reject_action señalan este proposal_id. Al aprobar, re-despachamos la MISMA propuesta
+        con el token aprobado (se ejecuta una vez, idempotencia del broker protege).
+        Fail-closed: gate/loop ausente, timeout, deny o error → mensaje de bloqueo (no ejecuta).
+        """
+        from hermes.runtime.security_hook import (  # noqa: PLC0415
+            _NATIVE_DANGER_OWNER_WAIT_S,
+            _pending_events,
+            _pending_events_lock,
+        )
+
+        gate = getattr(self._broker, "_approval_gate", None)
+        engine_loop = self._engine_loop
+        if gate is None or engine_loop is None:
+            return json.dumps(
+                {"error": "BLOCKED: buzón de aprobaciones no disponible (fail-closed)."},
+                ensure_ascii=False,
+            )
+
+        pid = proposal.proposal_id
+        pid_str = str(pid)
+
+        def _await(coro: Any) -> Any:
+            return asyncio.run_coroutine_threadsafe(coro, engine_loop).result(
+                timeout=_BROKER_DISPATCH_TIMEOUT_S
+            )
+
+        event = _threading.Event()
+        slot: dict = {"event": event, "choice": None}
+        with _pending_events_lock:
+            _pending_events[pid_str] = slot
+
+        choice: str | None = None
+        try:
+            # Carrera: si el dueño aprobó entre register_pending y este registro del Event,
+            # la señal se perdió pero el token ya existe → procede directo sin esperar.
+            try:
+                if _await(gate.approved_token_for(pid)) is not None:
+                    choice = "approved"
+            except Exception:  # noqa: BLE001
+                pass
+
+            if choice is None:
+                logger.info(
+                    "hermes.nous_engine.write_block_and_resume_wait: proposal=%s tool=%s "
+                    "— retiene el hilo del chat hasta decisión del dueño (timeout=%ss)",
+                    pid_str, proposal.tool_name, _NATIVE_DANGER_OWNER_WAIT_S,
+                )
+                resolved = event.wait(timeout=_NATIVE_DANGER_OWNER_WAIT_S)
+                if not resolved:
+                    # Timeout: caduca la fila para que NO quede tarjeta fantasma.
+                    try:
+                        _await(gate.expire(proposal_id=pid))
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return json.dumps(
+                        {"error": "Tiempo de espera agotado: el dueño no aprobó la acción a tiempo."},
+                        ensure_ascii=False,
+                    )
+                choice = slot.get("choice")
+        finally:
+            with _pending_events_lock:
+                _pending_events.pop(pid_str, None)
+
+        if choice != "approved":
+            return json.dumps(
+                {"error": f"El dueño rechazó la acción '{proposal.tool_name}'. No la reintentes."},
+                ensure_ascii=False,
+            )
+
+        # Aprobado → recupera el token aprobado y RE-DESPACHA la MISMA propuesta (ejecuta).
+        token: str | None = None
+        try:
+            token = _await(gate.approved_token_for(pid))
+        except Exception:  # noqa: BLE001
+            pass
+        logger.info(
+            "hermes.nous_engine.write_block_and_resume_approved: proposal=%s tool=%s "
+            "— ejecutando la llamada exacta tras aprobación del dueño",
+            pid_str, proposal.tool_name,
+        )
+        outcome = _dispatch_via_bridge(
+            proposal=proposal,
+            broker=self._broker,
+            consent_context=self._consent_context,
+            engine_loop=engine_loop,
+            conversation_id=conversation_id,
+            hitl_approval_token=token,
+        )
         return self._handle_outcome(proposal, outcome)
 
     def _handle_outcome(self, proposal: ToolCallProposal, outcome: Any) -> str:
@@ -2641,6 +2748,24 @@ def _run_conversation_streaming_or_fallback(
         )
 
 
+def _deterministic_proposal_id(tool_name: str, parameters: dict[str, Any]) -> UUID:
+    """proposal_id DETERMINISTA por (tool, params) — uuid5(sha256(tool+args)).
+
+    Re-proponer la MISMA acción produce el MISMO proposal_id: colapsa en la fila
+    pendiente existente (register_pending re-arma por id), casa con el token aprobado
+    y con el Event del block-and-resume → mata la deriva del digest y el bucle de
+    re-aprobación. Misma fórmula que el digest del hook de native dangers.
+    """
+    import hashlib  # noqa: PLC0415
+
+    digest = hashlib.sha256(
+        (tool_name + "\x00" + json.dumps(parameters, sort_keys=True, default=str)).encode(
+            "utf-8", "replace"
+        )
+    ).hexdigest()
+    return uuid5(NAMESPACE_URL, digest)
+
+
 def _build_proposal(
     *,
     function_name: str,
@@ -2654,13 +2779,14 @@ def _build_proposal(
     entity_type = "nous_tool" (tipo genérico para tools de Nous).
     justification = vacío; Nous no provee justificación explícita por llamada.
     """
+    parameters = dict(function_args)
     return ToolCallProposal(
-        proposal_id=uuid4(),
+        proposal_id=_deterministic_proposal_id(function_name, parameters),
         tool_name=function_name,
         tenant_id=tenant_id,
         entity_id=effective_task_id or "nous_task",
         entity_type="nous_tool",
-        parameters=dict(function_args),
+        parameters=parameters,
         justification=f"nous tool call: {function_name}",
     )
 
@@ -2672,6 +2798,7 @@ def _dispatch_via_bridge(
     consent_context: ConsentContext,
     engine_loop: asyncio.AbstractEventLoop,
     conversation_id: str = "",
+    hitl_approval_token: str | None = None,
 ) -> Any:
     """Puente async → sync thread-safe para llamar broker.dispatch desde el executor.
 
@@ -2688,7 +2815,12 @@ def _dispatch_via_bridge(
 
     try:
         future = asyncio.run_coroutine_threadsafe(
-            broker.dispatch(proposal, consent_context, conversation_id=conversation_id),
+            broker.dispatch(
+                proposal,
+                consent_context,
+                conversation_id=conversation_id,
+                hitl_approval_token=hitl_approval_token,
+            ),
             engine_loop,
         )
         return future.result(timeout=_BROKER_DISPATCH_TIMEOUT_S)
@@ -2768,7 +2900,7 @@ def _build_external_proposal(
     entity_type = spec.entity_type or "external"
     parameters = _shape_external_parameters(function_name, function_args, spec)
     return ToolCallProposal(
-        proposal_id=uuid4(),
+        proposal_id=_deterministic_proposal_id(function_name, parameters),
         tool_name=function_name,
         tenant_id=tenant_id,
         entity_id=effective_task_id or "nous_task",

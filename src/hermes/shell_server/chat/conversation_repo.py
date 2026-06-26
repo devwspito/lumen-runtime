@@ -34,10 +34,16 @@ from dataclasses import dataclass as _dataclass
 @_dataclass(frozen=True, slots=True)
 class ChatMessage:
     """Mensaje del historial conversacional (user / assistant). Estructura
-    mínima compartida por el persistor y los engines (Nous, hermes-agent)."""
+    mínima compartida por el persistor y los engines (Nous, hermes-agent).
+
+    task_id ata el mensaje al turno (tarea) que lo produjo. El cliente lo usa
+    para distinguir un turno YA finalizado (se renderiza desde el espejo) del
+    turno EN CURSO (se renderiza desde el stream en vivo) — evita la doble fuente
+    que duplicaba mensajes al refrescar. None en mensajes antiguos / del usuario."""
 
     role: str
     content: str
+    task_id: str | None = None
 
 
 _SCHEMA = """
@@ -60,7 +66,8 @@ CREATE TABLE IF NOT EXISTS messages (
   conversation_id TEXT NOT NULL REFERENCES conversations(conversation_id) ON DELETE CASCADE,
   role            TEXT NOT NULL,
   content         TEXT NOT NULL,
-  created_at      TEXT NOT NULL
+  created_at      TEXT NOT NULL,
+  task_id         TEXT
 );
 
 CREATE INDEX IF NOT EXISTS msg_conv_idx
@@ -122,6 +129,10 @@ class SQLiteConversationRepository:
             cols = {r["name"] for r in conn.execute("PRAGMA table_info(conversations)")}
             if "agent_id" not in cols:
                 conn.execute("ALTER TABLE conversations ADD COLUMN agent_id TEXT")
+            # Migración idempotente: task_id por mensaje (chat tipo cloud sin doble fuente).
+            mcols = {r["name"] for r in conn.execute("PRAGMA table_info(messages)")}
+            if "task_id" not in mcols:
+                conn.execute("ALTER TABLE messages ADD COLUMN task_id TEXT")
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path, isolation_level=None)
@@ -176,6 +187,7 @@ class SQLiteConversationRepository:
         conversation_id: UUID,
         role: str,
         content: str,
+        task_id: UUID | None = None,
     ) -> None:
 
         with self._connect() as conn:
@@ -183,10 +195,13 @@ class SQLiteConversationRepository:
             conn.execute(
                 """
                 INSERT INTO messages (
-                  message_id, conversation_id, role, content, created_at
-                ) VALUES (?, ?, ?, ?, ?)
+                  message_id, conversation_id, role, content, created_at, task_id
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (str(uuid4()), str(conversation_id), role, content, now),
+                (
+                    str(uuid4()), str(conversation_id), role, content, now,
+                    str(task_id) if task_id is not None else None,
+                ),
             )
             conn.execute(
                 "UPDATE conversations SET last_msg_at = ? "
@@ -280,7 +295,10 @@ class SQLiteConversationRepository:
             last_msg_at=datetime.fromisoformat(crow["last_msg_at"]),
             archived=bool(crow["archived"]),
             messages=[
-                ChatMessage(role=r["role"], content=r["content"]) for r in mrows
+                ChatMessage(
+                    role=r["role"], content=r["content"], task_id=r["task_id"]
+                )
+                for r in mrows
             ],
         )
 

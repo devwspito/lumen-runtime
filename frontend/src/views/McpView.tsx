@@ -526,8 +526,10 @@ function CatalogCard({ entry, installedIds, onInstall }: CatalogCardProps) {
   const id = entry.server_id ?? entry.id ?? slugify(entry.name ?? '')
   const already = installedIds.has(id) || installedIds.has(entry.server_id ?? '')
   const runner = getRunner(entry.argv)
-  const nonNpx = runner !== '' && runner !== 'npx'
-  const unsupported = entry.installable === false || nonNpx
+  // Compatible = stdio transport via npx (npm) or uvx (pypi), not explicitly disabled.
+  // Everything else — remote/SSE/OCI/Docker/unknown argv — is unsupported in this container.
+  const stdioCompatible = (runner === 'npx' || runner === 'uvx') && entry.installable !== false
+  const unsupported = !stdioCompatible
   const envSchema = parseEnvSchema(entry)
   const needsEnv = envSchema.length > 0
   const repo = entry.repository ?? entry.homepage ?? entry.website ?? ''
@@ -578,9 +580,13 @@ function CatalogCard({ entry, installedIds, onInstall }: CatalogCardProps) {
               {entry.description}
             </div>
           )}
-          {unsupported && (entry.unsupported_reason || nonNpx) && (
+          {unsupported && (
             <div className="mcp-row__cmd" style={{ color: 'var(--warn)' }}>
-              {entry.unsupported_reason ?? `Solo se admiten herramientas npx por ahora (esta usa ${runner}).`}
+              {entry.unsupported_reason ?? (
+                runner === ''
+                  ? 'Solo remoto — sin paquete stdio npm/pypi.'
+                  : `Solo se admiten herramientas npx/uvx (esta usa ${runner}).`
+              )}
             </div>
           )}
         </div>

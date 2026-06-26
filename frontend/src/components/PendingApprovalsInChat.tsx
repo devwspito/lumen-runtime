@@ -16,6 +16,16 @@ import ApprovalCard from './ApprovalCard'
 
 const POLL_INTERVAL_MS = 3000
 
+// Backend approval window is 600 s (10 min). Use 11 min as the client-side
+// cut-off so we never render a card the backend will immediately reject.
+const APPROVAL_MAX_AGE_MS = 11 * 60 * 1000
+
+function isApprovalFresh(createdAt: string | null | undefined): boolean {
+  if (!createdAt) return true // unknown age — keep for back-compat
+  const age = Date.now() - new Date(createdAt).getTime()
+  return age < APPROVAL_MAX_AGE_MS
+}
+
 interface PendingApprovalsInChatProps {
   currentThreadId: string | null
   /** Incremented externally (e.g. on message send) to force an immediate refresh. */
@@ -42,7 +52,10 @@ export default function PendingApprovalsInChat({
       // Show approvals belonging to the active conversation, PLUS orphan ones
       // (conversation_id null/empty) that may come from scheduled/autonomous
       // cycles — they are never attached to a thread but still block the agent.
+      // Age guard: discard anything older than APPROVAL_MAX_AGE_MS so stale
+      // ghost cards never render even if the backend poll lags a cycle.
       const filtered = all.filter(a => {
+        if (!isApprovalFresh(a.created_at)) return false
         if (!a.conversation_id) return true
         // Only match conversation-scoped approvals once we know the thread id.
         return currentThreadId !== null && a.conversation_id === currentThreadId
