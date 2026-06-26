@@ -600,11 +600,20 @@ class TestBuildProposal:
         with pytest.raises((AttributeError, TypeError)):
             proposal.tool_name = "hacked"  # type: ignore[misc]
 
-    def test_unique_proposal_ids(self) -> None:
-        """Cada llamada genera un proposal_id distinto."""
-        p1 = _build_proposal(function_name="write_file", function_args={}, tenant_id=_TENANT, effective_task_id="t")
-        p2 = _build_proposal(function_name="write_file", function_args={}, tenant_id=_TENANT, effective_task_id="t")
-        assert p1.proposal_id != p2.proposal_id
+    def test_deterministic_proposal_id(self) -> None:
+        """proposal_id DETERMINISTA por (tool, args): la MISMA acción colapsa en el mismo
+        id (cura el bucle de re-aprobación), y acciones distintas dan ids distintos.
+
+        Antes era uuid4() (único por llamada) → re-proponer la misma acción creaba una
+        fila pendiente nueva cada vez → tarjeta que nunca se limpiaba. Ahora es
+        uuid5(sha256(tool+args)): re-proponer = mismo id = misma fila = casa con el token."""
+        p1 = _build_proposal(function_name="write_file", function_args={"path": "/a"}, tenant_id=_TENANT, effective_task_id="t")
+        p2 = _build_proposal(function_name="write_file", function_args={"path": "/a"}, tenant_id=_TENANT, effective_task_id="t")
+        assert p1.proposal_id == p2.proposal_id, "misma acción ⇒ mismo proposal_id (no bucle)"
+        p3 = _build_proposal(function_name="write_file", function_args={"path": "/b"}, tenant_id=_TENANT, effective_task_id="t")
+        assert p1.proposal_id != p3.proposal_id, "args distintos ⇒ id distinto"
+        p4 = _build_proposal(function_name="read_file", function_args={"path": "/a"}, tenant_id=_TENANT, effective_task_id="t")
+        assert p1.proposal_id != p4.proposal_id, "tool distinta ⇒ id distinto"
 
 
 # ---------------------------------------------------------------------------

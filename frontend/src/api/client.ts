@@ -762,6 +762,11 @@ export function openTaskStream(
   let closed = false
   let retryTimer: ReturnType<typeof setTimeout> | null = null
 
+  // lastSeq survives reconnects for this task handle: the broker replays the
+  // entire run on re-subscribe, so we discard frames whose seq we already saw.
+  // Frames without seq (older backend) always pass through (seq undefined).
+  let lastSeq = -1
+
   function connect() {
     if (closed) return
     const url = `${wsBase}${wsPath}/${encodeURIComponent(taskId)}`
@@ -775,6 +780,15 @@ export function openTaskStream(
       } catch {
         return
       }
+
+      // Dedup by seq: discard frames we already processed (replayed by the broker
+      // after a reconnect). Frames without seq pass through unconditionally.
+      const frameSeq = (frame as Record<string, unknown>).seq
+      if (typeof frameSeq === 'number') {
+        if (frameSeq <= lastSeq) return
+        lastSeq = frameSeq
+      }
+
       dispatch(frame)
     })
 

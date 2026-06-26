@@ -56,6 +56,8 @@ export type ChatMessage =
   | {
       type: 'assistant'
       id: string
+      /** Backend task_id that produced this turn; null for restored history before the new contract. */
+      taskId: string | null
       thinkingText: string
       thinkingDone: boolean
       toolSteps: ToolStep[]
@@ -83,7 +85,7 @@ interface ChatState {
 type Action =
   | { type: 'RESET' }
   | { type: 'ADD_USER'; id: string; text: string }
-  | { type: 'ADD_ASSISTANT'; id: string }
+  | { type: 'ADD_ASSISTANT'; id: string; taskId: string }
   | { type: 'STATUS_SENDING' }
   | { type: 'STATUS_STREAMING'; text: string }
   | { type: 'STATUS_IDLE' }
@@ -150,7 +152,16 @@ function reducer(state: ChatState, action: Action): ChatState {
         ],
       }
 
-    case 'ADD_ASSISTANT':
+    case 'ADD_ASSISTANT': {
+      // Idempotent: if a bubble with this taskId already exists (e.g. from a
+      // previous LOAD_MESSAGES that carried task_id from the mirror), reuse it
+      // rather than appending a duplicate. The caller anchors activeAssistantIdRef
+      // to the existing bubble's id in that case.
+      const existing = state.messages.find(
+        m => m.type === 'assistant' && m.taskId === action.taskId,
+      )
+      if (existing) return state
+
       return {
         ...state,
         messages: [
@@ -158,6 +169,7 @@ function reducer(state: ChatState, action: Action): ChatState {
           {
             type: 'assistant',
             id: action.id,
+            taskId: action.taskId,
             thinkingText: '',
             thinkingDone: false,
             toolSteps: [],
@@ -167,6 +179,7 @@ function reducer(state: ChatState, action: Action): ChatState {
           },
         ],
       }
+    }
 
     case 'STATUS_SENDING':
       return { ...state, status: { phase: 'sending' } }
@@ -575,6 +588,9 @@ export function useChat(): UseChatReturn {
             return {
               type: 'assistant' as const,
               id: genUUID(),
+              // Carry the backend task_id so we can detect "this turn is already
+              // in the mirror" and skip re-subscribing to the stream.
+              taskId: m.task_id ?? null,
               thinkingText: '',
               thinkingDone: true,
               toolSteps: [],
@@ -585,10 +601,33 @@ export function useChat(): UseChatReturn {
           })
         dispatch({ type: 'LOAD_MESSAGES', convId: savedConvId, messages })
 
-        // If a task stream was in-flight, re-attach to receive the rest.
+        // If a task stream was in-flight, decide whether to re-attach.
         if (savedTaskId) {
-          const assistantMsgId = genUUID()
-          dispatch({ type: 'ADD_ASSISTANT', id: assistantMsgId })
+          // Check if the mirror already contains the final answer for savedTaskId.
+          // If yes: the turn completed before we got here — render from the mirror
+          // and do NOT re-subscribe (the replay would duplicate the message).
+          const alreadyFinalized = messages.some(
+            m => m.type === 'assistant' && m.taskId === savedTaskId,
+          )
+
+          if (alreadyFinalized) {
+            // Turn is done — clean up the in-flight state and stay idle.
+            sessionStorage.removeItem(SS_TASK_ID)
+            return
+          }
+
+          // Turn still in progress — re-attach to the stream.
+          // If a streaming bubble with this taskId already exists in the loaded
+          // messages (shouldn't happen for a mid-turn refresh, but be safe),
+          // reuse it; otherwise create a new one.
+          const existingBubble = messages.find(
+            m => m.type === 'assistant' && m.taskId === savedTaskId,
+          ) as Extract<ChatMessage, { type: 'assistant' }> | undefined
+
+          const assistantMsgId = existingBubble ? existingBubble.id : genUUID()
+          if (!existingBubble) {
+            dispatch({ type: 'ADD_ASSISTANT', id: assistantMsgId, taskId: savedTaskId })
+          }
           dispatch({ type: 'STATUS_STREAMING', text: 'Reconectando…' })
           activeAssistantIdRef.current = assistantMsgId
           currentTaskIdRef.current = savedTaskId
@@ -750,7 +789,7 @@ export function useChat(): UseChatReturn {
       return
     }
 
-    dispatch({ type: 'ADD_ASSISTANT', id: assistantMsgId })
+    dispatch({ type: 'ADD_ASSISTANT', id: assistantMsgId, taskId })
     dispatch({ type: 'STATUS_STREAMING', text: 'Procesando…' })
     activeAssistantIdRef.current = assistantMsgId
     currentTaskIdRef.current = taskId
@@ -861,6 +900,7 @@ export function useChat(): UseChatReturn {
           return {
             type: 'assistant' as const,
             id: genUUID(),
+            taskId: m.task_id ?? null,
             thinkingText: '',
             thinkingDone: true,
             toolSteps: [],

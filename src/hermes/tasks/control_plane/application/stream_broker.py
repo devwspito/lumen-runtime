@@ -25,6 +25,7 @@ import contextlib
 import logging
 from collections import defaultdict
 from collections.abc import AsyncGenerator
+from dataclasses import replace
 from uuid import UUID
 
 from hermes.tasks.control_plane.domain.task_stream_frame import (
@@ -76,6 +77,19 @@ class StreamBroker:
         # de texto → al reconectar a media tarea (p.ej. mientras navega la web) no se veían
         # las tools ni nada → pantalla en blanco. Acotado por _MAX_REPLAY_FRAMES.
         self._replay_log: dict[UUID, list[TaskStreamFrame]] = defaultdict(list)
+        # Contador de secuencia monótono por task_id. Cada frame emitido recibe un
+        # `seq` creciente en su payload. Así un cliente que re-engancha (reconexión WS
+        # o refresco) DEDUPLICA: descarta frames con seq <= el último que ya aplicó, en
+        # vez de re-añadirlos sobre lo ya pintado (causa raíz de los mensajes duplicados).
+        # El replay sigue siendo el run completo; el seq solo evita la doble aplicación.
+        self._seq: dict[UUID, int] = defaultdict(int)
+
+    def _stamp_seq(self, frame: TaskStreamFrame) -> TaskStreamFrame:
+        """Copia el frame con un `seq` monótono por task_id en su payload."""
+        self._seq[frame.task_id] += 1
+        return replace(
+            frame, payload={**frame.payload, "seq": self._seq[frame.task_id]}
+        )
 
     def publish(self, frame: TaskStreamFrame) -> None:
         """Publica un frame a todos los suscriptores de frame.task_id.
@@ -87,6 +101,7 @@ class StreamBroker:
 
         No bloqueante — NO usa await. Llamado desde el loop del daemon.
         """
+        frame = self._stamp_seq(frame)
         kind = frame.kind.value
         is_lifecycle = kind in ("status", "done", "error")
 
@@ -183,7 +198,7 @@ class StreamBroker:
         se descarta el item más antiguo para garantizar que DONE y el sentinel
         llegan (lifecycle frames never silently dropped).
         """
-        frame = done_frame(task_id=task_id, outcome=outcome, error=error)
+        frame = self._stamp_seq(done_frame(task_id=task_id, outcome=outcome, error=error))
         self._record_terminal_state(frame)
 
         subscribers = self._subscribers.get(task_id, [])

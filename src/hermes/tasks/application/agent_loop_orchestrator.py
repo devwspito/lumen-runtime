@@ -321,6 +321,7 @@ class AgentLoopOrchestrator:
                                 "⚠ No he podido completar la respuesta: "
                                 f"{error_reason}"
                             ),
+                            task_id=item.id,
                         )
                     except Exception as _pexc:  # noqa: BLE001
                         logger.warning(
@@ -563,6 +564,7 @@ class AgentLoopOrchestrator:
                 conversation_id=_UUID(conv_id_str),
                 role="assistant",
                 content=narrative,
+                task_id=item.id,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(

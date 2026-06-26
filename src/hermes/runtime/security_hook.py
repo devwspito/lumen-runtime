@@ -1440,9 +1440,15 @@ def _resolve_native_danger_approval(
                 "owner did not respond in %ss, auto-denying (fail-closed)",
                 proposal_id_str, tool_name, _NATIVE_DANGER_OWNER_WAIT_S,
             )
+            # Caduca la fila para que NO quede tarjeta fantasma (la sacaba de pending
+            # solo approve/reject; un timeout la dejaba 'pending' para siempre).
+            try:
+                _await(gate.expire(proposal_id=proposal_id))
+            except Exception:  # noqa: BLE001
+                pass
             return (
                 "Tiempo de espera agotado: el dueño no aprobó la acción a tiempo. "
-                "La tarjeta de aprobación sigue disponible si quieres reintentar."
+                "Vuelve a pedírmelo si quieres que lo intente de nuevo."
             )
 
         choice = slot.get("choice")

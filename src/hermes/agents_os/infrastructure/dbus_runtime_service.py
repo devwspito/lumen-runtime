@@ -2450,7 +2450,11 @@ class DbusRuntimeServiceWiring:
         # se emite el evento de aprobación).
         if self._queue is not None:
             work_item_id = await self._gate.work_item_id_for_proposal(proposal_id)
-            if work_item_id is not None:
+            # work_item_id == UUID(int=0) ⇒ chat / native-danger (NO es una tarea de la
+            # cola): NO se re-encola — el resume va por el block-and-resume del hilo del
+            # chat (señal del Event abajo). Re-encolar 0 disparaba un ValueError inútil y,
+            # peor, un ciclo nuevo mudo. Solo las tareas REALES (autónomo/scheduled) se re-encolan.
+            if work_item_id is not None and work_item_id != UUID(int=0):
                 try:
                     await self._queue.re_enqueue_after_approval(work_item_id)
                     logger.info(
@@ -6409,6 +6413,25 @@ def _list_native_skills_primary(
     return results
 
 
+def _coerce_skill_version(raw: "Any") -> int:
+    """Coerce a SKILL.md version to an int WITHOUT crashing the whole /skills listing.
+
+    Hub skills carry semver ("2.0.0"); cage-signed skills carry an int. A bare
+    int(raw) raised ValueError on semver and took down the ENTIRE list (no skill
+    appeared — hub OR agent-created). Tolerant: int if possible, else the semver
+    major, else 1.
+    """
+    if raw is None:
+        return 1
+    try:
+        return int(raw)
+    except (ValueError, TypeError):
+        try:
+            return int(str(raw).split(".")[0].strip() or 1)
+        except (ValueError, TypeError):
+            return 1
+
+
 def _skill_md_to_dto(skill_md_path: "Any") -> "dict | None":
     """Convert a SKILL.md file to a SkillPackageDTO-shaped dict.
 
@@ -6452,7 +6475,11 @@ def _skill_md_to_dto(skill_md_path: "Any") -> "dict | None":
         "package_id": package_id,
         "skill_id": skill_id,
         "skill_name": skill_name,
-        "version": int(meta.get("version") or 1),
+        # FIX 2026-06-26: hub skills traen versión semver ("2.0.0"); int() pelado
+        # crasheaba TODO el listado /skills (ValueError) → la skill instalada no
+        # aparecía. Coerción segura: int directo si se puede, si no el major del
+        # semver, si no 1. (El DTO espera int; perder minor/patch es cosmético.)
+        "version": _coerce_skill_version(meta.get("version")),
         "state": state,
         "surface_kinds": meta.get("surface_kinds") or ["skill_manage"],
         "signed_at": signed_at,
