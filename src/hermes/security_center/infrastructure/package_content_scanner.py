@@ -173,7 +173,45 @@ _EXFIL_PATTERNS: tuple[tuple[str, Severity, str], ...] = (
     (r"atob\s*\(|Buffer\.from\([^)]*['\"]base64|base64\.b64decode", Severity.MEDIUM, "obfuscation"),
 )
 
-_INSTALL_HOOK_KEYS = frozenset({"preinstall", "install", "postinstall", "prepare", "prepublish"})
+# npm lifecycle hooks that ACTUALLY RUN when a consumer installs a PUBLISHED package
+# from the registry. The MCP prefetch does exactly `npm install <published-spec>`
+# WITHOUT --ignore-scripts (and BEFORE the runtime spawns it), so these execute
+# unattended → the real arbitrary-code-on-install vector. Classified by content below.
+_NPM_RUN_ON_INSTALL_HOOKS = ("preinstall", "install", "postinstall")
+# prepare / prepublish[Only] run ONLY for the package's OWN dev install, for a git/url
+# dependency, or right before `npm publish` — NEVER when a consumer installs the
+# published package from the registry (npm lifecycle semantics). Our install gate only
+# resolves PUBLISHED coordinates (git/url MCP argv is rejected by is_fetchable_argv),
+# so these hooks provably never execute in this path. A lone `prepare='npm run build'`
+# is ubiquitous in legit TS packages (every official MCP) — flagging it CRITICAL was a
+# pure false positive that hard-blocked every legit install. We therefore surface a
+# dev-only hook ONLY when the command itself is malicious, and never block on it.
+_NPM_DEV_ONLY_HOOKS = ("prepare", "prepublish", "prepublishOnly")
+
+# Inline code-execution forms a benign install hook never needs: an interpreter fed
+# a one-liner (-e/--eval/-p/-c/--require/--import) or an obfuscation primitive
+# (eval/atob/fromCharCode/Buffer.from(base64)/Function). In a RUNS-ON-INSTALL hook
+# (which executes unattended at prefetch) these are near-certain malware → CRITICAL,
+# regardless of whether the dropper detector recognizes the (often obfuscated) payload.
+# `node-gyp` is NOT matched: `\bnode\b` ends at the hyphen, and there is no ` -e/-p/-c/-r`.
+_INLINE_EXEC_HOOK_RE = re.compile(
+    r"\b(?:node|nodejs|deno|bun|python3?|ruby|perl|php)\b[^\n]*?\s-(?:e|p|c|r)\b"
+    r"|--(?:eval|print|require|import)\b"
+    r"|\b(?:eval|atob|String\.fromCharCode)\s*\("
+    r"|Buffer\.from\s*\([^)]*base64"
+    r"|\bFunction\s*\(",
+    re.IGNORECASE,
+)
+# A LOCAL script a hook executes (`node x.js`, `bash setup.sh`, `./run`, `python a.py`).
+# We resolve the basename among the package files and scan ITS body for dropper
+# patterns — so `postinstall: node install.js` with a malicious install.js is CRITICAL,
+# while a legit install.js (e.g. one that shells out to node-gyp) stays MEDIUM (the
+# dropper detector does not fire on benign child_process / build invocations).
+_HOOK_LOCAL_SCRIPT_RE = re.compile(
+    r"(?:^|[\s;&|])(?:node|nodejs|deno|bun|python3?|ruby|perl|sh|bash|\./)\s*"
+    r"(?P<script>\.?[\w./-]+\.(?:js|cjs|mjs|ts|py|rb|pl|sh))\b",
+    re.IGNORECASE,
+)
 
 
 class PackageContentScanner:
@@ -570,19 +608,106 @@ class PackageContentScanner:
             scripts = pkg.get("scripts") or {}
             if not isinstance(scripts, dict):
                 continue
-            hooks = sorted(_INSTALL_HOOK_KEYS & set(scripts.keys()))
-            if hooks:
-                body = "; ".join(f"{h}={scripts[h]!r}" for h in hooks)
-                return [Risk(
+            return self._classify_npm_install_hooks(scripts, files)
+        return []
+
+    @staticmethod
+    def _classify_npm_install_hooks(
+        scripts: dict, files: dict[str, bytes] | None = None
+    ) -> list[Risk]:
+        """Content-aware npm lifecycle-hook gate.
+
+        The old rule flagged ANY hook key CRITICAL regardless of what it ran, so a
+        benign `prepare='npm run build'` (every official MCP) hard-FAILed the install.
+        We classify by WHAT the hook executes:
+
+          * runs-on-install hooks (preinstall/install/postinstall) EXECUTE unattended
+            at prefetch. They are CRITICAL when the command is dangerous in ANY of:
+              - the dropper detector (scan_skill_text) finds HIGH/CRITICAL (curl|sh,
+                reverse shell, obfuscated exec, persistence, priv-esc, pipe-to-shell);
+              - it is an INLINE-EXEC form (node -e / python -c / atob / Buffer.from
+                base64 / Function) — near-certain malware even when obfuscated;
+              - it runs a LOCAL script bundled in the package whose body is a dropper.
+            Otherwise → MEDIUM (it runs; surface it — `node-gyp rebuild`, `tsc`,
+            `npm run build` are not malware).
+          * dev-only hooks (prepare/prepublish) never run on a published install:
+              - malicious command → MEDIUM (visible, non-blocking — it can't execute here);
+              - benign command → NO finding (the false-positive that blocked legit MCPs).
+
+        The package's source files are still scanned by _check_source_patterns too.
+        (Pre-existing gap, NOT closed here: a malicious TRANSITIVE dependency's
+        postinstall runs at prefetch but only the TARGET's package.json is inspected —
+        tracked for a tree-scan / --ignore-scripts follow-up.)
+        """
+        from hermes.agents_os.domain.skill_content_scan import (  # noqa: PLC0415
+            ContentSeverity,
+            scan_skill_text,
+        )
+
+        pkg_files = files or {}
+
+        def text_is_dropper(text: str) -> bool:
+            return any(
+                f.severity in (ContentSeverity.HIGH, ContentSeverity.CRITICAL)
+                for f in scan_skill_text(text)
+            )
+
+        def referenced_local_script_is_dropper(cmd: str) -> bool:
+            for m in _HOOK_LOCAL_SCRIPT_RE.finditer(cmd):
+                base = m.group("script").rsplit("/", 1)[-1]
+                for path, data in pkg_files.items():
+                    if path.rsplit("/", 1)[-1] == base:
+                        if text_is_dropper(data.decode("utf-8", "replace")):
+                            return True
+            return False
+
+        def runs_dangerous_code(cmd: str) -> bool:
+            return (
+                text_is_dropper(cmd)
+                or _INLINE_EXEC_HOOK_RE.search(cmd) is not None
+                or referenced_local_script_is_dropper(cmd)
+            )
+
+        risks: list[Risk] = []
+        for hook in _NPM_RUN_ON_INSTALL_HOOKS:
+            cmd = scripts.get(hook)
+            if not isinstance(cmd, str) or not cmd.strip():
+                continue
+            if runs_dangerous_code(cmd):
+                risks.append(Risk(
                     category="content",
                     severity=Severity.CRITICAL,
                     message=(
-                        f"npm package declara hook(s) de instalación que se ejecutan "
-                        f"sin intervención: {body[:300]}"
+                        f"hook npm '{hook}' ejecuta código peligroso al instalar "
+                        f"(corre sin intervención en el prefetch): {cmd[:200]!r}"
                     ),
-                    evidence_ref=f"content:npm_install_hook:{','.join(hooks)}",
-                )]
-        return []
+                    evidence_ref=f"content:npm_install_hook:{hook}",
+                ))
+            else:
+                risks.append(Risk(
+                    category="content",
+                    severity=Severity.MEDIUM,
+                    message=(
+                        f"hook npm '{hook}' se ejecuta al instalar (revisar): {cmd[:200]!r}"
+                    ),
+                    evidence_ref=f"content:npm_install_hook:{hook}",
+                ))
+        for hook in _NPM_DEV_ONLY_HOOKS:
+            cmd = scripts.get(hook)
+            if not isinstance(cmd, str) or not cmd.strip():
+                continue
+            if text_is_dropper(cmd) or _INLINE_EXEC_HOOK_RE.search(cmd):
+                risks.append(Risk(
+                    category="content",
+                    severity=Severity.MEDIUM,
+                    message=(
+                        f"hook npm '{hook}' contiene un comando peligroso (no se ejecuta "
+                        f"al instalar un paquete publicado, pero revísalo): {cmd[:200]!r}"
+                    ),
+                    evidence_ref=f"content:npm_dev_hook:{hook}",
+                ))
+            # benign dev-only hook (e.g. prepare='npm run build') → no finding
+        return risks
 
     def _pypi_hooks(self, files: dict[str, bytes]) -> list[Risk]:
         for path, data in files.items():

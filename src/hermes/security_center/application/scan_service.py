@@ -257,8 +257,21 @@ class ScanService:
         score = max(0, min(100, 100 - total_deduction))
 
         has_critical = any(r.severity == Severity.CRITICAL for r in risks)
-        content_high = any(
-            r.severity == Severity.HIGH and r.category == "content" for r in risks
+        # "Could not analyze" HIGH from a REAL-analysis scanner — the content scanner
+        # (unreadable/undownloadable bytes) OR the CVE scanner (npm/pypi resolve
+        # failed, baked DB missing/stale, trivy timed out/errored). Both mean the
+        # gate could not PROVE the target safe, so absence-of-analysis must cap to
+        # WARN/FAIL — never reach PASS. (security-review 2026-06-26: the cve slot
+        # used to return [] on failure, indistinguishable from a clean scan.)
+        unanalyzable_high = any(
+            r.severity == Severity.HIGH and (
+                r.category == "content"
+                or (
+                    r.category == "cve"
+                    and (r.evidence_ref or "").startswith("cve:unanalyzable")
+                )
+            )
+            for r in risks
         )
         # Infra-state CRITICALs: signature-only CRITICALs that come from "infra
         # unavailable" in heuristic mode (no non-infra CRITICALs present).
@@ -269,8 +282,8 @@ class ScanService:
 
         if has_critical and not only_infra_criticals:
             return min(score, 30)   # hard FAIL: real CVE or malware signal
-        if content_high:
-            return min(score, 45)   # unanalyzable bytes — WARN/FAIL
+        if unanalyzable_high:
+            return min(score, 45)   # could-not-analyze (content bytes / CVE) — WARN/FAIL
         if only_infra_criticals:
             # Infra unavailable with heuristic engine: cap to WARN, not hard FAIL.
             # Owner can review and approve.

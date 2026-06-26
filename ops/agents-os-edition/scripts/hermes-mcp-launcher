@@ -508,6 +508,12 @@ def _build_jailed_cmd(argv: list[str], env: dict[str, str]) -> list[str]:
         val = env.get(key)
         if val is not None:
             cmd.append(f"--setenv={key}={val}")
+    # Never run package lifecycle scripts at RUNTIME either (security-review 2026-06-26).
+    # The install-time prefetch already warms the cache with --ignore-scripts; npx/uvx
+    # --offline only need to EXECUTE the package's bin, never (re)run preinstall/install/
+    # postinstall. Forcing ignore-scripts here closes the runtime half of the auto-RCE
+    # (a package whose bin is reached via npx must not also trigger a postinstall).
+    cmd.append("--setenv=npm_config_ignore_scripts=true")
     # Egress proxy vars LAST → authoritative (force every runner through the proxy).
     cmd.extend([
         f"--setenv=http_proxy={_EGRESS_PROXY_URL}",

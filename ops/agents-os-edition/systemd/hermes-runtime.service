@@ -148,6 +148,9 @@ Environment=COMPOSIO_CACHE_DIR=/var/lib/hermes/composio-cache
 # root-owned del bake) y uv igual. Mismo patrón que COMPOSIO_CACHE_DIR.
 Environment=npm_config_cache=/var/lib/hermes/npm-cache
 Environment=UV_CACHE_DIR=/var/lib/hermes/uv-cache
+# Trivy CVE scanner: DB horneada en /var/lib/trivy (en ReadWritePaths abajo). El scanner usa
+# --skip-db-update → lee la DB de aquí, sin red. Escaneo CVE real de cada MCP/skill instalado.
+Environment=TRIVY_CACHE_DIR=/var/lib/trivy
 # hermes_cli (resolve_runtime_provider + AIAgent) persiste config/.env/auth.json
 # bajo $HERMES_HOME (default ~/.hermes). Con ProtectHome=yes el HOME está
 # enmascarado → PermissionError al resolver/llamar al modelo (rompe TestProvider
@@ -228,7 +231,7 @@ RestrictNamespaces=yes
 LockPersonality=yes
 PrivateDevices=yes
 PrivateTmp=yes
-ReadWritePaths=/var/lib/hermes /run/hermes
+ReadWritePaths=/var/lib/hermes /run/hermes /var/lib/trivy
 # El agente NO debe poder ni siquiera ESCRIBIR una petición al gate de acceso
 # remoto (defensa en profundidad: aunque el gate ya exige la contraseña del
 # dispositivo, le quitamos al agente la posibilidad de intentar/brute-forcear).

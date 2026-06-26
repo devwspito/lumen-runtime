@@ -68,6 +68,12 @@ logger = logging.getLogger(__name__)
 _AUTONOMOUS_SKILL_SIGNING_KEY_ID = "skill-signing-v2"
 _SIGNING_KEY_ID = _AUTONOMOUS_SKILL_SIGNING_KEY_ID
 
+# Hard bound on agent-authored SKILL.md size (security-review 2026-06-26): the content
+# scan runs synchronously on the daemon path and its split-dropper correlation is
+# super-linear, so an unbounded blob is a DoS vector. 256 KiB is far above any real
+# skill while keeping the scan bounded.
+_MAX_SKILL_CONTENT_BYTES = 256 * 1024
+
 
 class SkillStoreError(RuntimeError):
     """Unrecoverable error in the skill store adapter — skill not written."""
@@ -207,6 +213,45 @@ class SkillStoreAdapter:
     # CREATE / EDIT — parse, sign, write, persist
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _content_scan_blocking(content: str) -> list[str]:
+        """Scan agent-authored SKILL.md for trojan patterns; return blocking messages.
+
+        EVERY skill the agent creates/edits/patches passes through the SAME domain
+        scanner (agents_os.domain.skill_content_scan) the hub-mint endpoint enforces.
+        A skill the agent writes is turned into a signed, auto-loadable artifact —
+        the strict MINTING surface — so block on HIGH+ (droppers, reverse shells,
+        obfuscated exec, persistence, priv-esc, destructive), not only CRITICAL.
+        Empty list = safe to persist. FAIL-CLOSED (security-review 2026-06-26): the
+        domain scanner is documented best-effort, but if it EVER raises we BLOCK (never
+        silently allow). Patch routes through _upsert_skill, so this single chokepoint
+        covers create + edit + patch; the caller scans BOTH the raw input AND the
+        canonical serialized form (escape-smuggling defense). The execution-time cage
+        (egress jail, install-gate, broker HITL, signature verify) still applies.
+        """
+        try:
+            from hermes.agents_os.domain.skill_content_scan import (  # noqa: PLC0415
+                ContentSeverity,
+                has_high_or_critical_finding,
+                scan_skill_markdown,
+                scan_skill_text,
+            )
+
+            findings = scan_skill_markdown(content) + scan_skill_text(content)
+            if not has_high_or_critical_finding(findings):
+                return []
+            blocking = (ContentSeverity.HIGH, ContentSeverity.CRITICAL)
+            seen: set[str] = set()
+            out: list[str] = []
+            for f in findings:
+                if f.severity in blocking and f.message not in seen:
+                    seen.add(f.message)
+                    out.append(f.message)
+        except Exception as exc:  # noqa: BLE001 — fail-closed: a scanner crash must BLOCK
+            logger.warning("hermes.skill_store.content_scan_error: %s", exc)
+            return ["el escáner de contenido falló — bloqueado por seguridad (fail-closed)"]
+        return out
+
     async def _upsert_skill(
         self, action: CapturedAction, skill_name: str
     ) -> ReplayOutcome:
@@ -215,6 +260,33 @@ class SkillStoreAdapter:
             return ReplayOutcome.failed(
                 action.action_id,
                 error="skill_manage create/edit requires 'content' in parameters",
+            )
+
+        # Bound the input BEFORE the (synchronous, super-linear) content scan.
+        if len(content.encode("utf-8", "ignore")) > _MAX_SKILL_CONTENT_BYTES:
+            return ReplayOutcome.failed(
+                action.action_id,
+                error=(
+                    f"SKILL.md excede el tamaño máximo "
+                    f"({_MAX_SKILL_CONTENT_BYTES} bytes)."
+                ),
+            )
+
+        # Security Center content gate — fail-closed BEFORE signing/writing. Todo
+        # skill (incl. las que Neus crea sola) pasa por el scanner; HIGH+ no se firma.
+        blocking = self._content_scan_blocking(content)
+        if blocking:
+            logger.warning(
+                "hermes.skill_store.content_blocked name=%s patterns=%s",
+                skill_name,
+                blocking,
+            )
+            return ReplayOutcome.rejected_by_policy(
+                action.action_id,
+                reason=(
+                    "Skill bloqueada por el Centro de Seguridad: contenido peligroso "
+                    "detectado — " + "; ".join(blocking[:3])
+                ),
             )
 
         try:
@@ -231,6 +303,25 @@ class SkillStoreAdapter:
                 error=(
                     f"Skill name mismatch: parameters.name={skill_name!r} "
                     f"but frontmatter.name={doc.name!r}. They must match."
+                ),
+            )
+
+        # Re-scan the CANONICAL serialized form actually written + loaded — not just the
+        # raw input (security-review 2026-06-26). parse→serialize can normalize escape
+        # sequences / quoting, so a payload that slips the raw scan but resolves on
+        # serialize is caught here BEFORE signing.
+        blocking_serialized = self._content_scan_blocking(doc.serialize())
+        if blocking_serialized:
+            logger.warning(
+                "hermes.skill_store.content_blocked_serialized name=%s patterns=%s",
+                skill_name,
+                blocking_serialized,
+            )
+            return ReplayOutcome.rejected_by_policy(
+                action.action_id,
+                reason=(
+                    "Skill bloqueada por el Centro de Seguridad: contenido peligroso "
+                    "tras normalizar — " + "; ".join(blocking_serialized[:3])
                 ),
             )
 

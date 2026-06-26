@@ -1438,6 +1438,7 @@ class DbusRuntimeServiceWiring:
             from hermes.security_center.infrastructure.trivy_cve_scanner import (  # noqa: PLC0415
                 TriviaCveScanner,
                 trivy_available,
+                trivy_db_present,
             )
         except ImportError:
             logger.warning(
@@ -1453,7 +1454,12 @@ class DbusRuntimeServiceWiring:
         # daemon gira, y TriviaCveScanner autoaplica su propio wait_for(120 s)
         # devolviendo [] al expirar. (El gate síncrono inline de composition.py NO
         # debe llevar Trivy: ahí se await-ea en el loop del daemon.)
-        using_trivy = trivy_available()
+        # Gate engine=trivy on BINARY *and* a usable baked DB. With the binary present
+        # but the DB absent, every `trivy fs --skip-db-update` fails — selecting trivy
+        # would mark every install unanalyzable (fail-loud → WARN) AND mislabel the
+        # engine as "escaneo completo". Falling back to heuristic gives the honest
+        # "revisión básica" label + owner-review path. (security-review 2026-06-26)
+        using_trivy = trivy_available() and trivy_db_present()
         cve_scanner = TriviaCveScanner() if using_trivy else HeuristicFallbackScanner()
         engine = "trivy" if using_trivy else "heuristic"
         logger.info(
@@ -5567,36 +5573,61 @@ def _prefetch_mcp_package(server_id: str, argv: list[str]) -> None:
         npm = _shutil.which("npm")
         if not npm:
             raise RuntimeError("npm no está disponible para prefetch del paquete MCP")
-        # Warm the FULL dependency tree into the shared cache. `npm cache add <spec>` only
-        # caches the package's OWN tarball — NOT its deps — so the runtime `npx --offline`
-        # later dies with ENOTCACHED on the first transitive dep (e.g. @modelcontextprotocol
-        # /sdk). A throwaway `npm install` into a temp prefix resolves + downloads the whole
-        # tree (packuments + tarballs) into npm_config_cache; the runtime then spawns
-        # `npx --offline` (cache-only, NEVER contacts the registry) and finds everything.
-        import tempfile as _tempfile  # noqa: PLC0415
-        _tmp_prefix = _tempfile.mkdtemp(prefix="hermes-mcp-prefetch-")
+        # Install the FULL dependency tree into a PERSISTENT per-package prefix and run
+        # its bin DIRECTLY at runtime (security-review/connect-fix 2026-06-26). The old
+        # design warmed a shared cache for `npx --offline`, but npx CANNOT resolve the
+        # package packument from an `npm install`-warmed cache → ENOTCACHED → "Connection
+        # Closed" (verified live, reproduces on a fresh cache). Running the installed bin
+        # directly works. So we keep node_modules at a known path and rewrite the runtime
+        # argv `npx <pkg>` → `node <prefix>/node_modules/<pkg>/<bin>` (offline_runtime.py).
+        # The cage is unchanged: still `node` inside the launcher's netns+seccomp jail.
+        #
+        # --ignore-scripts (security-review 2026-06-26, two CONFIRMED CRITICALs): no
+        # preinstall/install/postinstall of the target OR a transitive dep ever runs here
+        # as `hermes` in the host netns — an unattended RCE the content scan cannot fully
+        # cover. A package that genuinely needs a build step is a finding to surface, not
+        # code to auto-run unvetted.
+        from hermes.mcp.infrastructure.offline_runtime import (  # noqa: PLC0415
+            MCP_INSTALL_ROOT,
+            npm_install_dir,
+        )
+        install_dir = npm_install_dir(name)
         try:
+            if install_dir.exists():
+                _shutil.rmtree(install_dir, ignore_errors=True)
+            install_dir.mkdir(parents=True, exist_ok=True)
+            # Isolated npm cache for the install. The runtime now runs the bin from
+            # node_modules (NOT `npx --offline` from a shared cache), so the prefetch no
+            # longer needs the shared _MCP_NPM_CACHE — and that shared cache can hold
+            # cross-uid (root) entries that make `npm install` die EACCES. A fresh cache
+            # inside the install dir is always writable by this process.
+            _pf_env = {**env, "npm_config_cache": str(install_dir / ".npm-cache")}
             _r = _subprocess.run(  # noqa: S603 — fixed list, no shell
-                [npm, "install", pkg_spec, "--prefix", _tmp_prefix,
-                 "--no-audit", "--no-fund", "--no-save", "--loglevel=error"],
-                env=env, capture_output=True, text=True,
+                [npm, "install", pkg_spec, "--prefix", str(install_dir),
+                 "--ignore-scripts", "--no-audit", "--no-fund", "--no-save",
+                 "--loglevel=error"],
+                env=_pf_env, capture_output=True, text=True,
                 timeout=_MCP_PREFETCH_TIMEOUT_S, check=False,
             )
         except (OSError, _subprocess.TimeoutExpired) as exc:
-            _shutil.rmtree(_tmp_prefix, ignore_errors=True)
+            _shutil.rmtree(install_dir, ignore_errors=True)
             raise RuntimeError(f"prefetch del paquete MCP falló: {exc}") from exc
-        _shutil.rmtree(_tmp_prefix, ignore_errors=True)
         if _r.returncode != 0:
             _tail = (_r.stderr or _r.stdout or "").strip()[-500:]
+            _shutil.rmtree(install_dir, ignore_errors=True)
             raise RuntimeError(
                 f"prefetch del paquete MCP '{pkg_spec}' falló (rc={_r.returncode}): {_tail}"
             )
-        # FIX raíz MCP: la cache la escribe `hermes`; el runtime la USA como hermes-sandbox
-        # (grupo hermes-work) → debe ser group-writable o npx --offline muere con EACCES.
-        _grant_cache_group_write(_MCP_NPM_CACHE)
+        # The runtime (hermes-sandbox ∈ hermes-work) only READS the install to run `node`.
+        # Grant group/other read+traverse, NEVER write (a compromised runtime must not
+        # tamper with the installed code for the next run).
+        _subprocess.run(  # noqa: S603
+            ["chmod", "-R", "a+rX", str(MCP_INSTALL_ROOT)],
+            capture_output=True, check=False,
+        )
         logger.info(
-            "hermes.dbus.mcp_prefetched server=%s ecosystem=%s pkg=%s (full tree)",
-            server_id, ecosystem, pkg_spec,
+            "hermes.dbus.mcp_prefetched server=%s ecosystem=%s pkg=%s dir=%s (persistent, run bin direct)",
+            server_id, ecosystem, pkg_spec, install_dir,
         )
         return
     elif ecosystem == "pypi":

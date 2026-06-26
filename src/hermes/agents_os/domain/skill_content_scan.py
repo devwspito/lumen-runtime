@@ -169,10 +169,16 @@ _RULES: tuple[tuple[str, ContentSeverity, re.Pattern[str], str], ...] = (
         "destructive command (recursive delete, raw disk write, mkfs, fork bomb)",
     ),
     # Pipe into a shell WITHOUT a fetch (still suspicious — e.g. echo|bash).
+    # A SINGLE pipe only: `(?<!\|)\|(?!\|)` excludes the `||` logical-OR operator, so a
+    # legit `prebuild-install || node-gyp rebuild` (ubiquitous npm postinstall) is not
+    # misread as "pipe into node". A real `echo x | bash` (single pipe) still matches.
     (
         "pipe_to_shell",
         ContentSeverity.HIGH,
-        re.compile(r"\|\s*" + _SHELL + _SHELL_B + r"\s*(?:-|$|\n|;)", re.IGNORECASE),
+        re.compile(
+            r"(?<!\|)\|(?!\|)\s*" + _SHELL + _SHELL_B + r"\s*(?:-|$|\n|;)",
+            re.IGNORECASE,
+        ),
         "pipes data into a shell/interpreter (executes generated content)",
     ),
     # Remote fetch on its own (legitimate too — advisory).

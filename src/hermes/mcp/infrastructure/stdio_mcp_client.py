@@ -72,7 +72,13 @@ class StdioMcpClient:
         Raises:
             McpConnectionError: if the SDK is missing or subprocess fails.
         """
-        argv = list(self._transport.argv)
+        # Run the PREFETCHED bin directly instead of `npx --offline <pkg>` (which fails
+        # ENOTCACHED — see offline_runtime.py). Pure rewrite; passes through unchanged
+        # for non-prefetched / non-npx argv, so CI/direct mode is unaffected.
+        from hermes.mcp.infrastructure.offline_runtime import (  # noqa: PLC0415
+            resolve_runtime_argv,
+        )
+        argv = resolve_runtime_argv(list(self._transport.argv))
         if os.environ.get("HERMES_MCP_LAUNCHER") == "1":
             await self._initialize_via_launcher(argv)
         else:

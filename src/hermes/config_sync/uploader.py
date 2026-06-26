@@ -195,8 +195,10 @@ def _build_payload(
     aggregates: list,
 ) -> dict:
     """Build the POST body.  Only numeric counters + opaque IDs — no content."""
+    # window is a string label "start/end" — the cloud's /v1/metering schema
+    # (MeteringRequest.window: str) expects a string, not an object.
     days = [a.day for a in aggregates]
-    window = {"start": min(days), "end": max(days)} if days else {"start": "", "end": ""}
+    window = f"{min(days)}/{max(days)}" if days else ""
     items = [
         {
             "agent_id": a.agent_id,

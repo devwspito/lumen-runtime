@@ -222,8 +222,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends socat \
 # INVARIANT: this entire block is best-effort (`|| echo WARN`).  A failed trivy
 # install must never break the image bake — the Security Center's heuristic fallback
 # (HeuristicFallbackScanner) is the correct degraded path and is already tested.
-ARG TRIVY_VERSION=v0.58.1
-ENV TRIVY_CACHE_DIR=/var/lib/hermes/trivy-cache
+ARG TRIVY_VERSION=v0.71.2
+# CACHE DIR FUERA DEL VOLUMEN: run-lumen.sh monta `-v lumen-data:/var/lib/hermes`,
+# así que una DB horneada bajo /var/lib/hermes/* queda SOMBREADA por el volumen en
+# runtime → trivy no la encuentra → degrada a [] = teatro (este era el bug). En
+# /var/lib/trivy (fuera del volumen) la DB horneada SOBREVIVE al arranque. El daemon
+# (ProtectSystem=strict) la lee porque la unit añade /var/lib/trivy a ReadWritePaths
+# y Environment=TRIVY_CACHE_DIR=/var/lib/trivy; el runtime usa --skip-db-update.
+ENV TRIVY_CACHE_DIR=/var/lib/trivy
 RUN ARCH="$(uname -m)"; \
     case "$ARCH" in \
       x86_64)   TRIVY_ARCH="Linux-64bit"  ;; \
@@ -243,18 +249,33 @@ RUN ARCH="$(uname -m)"; \
     || echo "WARN: trivy install failed — Security Center will use engine=heuristic (honest fallback)"
 # Pre-warm the trivy vuln DB so `trivy fs` works OFFLINE under the cage (runtime
 # egress is denied). Without a baked DB trivy would fetch at scan time, fail, and
-# degrade to [] — swapping one no-op for another.  TRIVY_CACHE_DIR set above (ENV)
-# so all trivy invocations use the same baked path at build and runtime.
-# Best-effort: a failed prewarm must not break the bake; the engine still works
-# without a local DB (it just won't find CVEs, same as the heuristic path).
-RUN mkdir -p "${TRIVY_CACHE_DIR}" && \
-    ( [ -x /usr/bin/trivy ] \
-      && TRIVY_CACHE_DIR="${TRIVY_CACHE_DIR}" /usr/bin/trivy image --download-db-only \
-           --db-repository ghcr.io/aquasecurity/trivy-db 2>&1 | tail -3 \
-      && echo "INFO: trivy DB pre-warmed at ${TRIVY_CACHE_DIR}" ) \
-    || echo "WARN: trivy DB prewarm skipped (trivy absent or network unavailable)"; \
-    chown -R hermes:hermes-work "${TRIVY_CACHE_DIR}" 2>/dev/null || true; \
-    chmod -R g+rwX "${TRIVY_CACHE_DIR}" 2>/dev/null || true
+# the cve slot would be unanalyzable. TRIVY_CACHE_DIR set above (ENV) so all trivy
+# invocations use the same baked path at build and runtime.
+#
+# FAIL-THE-BUILD when the binary is present but the DB prewarm fails (security-review
+# 2026-06-26): engine selection picks trivy on a usable DB, so an image that shipped
+# trivy WITHOUT a DB would mark every install unanalyzable. If trivy installed, the
+# DB MUST be present — otherwise abort the bake. If trivy is ABSENT (arch/install
+# failed earlier), skip silently — the honest heuristic fallback is the correct path.
+#
+# OWNER-ONLY perms (security-review 2026-06-26): the DB is owned by hermes:hermes and
+# NOT group-writable. The daemon (uid 880, owner) reads the DB and writes trivy's
+# working metadata as owner; the sandboxed agent (hermes-sandbox ∈ hermes-work) must
+# NOT be able to write/poison the vuln DB. World-read is fine (the DB is public data).
+RUN mkdir -p "${TRIVY_CACHE_DIR}"; \
+    if [ -x /usr/bin/trivy ]; then \
+      TRIVY_CACHE_DIR="${TRIVY_CACHE_DIR}" /usr/bin/trivy image --download-db-only \
+        --db-repository ghcr.io/aquasecurity/trivy-db 2>&1 | tail -3; \
+      if [ ! -f "${TRIVY_CACHE_DIR}/db/trivy.db" ]; then \
+        echo "FATAL: trivy present but DB prewarm failed — refusing to ship trivy-without-DB"; \
+        exit 1; \
+      fi; \
+      echo "INFO: trivy DB pre-warmed at ${TRIVY_CACHE_DIR}"; \
+    else \
+      echo "INFO: trivy absent — skipping DB prewarm (Security Center uses heuristic)"; \
+    fi; \
+    chown -R hermes:hermes "${TRIVY_CACHE_DIR}"; \
+    chmod -R u=rwX,go=rX "${TRIVY_CACHE_DIR}"
 
 # Hardening (V): strip ALL SUID-root bits. The cage uses systemd capabilities
 # (NET_ADMIN/SYS_ADMIN on the root units), NOT SUID — so su/mount/passwd/chfn/
