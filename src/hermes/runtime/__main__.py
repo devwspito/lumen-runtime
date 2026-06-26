@@ -583,6 +583,12 @@ def _build_nous_engine(
     def _nous_model_source():
         return _active_provider_svc.resolve()
 
+    # Per-agent provider binding (Fase 3c): resolves a specific provider by alias.
+    # Built lazily at engine construction using the same vault as the global source.
+    # Fail-soft: if the vault or repo are unavailable, the callable returns None
+    # and the engine falls back to the global active provider.
+    _model_config_for_alias = _build_model_config_for_alias(_DB_PATH)
+
     initial_model = _nous_model_source()
     if initial_model is None:
         logger.warning(
@@ -607,6 +613,7 @@ def _build_nous_engine(
     return NousReasoningEngine(
         persona=persona,
         model_config_source=_nous_model_source,
+        model_config_for_alias=_model_config_for_alias,
         broker=broker,
         consent_context=consent_context,
         tenant_id=tenant_id,
@@ -618,6 +625,47 @@ def _build_nous_engine(
         cerebro_browser_manager=cerebro_browser_manager,
         jailed_browser_manager=jailed_browser_manager,
     )
+
+
+def _build_model_config_for_alias(db_path):
+    """Build a callable(alias) -> ModelConfig|None for per-agent provider resolution.
+
+    Fase 3c: construye el resolvedor por-alias usando el mismo vault y repo que
+    el path global. Fail-soft: si las dependencias no están disponibles (CI
+    headless, vault ausente), devuelve None y el engine usa el provider global.
+    """
+    try:
+        from hermes.shell_server.providers.repo import SQLiteProviderRepository  # noqa: PLC0415
+        from hermes.shell_server.security.secrets import SecretsVault  # noqa: PLC0415
+        from hermes.providers.infrastructure.vault_provider_resolver import (  # noqa: PLC0415
+            VaultProviderResolver,
+        )
+        from hermes.runtime.model_config import ModelConfig  # noqa: PLC0415
+        from hermes.shell_server.providers.domain import provider_model_string  # noqa: PLC0415
+    except Exception:  # noqa: BLE001 — optional deps not installed in CI
+        logger.debug("hermes.runtime.per_agent_provider.unavailable")
+        return None
+
+    try:
+        repo = SQLiteProviderRepository(db_path=db_path, vault=SecretsVault())
+        resolver = VaultProviderResolver(repo=repo)
+    except Exception:  # noqa: BLE001 — vault or DB init failure
+        logger.warning("hermes.runtime.per_agent_provider.init_failed", exc_info=True)
+        return None
+
+    def _resolve_by_alias(alias: str) -> "ModelConfig | None":
+        resolved = resolver.resolve_by_alias(alias)
+        if resolved is None:
+            return None
+        provider = resolved.provider
+        model = provider_model_string(provider, provider.default_model)
+        return ModelConfig.from_provider(
+            model=model,
+            api_key=resolved.api_key,
+            base_url=resolved.base_url,
+        )
+
+    return _resolve_by_alias
 
 
 def _build_cerebro_browser_manager():
@@ -1617,6 +1665,21 @@ async def _run(*, systemd_notify: bool) -> None:
             _notif_exc,
         )
 
+    # Usage repository — metering (tokens/cost per cycle). Best-effort: if
+    # unavailable the orchestrator runs without metering (honest degradation).
+    _orchestrator_usage_repo = None
+    try:
+        from hermes.shell_server.metering.usage_repo import (  # noqa: PLC0415
+            SQLiteUsageRepository as _SQLiteUsageRepo,
+        )
+        _orchestrator_usage_repo = _SQLiteUsageRepo(db_path=_DB_PATH)
+    except Exception as _usage_exc:  # noqa: BLE001
+        logger.warning(
+            "hermes.runtime.usage_repo_unavailable: %s — "
+            "cycle metering will not be persisted",
+            _usage_exc,
+        )
+
     orchestrator = AgentLoopOrchestrator(
         queue=queue,
         state=state,
@@ -1634,6 +1697,7 @@ async def _run(*, systemd_notify: bool) -> None:
         browser_adapter=browser_adapter,
         conversation_repo=_orchestrator_conversation_repo,
         notification_store=_orchestrator_notification_store,
+        usage_repo=_orchestrator_usage_repo,
     )
 
     # D-Bus adapter — falla silenciosamente si dbus-fast no está disponible
@@ -1981,6 +2045,27 @@ def _start_dbus_adapter_if_available(
         from hermes.runtime.active_provider import ActiveProviderService  # noqa: PLC0415
         _active_provider_svc = ActiveProviderService(db_path=_DB_PATH)
 
+        # Enterprise license enforcement (Fase 3): the wiring's create_agent /
+        # enqueue hard-block on the associate license. Built fail-soft — a failure
+        # here NEVER breaks daemon boot; it degrades to None, which the wiring
+        # treats as Community Edition (no license restriction). The vault is only
+        # needed to reveal the instance secret (not used by the license checks),
+        # but the store constructor requires it; SecretsVault() reads master.key.
+        try:
+            from hermes.instance.association_store import (  # noqa: PLC0415
+                SQLiteAssociationStore,
+            )
+            from hermes.shell_server.security.secrets import (  # noqa: PLC0415
+                SecretsVault,
+            )
+
+            _association_store = SQLiteAssociationStore(
+                db_path=_DB_PATH, vault=SecretsVault()
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.runtime.association_store_unavailable: %s", exc)
+            _association_store = None
+
         wiring = DbusRuntimeServiceWiring(
             agent_state=state,
             approval_gate=approval_gate,
@@ -2013,6 +2098,8 @@ def _start_dbus_adapter_if_available(
             worker_count_fn=worker_count_fn,
             # SqliteNotificationStore for the notification bell REST surface.
             notification_store=notification_store,
+            # Fase 3 — Enterprise license hard-block (None → Community Edition).
+            association_store=_association_store,
         )
 
         # Step 2 of two-step DbusInstallExecutor construction: inject the live

@@ -1661,6 +1661,7 @@ class NousReasoningEngine:
         tokenizer: PIITokenizer | None = None,
         model_config: ModelConfig | None = None,
         model_config_source: Callable[[], ModelConfig | None] | None = None,
+        model_config_for_alias: "Callable[[str], ModelConfig | None] | None" = None,
         enabled_toolsets: list[str] | None = None,
         broker: CapabilityBrokerPort | None = None,
         consent_context: ConsentContext | None = None,
@@ -1682,6 +1683,10 @@ class NousReasoningEngine:
         # only saw HERMES_MODEL env (unset on the desktop image) and run_cycle
         # raised model-not-configured. Mirrors LiteLLMReasoningEngine's source.
         self._model_config_source = model_config_source
+        # Per-agent provider binding (Fase 3c): callable(alias) → ModelConfig|None.
+        # When an agent declares a provider_alias, this callable resolves its
+        # credentials from the vault. None = feature not wired (retro-compat).
+        self._model_config_for_alias = model_config_for_alias
         # enabled_toolsets=None → Nous decide (usa sus defaults). En F2
         # habilitamos el catálogo completo porque el gate clasifica/controla.
         self._enabled_toolsets = enabled_toolsets
@@ -1743,7 +1748,23 @@ class NousReasoningEngine:
         self._dbus_emit_delta = emit_delta
         self._dbus_emit_end = emit_end
 
-    def _resolve_model_config(self) -> ModelConfig:
+    def _resolve_model_config(self, agent_id: str | None = None) -> ModelConfig:
+        # Per-agent provider binding (Fase 3c): if the agent has a provider_alias,
+        # resolve that specific provider before falling back to the global path.
+        if agent_id and self._agent_registry is not None and self._model_config_for_alias is not None:
+            alias = self._agent_provider_alias(agent_id)
+            if alias:
+                per_agent_cfg = self._model_config_for_alias(alias)
+                if per_agent_cfg is not None:
+                    logger.info(
+                        "hermes.nous_engine.per_agent_provider: "
+                        "agent_id=%s alias=%s model=%s",
+                        agent_id,
+                        alias,
+                        per_agent_cfg.model,
+                    )
+                    return per_agent_cfg
+
         if self._model_config is not None:
             return self._model_config
         # Prefer the active Hermes provider (onboarding/Settings), resolved per
@@ -1755,6 +1776,14 @@ class NousReasoningEngine:
             if cfg is not None:
                 return cfg
         return ModelConfig.from_env()
+
+    def _agent_provider_alias(self, agent_id: str) -> str | None:
+        """Return the provider_alias for the given agent_id, or None (fail-soft)."""
+        try:
+            agent = self._agent_registry.get_agent(agent_id)
+            return agent.provider_alias or None
+        except Exception:  # noqa: BLE001 — fail-soft: broken lookup → global fallback
+            return None
 
     @staticmethod
     def _chat_system_prompt(persona: "PersonaSpec") -> str:
@@ -1895,15 +1924,15 @@ class NousReasoningEngine:
         except Exception:  # noqa: BLE001
             pass
 
-        model_config = self._resolve_model_config()
+        cycle_agent_id: str | None = context.agent_id if hasattr(context, "agent_id") else None
+
+        model_config = self._resolve_model_config(cycle_agent_id)
 
         # Resolve per-cycle persona: use the agent bound to this task (from
         # DecisionContext.agent_id) or the active agent. Falls back to the
         # engine's persona (default agent) when agent_registry is absent.
         # The registry's persona_for() is fail-soft by contract: never raises.
-        cycle_persona = self._resolve_cycle_persona(
-            context.agent_id if hasattr(context, "agent_id") else None
-        )
+        cycle_persona = self._resolve_cycle_persona(cycle_agent_id)
 
         tokenized_payload = self._tokenize_context(context)
         safe_context = _replace_context(context, tokenized_payload)
@@ -2568,7 +2597,16 @@ class NousReasoningEngine:
             narrative=narrative,
             malformed_intents=(),
             rejected_by_policy=(),
-            usage=TokenUsage(model=model),
+            usage=TokenUsage(
+                prompt_tokens=int(getattr(agent, "session_prompt_tokens", 0) or 0),
+                completion_tokens=int(getattr(agent, "session_completion_tokens", 0) or 0),
+                total_tokens=int(getattr(agent, "session_total_tokens", 0) or 0),
+                cost_usd=float(getattr(agent, "session_estimated_cost_usd", 0.0) or 0.0),
+                model=model,
+                cost_status=str(getattr(agent, "session_cost_status", "unknown") or "unknown"),
+                cost_source=str(getattr(agent, "session_cost_source", "none") or "none"),
+                provider=str(getattr(agent, "provider", "") or ""),
+            ),
             read_external_content=agent._read_external_content,
             tool_steps=tuple(tool_steps or ()),
         )

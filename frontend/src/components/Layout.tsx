@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { listConversations, listPendingApprovals } from '../api/client'
 import { useChat } from '../hooks/useChat'
+import { useFeatures } from '../hooks/useFeatures'
 import type { ConversationSummary } from '../api/types'
 import NotificationsPanel from './NotificationsPanel'
 import { useT, useLocale } from '../lib/i18n'
@@ -18,6 +19,17 @@ interface NavItem {
   to: string
   label: string
   icon: React.ReactNode
+}
+
+function DashboardIcon() {
+  return (
+    <svg className="nav-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <rect x="2" y="2" width="5" height="5" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
+      <rect x="9" y="2" width="5" height="5" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
+      <rect x="2" y="9" width="5" height="5" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
+      <rect x="9" y="9" width="5" height="5" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
+    </svg>
+  )
 }
 
 function ChatIcon() {
@@ -121,6 +133,16 @@ function ArchivosIcon() {
   )
 }
 
+function CosteIcon() {
+  return (
+    <svg className="nav-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M2 12l3.5-4 3 3L11 7l3 3"
+        stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M2 4h12" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    </svg>
+  )
+}
+
 function PlusIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
@@ -133,6 +155,7 @@ function useNavItems(): NavItem[] {
   const t = useT()
   return [
     { to: '/chat',          label: t('nav.chat'),          icon: <ChatIcon /> },
+    { to: '/tablero',       label: 'Tablero',              icon: <DashboardIcon /> },
     { to: '/programadas',   label: t('nav.programadas'),   icon: <TasksIcon /> },
     { to: '/agentes',       label: t('nav.agentes'),       icon: <AgentsIcon /> },
     { to: '/skills',        label: t('nav.skills'),        icon: <SkillsIcon /> },
@@ -142,6 +165,7 @@ function useNavItems(): NavItem[] {
     { to: '/proveedores',   label: t('nav.proveedores'),   icon: <ProvidersIcon /> },
     { to: '/seguridad',     label: t('nav.seguridad'),     icon: <SecurityIcon /> },
     { to: '/memoria',       label: t('nav.memoria'),       icon: <MemoriaIcon /> },
+    { to: '/coste',         label: 'Coste',                icon: <CosteIcon /> },
   ]
 }
 
@@ -303,9 +327,19 @@ function RecentsSection({ activeConvId, loadConversation }: RecentsSectionProps)
 
 export default function Layout({ activeProviderReload }: LayoutProps) {
   const navigate = useNavigate()
-  const navItems = useNavItems()
+  const allNavItems = useNavItems()
   const t = useT()
   const { locale, setLocale } = useLocale()
+  const { isLoading: featuresLoading, allowed } = useFeatures()
+
+  // Strip the leading slash to get the view identifier (e.g. '/proveedores' → 'proveedores').
+  // 'chat' is always forced visible even if the backend omits it (defensive).
+  const navItems = featuresLoading
+    ? [] // render skeleton instead — see below
+    : allNavItems.filter(({ to }) => {
+        const viewId = to.replace(/^\//, '')
+        return allowed(viewId)
+      })
   // activeProviderReload is exposed on the outlet context so views like
   // ProvidersView can signal an immediate re-check after connecting a model.
   // The hook already self-heals via a 5 s poll; this enables instant feedback.
@@ -389,44 +423,66 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
           {/* Main nav */}
           <div className="sidebar-nav">
             <div className="sidebar-section-label">Navegación</div>
-            <ul role="list">
-              {navItems.map(({ to, label, icon }) => (
-                <li key={to}>
-                  <NavLink
-                    to={to}
-                    className={({ isActive }) =>
-                      ['nav-link', isActive ? 'active' : ''].filter(Boolean).join(' ')
-                    }
-                    aria-current={undefined}
-                  >
-                    {icon}
-                    {label}
-                    {to === '/seguridad' && pendingCount > 0 && (
-                      <span
-                        role="status"
-                        aria-label={`${pendingCount} aprobaciones pendientes`}
-                        style={{
-                          marginLeft: 'auto',
-                          background: 'var(--color-danger, #dc2626)',
-                          color: '#fff',
-                          borderRadius: '999px',
-                          minWidth: '18px',
-                          height: '18px',
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          fontSize: '11px',
-                          fontWeight: 700,
-                          padding: '0 5px',
-                        }}
-                      >
-                        {pendingCount}
-                      </span>
-                    )}
-                  </NavLink>
-                </li>
-              ))}
-            </ul>
+            {featuresLoading ? (
+              // Skeleton nav items: same height as real nav links, shimmer animation.
+              // We show a fixed count (5) to avoid layout shift once items appear.
+              <ul role="list" aria-busy="true" aria-label="Cargando navegación">
+                {Array.from({ length: 5 }, (_, i) => (
+                  <li key={i}>
+                    <div
+                      className="nav-link"
+                      style={{
+                        animation: `shimmer 1.4s ${i * 80}ms infinite linear`,
+                        background: 'var(--surface2)',
+                        borderRadius: 'var(--r-sm)',
+                        opacity: 0.5,
+                        pointerEvents: 'none',
+                      }}
+                      aria-hidden="true"
+                    />
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <ul role="list">
+                {navItems.map(({ to, label, icon }) => (
+                  <li key={to}>
+                    <NavLink
+                      to={to}
+                      className={({ isActive }) =>
+                        ['nav-link', isActive ? 'active' : ''].filter(Boolean).join(' ')
+                      }
+                      aria-current={undefined}
+                    >
+                      {icon}
+                      {label}
+                      {to === '/seguridad' && pendingCount > 0 && (
+                        <span
+                          role="status"
+                          aria-label={`${pendingCount} aprobaciones pendientes`}
+                          style={{
+                            marginLeft: 'auto',
+                            background: 'var(--color-danger, #dc2626)',
+                            color: '#fff',
+                            borderRadius: '999px',
+                            minWidth: '18px',
+                            height: '18px',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            fontSize: '11px',
+                            fontWeight: 700,
+                            padding: '0 5px',
+                          }}
+                        >
+                          {pendingCount}
+                        </span>
+                      )}
+                    </NavLink>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         </div>
 

@@ -496,6 +496,22 @@ class Runtime1ServiceInterface(ServiceInterface):
         except CannotDeleteDefaultAgent as exc:
             raise DBusError("org.hermes.Error.NotAllowed", str(exc)) from exc
 
+    @method()
+    async def GetDefaultRosterEnabled(self) -> "b":  # noqa: N802,F821,UP037
+        """¿Visible el equipo de especialistas por defecto? (read-only, sin authZ)."""
+        return self._wiring.default_roster_enabled()
+
+    @method()
+    async def SetDefaultRosterEnabled(self, enabled: "b") -> "b":  # noqa: N802,F821,UP037
+        """Enciende/apaga el equipo por defecto (oculta/restaura los `roster-*`)."""
+        try:
+            sender_uid = await self._resolve_current_sender_uid()
+            return await self._wiring.set_default_roster_enabled(
+                enabled=enabled, sender_uid=sender_uid
+            )
+        except PermissionError as exc:
+            raise DBusError("org.hermes.Error.Unauthorized", str(exc)) from exc
+
     # ------------------------------------------------------------------
     # Gobernanza de skills (JSON sobre D-Bus, autoría sender_uid / P0-1)
     # ------------------------------------------------------------------
@@ -602,6 +618,32 @@ class Runtime1ServiceInterface(ServiceInterface):
         sender_uid = await self._resolve_current_sender_uid()
         return self._wiring.delete_provider(
             provider_id=provider_id, sender_uid=sender_uid
+        )
+
+    # ------------------------------------------------------------------
+    # Egress (config-sync path) — daemon-side sovereignty.
+    # ListEgressGrants: read-only, no authZ.
+    # AddEgressDomain: mutator, authZ via sender_uid del bus (CWE-862).
+    # NEVER touches blocklist / deny-list / mode — only egress-grants.json.
+    # ------------------------------------------------------------------
+
+    @method()
+    async def ListEgressGrants(self) -> "s":  # noqa: N802,F821,UP037
+        """Lista los dominios de la allow-list (read-only). Devuelve JSON list."""
+        return json.dumps(self._wiring.list_egress_grants())
+
+    @method()
+    async def AddEgressDomain(self, domain: "s") -> "s":  # noqa: N802,F821,UP037
+        """Añade un dominio a la allow-list (egress-grants.json).
+
+        Sovereignty contract enforced in the wiring:
+          - Validates with _normalize + _DOMAIN_RE (same as egress_api REST).
+          - NEVER touches blocklist, deny-list, or network mode.
+        Devuelve JSON {ok, domain?, error?}.
+        """
+        sender_uid = await self._resolve_current_sender_uid()
+        return json.dumps(
+            self._wiring.add_egress_domain(domain=domain, sender_uid=sender_uid)
         )
 
     @method()

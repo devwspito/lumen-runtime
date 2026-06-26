@@ -29,6 +29,12 @@ from hermes.agents.domain.default_roster import default_roster
 from hermes.prompts.persona import PersonaSpec
 
 _ROSTER_SEEDED_KEY = "roster_seeded"
+# Toggle del equipo por defecto: cuando está OFF, los 27 especialistas sembrados
+# (id con prefijo `roster-`) se OCULTAN de list_agents (vista Agentes, delegación) —
+# NO se borran, así re-activar es instantáneo y conserva ediciones. El CEO (id `default`)
+# y los agentes propios del usuario (uuid4, sin prefijo) SIEMPRE quedan.
+_DEFAULT_ROSTER_ENABLED_KEY = "default_roster_enabled"
+_ROSTER_ID_PREFIX = "roster-"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS agents (
@@ -64,6 +70,16 @@ _MIGRATION_AUTONOMY_LEVEL = (
 # NULL default → treated as "mis-agentes" by the roster endpoint.
 _MIGRATION_DEPARTMENT = "ALTER TABLE agents ADD COLUMN department TEXT"
 
+# Idempotent migration: adds provider_alias to existing DBs without it.
+# NULL default → agent uses the globally active provider (fallback).
+_MIGRATION_PROVIDER_ALIAS = "ALTER TABLE agents ADD COLUMN provider_alias TEXT"
+
+# Idempotent migration: adds managed_by to existing DBs without it.
+# NULL = local (owner-created). "cloud" = pushed by the config-sync applier.
+# The applier uses this to reconcile: cloud-managed agents absent from the
+# bundle are deleted; locally-created agents are never touched.
+_MIGRATION_MANAGED_BY = "ALTER TABLE agents ADD COLUMN managed_by TEXT"
+
 
 def _now_iso() -> str:
     return datetime.now(tz=UTC).isoformat()
@@ -80,6 +96,8 @@ class SqliteAgentRegistry:
             conn.executescript(_SCHEMA)
             self._migrate_autonomy_level(conn)
             self._migrate_department(conn)
+            self._migrate_provider_alias(conn)
+            self._migrate_managed_by(conn)
         self._ensure_default()
         self._seed_roster()
 
@@ -97,6 +115,27 @@ class SqliteAgentRegistry:
         """Añade department (nullable) a DBs existentes sin la columna (idempotente)."""
         try:
             conn.execute(_MIGRATION_DEPARTMENT)
+        except sqlite3.OperationalError:
+            # La columna ya existe — migration idempotente.
+            pass
+
+    @staticmethod
+    def _migrate_provider_alias(conn: sqlite3.Connection) -> None:
+        """Añade provider_alias (nullable) a DBs existentes sin la columna (idempotente)."""
+        try:
+            conn.execute(_MIGRATION_PROVIDER_ALIAS)
+        except sqlite3.OperationalError:
+            # La columna ya existe — migration idempotente.
+            pass
+
+    @staticmethod
+    def _migrate_managed_by(conn: sqlite3.Connection) -> None:
+        """Añade managed_by (nullable) a DBs existentes sin la columna (idempotente).
+
+        NULL = local (owner-created). 'cloud' = pushed by config-sync applier.
+        """
+        try:
+            conn.execute(_MIGRATION_MANAGED_BY)
         except sqlite3.OperationalError:
             # La columna ya existe — migration idempotente.
             pass
@@ -149,8 +188,9 @@ class SqliteAgentRegistry:
             INSERT OR IGNORE INTO agents (
               agent_id, name, color, role, register_tone, primary_mission,
               instructions, language, golden_rules, forbidden_phrases,
-              is_default, autonomy_level, department, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              is_default, autonomy_level, department, provider_alias,
+              created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 agent.agent_id,
@@ -166,6 +206,7 @@ class SqliteAgentRegistry:
                 1 if agent.is_default else 0,
                 agent.autonomy_level.value,
                 agent.department,
+                agent.provider_alias,
                 agent.created_at.isoformat(),
                 agent.updated_at.isoformat(),
             ),
@@ -181,6 +222,7 @@ class SqliteAgentRegistry:
             # Dato corrupto en DB → default conservador (fail-safe).
             autonomy = AutonomyLevel.BALANCED
         department: str | None = row["department"] if "department" in keys else None
+        provider_alias: str | None = row["provider_alias"] if "provider_alias" in keys else None
         return Agent(
             agent_id=row["agent_id"],
             name=row["name"],
@@ -195,6 +237,7 @@ class SqliteAgentRegistry:
             is_default=bool(row["is_default"]),
             autonomy_level=autonomy,
             department=department,
+            provider_alias=provider_alias,
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )
@@ -207,7 +250,26 @@ class SqliteAgentRegistry:
             rows = conn.execute(
                 "SELECT * FROM agents ORDER BY is_default DESC, created_at ASC"
             ).fetchall()
-        return [self._row_to_agent(r) for r in rows]
+            roster_on = self._read_setting(conn, _DEFAULT_ROSTER_ENABLED_KEY) != "0"
+        agents = [self._row_to_agent(r) for r in rows]
+        if not roster_on:
+            # Equipo por defecto APAGADO: ocultar los 27 especialistas sembrados
+            # (id `roster-*`). El CEO (`default`) y los agentes propios siguen visibles.
+            agents = [a for a in agents if not a.agent_id.startswith(_ROSTER_ID_PREFIX)]
+        return agents
+
+    def default_roster_enabled(self) -> bool:
+        """¿Está visible el equipo de especialistas por defecto? (ON por defecto)."""
+        with self._connect() as conn:
+            return self._read_setting(conn, _DEFAULT_ROSTER_ENABLED_KEY) != "0"
+
+    def set_default_roster_enabled(self, enabled: bool) -> None:
+        """Enciende/apaga el equipo por defecto (filtra, NO borra — reversible)."""
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO agent_settings (key, value) VALUES (?, ?)",
+                (_DEFAULT_ROSTER_ENABLED_KEY, "1" if enabled else "0"),
+            )
 
     def get_agent(self, agent_id: str) -> Agent:
         with self._connect() as conn:
@@ -237,6 +299,7 @@ class SqliteAgentRegistry:
             is_default=False,
             autonomy_level=draft.autonomy_level,
             department=draft.department,
+            provider_alias=draft.provider_alias,
             created_at=now,
             updated_at=now,
         )
@@ -263,6 +326,7 @@ class SqliteAgentRegistry:
                 is_default=existing.is_default,
                 autonomy_level=draft.autonomy_level,
                 department=draft.department,
+                provider_alias=draft.provider_alias,
                 created_at=existing.created_at,
                 updated_at=datetime.now(tz=UTC),
             )
@@ -273,7 +337,8 @@ class SqliteAgentRegistry:
                   name = ?, color = ?, role = ?, register_tone = ?,
                   primary_mission = ?, instructions = ?, language = ?,
                   golden_rules = ?, forbidden_phrases = ?,
-                  autonomy_level = ?, department = ?, updated_at = ?
+                  autonomy_level = ?, department = ?, provider_alias = ?,
+                  updated_at = ?
                 WHERE agent_id = ?
                 """,
                 (
@@ -288,6 +353,7 @@ class SqliteAgentRegistry:
                     json.dumps(list(updated.forbidden_phrases), ensure_ascii=False),
                     updated.autonomy_level.value,
                     updated.department,
+                    updated.provider_alias,
                     updated.updated_at.isoformat(),
                     agent_id,
                 ),

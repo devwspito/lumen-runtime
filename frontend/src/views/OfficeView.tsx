@@ -3,8 +3,8 @@ import { useNavigate, useOutletContext } from 'react-router-dom'
 import { sileo } from 'sileo'
 import { X } from 'lucide-react'
 
-import { getAgentRoster, getRuntimeStatus, listMcpServers, createAgent, updateAgent, deleteAgent } from '../api/client'
-import type { AgentRoster, RosterAgent, RosterDepartment, RuntimeStatus, CreateAgentPayload, UpdateAgentPayload } from '../api/types'
+import { getAgentRoster, getRuntimeStatus, listMcpServers, createAgent, updateAgent, deleteAgent, getDefaultRoster, setDefaultRoster, getAgentStats } from '../api/client'
+import type { AgentRoster, RosterAgent, RosterDepartment, RuntimeStatus, CreateAgentPayload, UpdateAgentPayload, AgentStatsResponse } from '../api/types'
 import type { LumenAgent, LumenRuntimeStatus } from './office-live/engine/office-state'
 import { useConfirmDialog } from '../components/ConfirmDialog'
 import { useT } from '../lib/i18n'
@@ -45,22 +45,22 @@ type Tab = 'tarjetas' | 'live'
 type DataState =
   | { status: 'loading' }
   | { status: 'error'; message: string }
-  | { status: 'ready'; roster: AgentRoster; runtimeStatus: RuntimeStatus; hasRuflo: boolean }
+  | { status: 'ready'; roster: AgentRoster; runtimeStatus: RuntimeStatus; hasRuflo: boolean; agentStats: AgentStatsResponse }
 
 type DataAction =
-  | { type: 'LOADED'; roster: AgentRoster; runtimeStatus: RuntimeStatus; hasRuflo: boolean }
+  | { type: 'LOADED'; roster: AgentRoster; runtimeStatus: RuntimeStatus; hasRuflo: boolean; agentStats: AgentStatsResponse }
   | { type: 'FAILED'; message: string }
-  | { type: 'STATUS_UPDATE'; runtimeStatus: RuntimeStatus }
+  | { type: 'STATUS_UPDATE'; runtimeStatus: RuntimeStatus; agentStats: AgentStatsResponse }
 
 function dataReducer(state: DataState, action: DataAction): DataState {
   switch (action.type) {
     case 'LOADED':
-      return { status: 'ready', roster: action.roster, runtimeStatus: action.runtimeStatus, hasRuflo: action.hasRuflo }
+      return { status: 'ready', roster: action.roster, runtimeStatus: action.runtimeStatus, hasRuflo: action.hasRuflo, agentStats: action.agentStats }
     case 'FAILED':
       return { status: 'error', message: action.message }
     case 'STATUS_UPDATE':
       if (state.status !== 'ready') return state
-      return { ...state, runtimeStatus: action.runtimeStatus }
+      return { ...state, runtimeStatus: action.runtimeStatus, agentStats: action.agentStats }
   }
 }
 
@@ -836,16 +836,21 @@ export default function OfficeView() {
   const [clonePrefillRoot, setClonePrefillRoot] = useState<ClonePrefill | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
+  // ── Default roster toggle ────────────────────────────────────────────────
+  const [defaultRosterEnabled, setDefaultRosterEnabled] = useState(true)
+  const [rosterTogglePending, setRosterTogglePending] = useState(false)
+
   // ── Initial load + programmatic refetch ──────────────────────────────────
   const load = useCallback(async () => {
     try {
-      const [roster, runtimeStatus, mcpServers] = await Promise.all([
+      const [roster, runtimeStatus, mcpServers, agentStats] = await Promise.all([
         getAgentRoster(),
         getRuntimeStatus(),
         listMcpServers(),
+        getAgentStats(),
       ])
       const hasRuflo = mcpServers.some((s) => s.slug === 'ruflo')
-      dispatch({ type: 'LOADED', roster, runtimeStatus, hasRuflo })
+      dispatch({ type: 'LOADED', roster, runtimeStatus, hasRuflo, agentStats })
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : t('agents.loading')
       dispatch({ type: 'FAILED', message })
@@ -856,14 +861,17 @@ export default function OfficeView() {
     let cancelled = false
     const run = async () => {
       try {
-        const [roster, runtimeStatus, mcpServers] = await Promise.all([
+        const [roster, runtimeStatus, mcpServers, defaultRoster, agentStats] = await Promise.all([
           getAgentRoster(),
           getRuntimeStatus(),
           listMcpServers(),
+          getDefaultRoster(),
+          getAgentStats(),
         ])
         if (!cancelled) {
           const hasRuflo = mcpServers.some((s) => s.slug === 'ruflo')
-          dispatch({ type: 'LOADED', roster, runtimeStatus, hasRuflo })
+          dispatch({ type: 'LOADED', roster, runtimeStatus, hasRuflo, agentStats })
+          setDefaultRosterEnabled(defaultRoster.enabled)
         }
       } catch (err: unknown) {
         if (!cancelled) {
@@ -876,12 +884,16 @@ export default function OfficeView() {
     return () => { cancelled = true }
   }, [t])
 
-  // ── Runtime status polling (4 s) ────────────────────────────────────────
+  // ── Runtime status + agent stats polling (4 s) ──────────────────────────
   useEffect(() => {
     pollRef.current = setInterval(async () => {
       try {
-        const runtimeStatus = await getRuntimeStatus()
-        dispatch({ type: 'STATUS_UPDATE', runtimeStatus })
+        // Fetch both in parallel; each falls back silently on failure.
+        const [runtimeStatus, agentStats] = await Promise.all([
+          getRuntimeStatus(),
+          getAgentStats(),
+        ])
+        dispatch({ type: 'STATUS_UPDATE', runtimeStatus, agentStats })
       } catch { /* silent — stale status on network hiccup is acceptable */ }
     }, 4_000)
 
@@ -904,6 +916,21 @@ export default function OfficeView() {
     if (document.fullscreenElement) void document.exitFullscreen()
     else void el.requestFullscreen?.()
   }, [])
+
+  async function handleDefaultRosterToggle() {
+    const next = !defaultRosterEnabled
+    setDefaultRosterEnabled(next)
+    setRosterTogglePending(true)
+    try {
+      await setDefaultRoster(next)
+      await load()
+    } catch {
+      setDefaultRosterEnabled(!next)
+      sileo.error({ title: t('agents.roster.toggle.err') })
+    } finally {
+      setRosterTogglePending(false)
+    }
+  }
 
   // Convert roster agents to the engine's LumenAgent shape for the canvas.
   // Each agent carries its department info so the engine builds one room per department.
@@ -937,6 +964,25 @@ export default function OfficeView() {
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--sp-3)' }}>
+            {/* Default roster toggle */}
+            <div
+              style={{ display: 'flex', alignItems: 'center', gap: 'var(--sp-2)' }}
+              title={t('agents.roster.toggle.tooltip')}
+            >
+              <span style={{ fontSize: 'var(--text-label)', color: 'var(--ink3)', whiteSpace: 'nowrap' }}>
+                {t('agents.roster.toggle.label')}
+              </span>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={defaultRosterEnabled}
+                aria-label={t('agents.roster.toggle.label')}
+                className={`seg-pol-switch${defaultRosterEnabled ? ' seg-pol-switch--on' : ''}`}
+                onClick={handleDefaultRosterToggle}
+                disabled={rosterTogglePending}
+              />
+            </div>
+
             {state.status === 'ready' && (
               <button
                 type="button"
@@ -1013,6 +1059,7 @@ export default function OfficeView() {
                     roster,
                     runtimeStatus: state.runtimeStatus,
                     hasRuflo: state.hasRuflo,
+                    agentStats: state.agentStats,
                   })
                 }
                 onRosterRefetch={load}
@@ -1038,6 +1085,7 @@ export default function OfficeView() {
                     agents={engineAgents}
                     runtimeStatus={engineRuntimeStatus}
                     onAgentClick={handleCanvasAgentClick}
+                    agentStats={state.status === 'ready' ? state.agentStats : undefined}
                   />
                 </Suspense>
               </div>

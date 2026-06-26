@@ -209,6 +209,16 @@ class SQLiteProviderRepository:
             return None
         return self._row_to_provider(row)
 
+    def get_by_alias(self, alias: str) -> Provider | None:
+        """Return the provider with the given alias, or None if not found."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM providers WHERE alias = ?", (alias,)
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_provider(row)
+
     def reveal_api_key(self, *, provider_id: UUID) -> str | None:
         """Devuelve plaintext de la API key. SOLO para el LiteLLM bridge."""
         with self._connect() as conn:

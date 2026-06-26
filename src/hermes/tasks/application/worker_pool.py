@@ -143,6 +143,7 @@ class WorkerPool:
         conversation_repo: Any | None = None,  # SQLiteConversationRepository | None (Bug #2)
         notification_store: Any | None = None,  # SqliteNotificationStore | None (bell)
         memory_extraction_enabled: bool = True,  # Feature B: post-chat memory extraction
+        usage_repo: Any | None = None,  # SQLiteUsageRepository | None (metering)
     ) -> None:
         self._queue = queue
         self._state = state
@@ -163,6 +164,7 @@ class WorkerPool:
         self._conversation_repo = conversation_repo  # SQLiteConversationRepository | None
         self._notification_store = notification_store  # SqliteNotificationStore | None
         self._memory_extraction_enabled = memory_extraction_enabled
+        self._usage_repo = usage_repo  # SQLiteUsageRepository | None
 
         self._shutdown = asyncio.Event()
         # Condition para wake-on-enqueue con N workers (CTRL-P1-12).
@@ -372,6 +374,7 @@ class WorkerPool:
             conversation_repo=self._conversation_repo,
             notification_store=self._notification_store,
             memory_extraction_enabled=self._memory_extraction_enabled,
+            usage_repo=self._usage_repo,
         )
 
         heartbeat = asyncio.create_task(

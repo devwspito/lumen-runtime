@@ -14,9 +14,19 @@ Estados:
   → ENROLLED → REVOKED
 
 Challenge-response: el control plane envía un nonce firmado HMAC con
-shared_secret + tenant_id; el nodo responde con la prueba de posesión
-del hardware fingerprint. Esto evita replay con un enrollment token
-robado.
+shared_secret + tenant_id + instance_id; el nodo responde con la prueba
+de posesión del hardware fingerprint + tenant_id. Esto evita replay y
+cross-instance/cross-tenant shuffle de challenges y proofs.
+
+HMAC material format (v2) — MUST be byte-identical on associate and cloud:
+  challenge_signature = HMAC_sha256(
+      shared_secret,
+      nonce_bytes + b"|" + tenant_id_str.encode("utf-8") + b"|" + instance_id_str.encode("utf-8")
+  )
+  proof = HMAC_sha256(
+      shared_secret,
+      nonce_bytes + b"|" + hardware_fingerprint_str.encode("utf-8") + b"|" + tenant_id_str.encode("utf-8")
+  )
 """
 
 from __future__ import annotations
@@ -136,18 +146,24 @@ class NodeEnrollmentService:
             raise EnrollmentStateInvalid(
                 f"receive_challenge requiere REQUESTED, está {current.state}"
             )
-        # Verificar firma del CP.
-        expected = hmac.new(
-            shared_secret,
+        # Verificar firma del CP (v2: nonce || tenant_id || instance_id).
+        # Formato canónico: los campos están separados por b"|" para evitar
+        # ambigüedad de concatenación (no hay separadores en UUIDs como strings).
+        instance_id_str = str(current.node_installation_id)
+        tenant_id_str = str(challenge.tenant_id)
+        material = (
             bytes.fromhex(challenge.nonce_hex)
-            + challenge.tenant_id.bytes,
-            hashlib.sha256,
-        ).hexdigest()
+            + b"|"
+            + tenant_id_str.encode("utf-8")
+            + b"|"
+            + instance_id_str.encode("utf-8")
+        )
+        expected = hmac.new(shared_secret, material, hashlib.sha256).hexdigest()
         if not hmac.compare_digest(
             expected, challenge.challenge_signature_hex
         ):
             raise EnrollmentChallengeMismatch(
-                "challenge_signature inválida — posible MITM o tenant_id mismatch"
+                "challenge_signature inválida — posible MITM, tenant_id o instance_id mismatch"
             )
         snap = replace(
             current,
@@ -175,12 +191,18 @@ class NodeEnrollmentService:
         now = datetime.now(tz=UTC)
         if now > ch.expires_at:
             raise EnrollmentExpired("challenge expirado")
-        proof = hmac.new(
-            shared_secret,
+        # proof v2: nonce || hardware_fingerprint || tenant_id
+        # Incluir tenant_id en el proof liga la respuesta a la sesión de pairing
+        # y evita que un proof legítimo de tenant A sea aceptado por tenant B.
+        tenant_id_str = str(ch.tenant_id)
+        proof_material = (
             bytes.fromhex(ch.nonce_hex)
-            + current.hardware_fingerprint.encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
+            + b"|"
+            + current.hardware_fingerprint.encode("utf-8")
+            + b"|"
+            + tenant_id_str.encode("utf-8")
+        )
+        proof = hmac.new(shared_secret, proof_material, hashlib.sha256).hexdigest()
         snap = replace(current, state=EnrollmentState.CHALLENGE_SOLVED)
         self._sessions[enrollment_id] = snap
         return snap, proof
@@ -224,14 +246,24 @@ class NodeEnrollmentService:
 def build_challenge(
     *,
     tenant_id: UUID,
+    instance_id: UUID,
     shared_secret: bytes,
     ttl_seconds: int = 60,
 ) -> EnrollmentChallenge:
-    """Helper de testing: produce un challenge firmado."""
+    """Helper de testing: produce un challenge firmado con material v2.
+
+    HMAC material: nonce_bytes + b"|" + tenant_id_str + b"|" + instance_id_str
+    Debe ser byte-idéntico a receive_challenge y a cloud crypto.challenge_signature.
+    """
     nonce = secrets.token_bytes(32)
-    sig = hmac.new(
-        shared_secret, nonce + tenant_id.bytes, hashlib.sha256
-    ).hexdigest()
+    material = (
+        nonce
+        + b"|"
+        + str(tenant_id).encode("utf-8")
+        + b"|"
+        + str(instance_id).encode("utf-8")
+    )
+    sig = hmac.new(shared_secret, material, hashlib.sha256).hexdigest()
     now = datetime.now(tz=UTC)
     return EnrollmentChallenge(
         nonce_hex=nonce.hex(),

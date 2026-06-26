@@ -322,6 +322,9 @@ class DbusRuntimeServiceWiring:
         # SqliteNotificationStore — persists task/chat completion notifications.
         # None → notification verbs degrade gracefully (empty list / no-op write).
         notification_store: "Any | None" = None,
+        # SQLiteAssociationStore — used by license enforcement (Fase 3a).
+        # None → CE mode assumed (no license checks).
+        association_store: "Any | None" = None,
     ) -> None:
         self._state = agent_state
         self._gate = approval_gate
@@ -364,6 +367,9 @@ class DbusRuntimeServiceWiring:
         # SqliteNotificationStore — written by daemon, read via D-Bus by shell-server.
         # None → verbs degrade gracefully (list=[]/count=0/mark-read=no-op).
         self._notification_store = notification_store
+        # SQLiteAssociationStore — license enforcement (Fase 3a).
+        # None → CE mode assumed; no create_agent or enqueue restrictions apply.
+        self._association_store = association_store  # SQLiteAssociationStore | None
 
     # ------------------------------------------------------------------
     # Kill-switch (CTRL-12 / KILL-1)
@@ -425,6 +431,87 @@ class DbusRuntimeServiceWiring:
             raise RuntimeError("agent_registry no inyectado en el wiring")
         return self._agent_registry
 
+    def _check_license_for_create_agent(self) -> None:
+        """Enforce associate license limits before creating an agent.
+
+        - Skipped entirely in community edition (no association_store).
+        - LicenseExpired: raises if expires_at is in the past.
+        - LicenseExceeded: raises if active agent count >= max_agents.
+        - Never deletes or modifies agent data (invariant).
+        """
+        if self._association_store is None:
+            return
+        if not self._association_store.is_associated():
+            return
+
+        from hermes.agents.domain.ports import LicenseExceeded, LicenseExpired  # noqa: PLC0415
+
+        assoc = self._association_store.get()
+        if assoc is None:
+            return
+
+        lic: dict = assoc.license or {}
+        self._assert_license_not_expired(lic)
+
+        max_agents = lic.get("max_agents")
+        if max_agents is not None and self._agent_registry is not None:
+            current_count = len(self._agent_registry.list_agents())
+            if current_count >= int(max_agents):
+                logger.warning(
+                    "hermes.dbus.license_exceeded",
+                    extra={"current": current_count, "max": max_agents},
+                )
+                raise LicenseExceeded(
+                    f"License limit reached: max_agents={max_agents}, "
+                    f"current={current_count}. Upgrade your license to add more agents."
+                )
+
+    def _check_license_for_enqueue(self) -> None:
+        """Enforce associate license expiry before enqueuing work.
+
+        Raises LicenseExpired if the license has expired.
+        Existing agents and data are never touched (invariant).
+        """
+        if self._association_store is None:
+            return
+        if not self._association_store.is_associated():
+            return
+
+        from hermes.agents.domain.ports import LicenseExpired  # noqa: PLC0415
+
+        assoc = self._association_store.get()
+        if assoc is None:
+            return
+        self._assert_license_not_expired(assoc.license or {})
+
+    @staticmethod
+    def _assert_license_not_expired(lic: dict) -> None:
+        """Raise LicenseExpired if expires_at is present and in the past."""
+        from hermes.agents.domain.ports import LicenseExpired  # noqa: PLC0415
+
+        expires_at = lic.get("expires_at")
+        if not expires_at:
+            return
+        from datetime import UTC, datetime  # noqa: PLC0415
+
+        try:
+            expiry = datetime.fromisoformat(str(expires_at))
+        except ValueError:
+            logger.warning(
+                "hermes.dbus.license_bad_expires_at",
+                extra={"value": str(expires_at)[:80]},
+            )
+            return
+        if datetime.now(tz=UTC) > expiry:
+            logger.warning(
+                "hermes.dbus.license_expired",
+                extra={"expires_at": str(expires_at)},
+            )
+            raise LicenseExpired(
+                f"Associate license expired at {expires_at}. "
+                "Renew your license to create agents or enqueue tasks."
+            )
+
     def list_agents(self) -> list[dict]:
         from hermes.agents.application.serialization import agent_to_dict  # noqa: PLC0415
 
@@ -471,6 +558,7 @@ class DbusRuntimeServiceWiring:
         from hermes.agents.application.serialization import agent_to_dict  # noqa: PLC0415
 
         self._authorize(sender_uid, operation="create_agent")
+        self._check_license_for_create_agent()  # raises LicenseExceeded / LicenseExpired
         agent = self._require_registry().create_agent(draft)
         logger.info("hermes.dbus.agent_created", extra={"by_uid": sender_uid})
         return agent_to_dict(agent)
@@ -487,6 +575,22 @@ class DbusRuntimeServiceWiring:
         self._authorize(sender_uid, operation="delete_agent")
         self._require_registry().delete_agent(agent_id)
         logger.info("hermes.dbus.agent_deleted", extra={"by_uid": sender_uid})
+
+    def default_roster_enabled(self) -> bool:
+        """¿Visible el equipo de especialistas por defecto? (read, sin authZ)."""
+        if self._agent_registry is None:
+            return True
+        return self._agent_registry.default_roster_enabled()
+
+    async def set_default_roster_enabled(self, *, enabled: bool, sender_uid: int) -> bool:
+        """Enciende/apaga el equipo por defecto (filtra los `roster-*`, NO borra)."""
+        self._authorize(sender_uid, operation="set_default_roster_enabled")
+        self._require_registry().set_default_roster_enabled(enabled)
+        logger.info(
+            "hermes.dbus.default_roster_toggled",
+            extra={"enabled": enabled, "by_uid": sender_uid},
+        )
+        return True
 
     # ------------------------------------------------------------------
     # Gobernanza de skills (Principio 0 / P0-1):
@@ -630,6 +734,66 @@ class DbusRuntimeServiceWiring:
         provider.last_checked_at = datetime.now(tz=timezone.utc)
         self._provider_repo.update(provider=provider)
         return {"ok": ok, "error": err}
+
+    # ------------------------------------------------------------------
+    # Egress (config-sync path) — soberanía daemon-side.
+    #
+    # add_egress_domain: SÓLO añade dominios a la allow-list (egress-grants.json).
+    # Invariantes de soberanía (NO negociables):
+    #   - Nunca toca la blocklist (egress-blocklist.txt — inmutable, baked).
+    #   - Nunca toca la deny-list (egress-denylist.json).
+    #   - Nunca cambia el network mode (egress-mode.json).
+    #   - Solo opera sobre _GRANTS_PATH (egress-grants.json).
+    #
+    # Validación: mismo _normalize + _DOMAIN_RE que egress_api.py REST, aplicados
+    # en el wiring ANTES de persistir — el daemon es el escritor canónico.
+    # ------------------------------------------------------------------
+
+    def list_egress_grants(self) -> list[dict]:
+        """Lista los dominios de la allow-list (read-only). Sin authZ."""
+        from hermes.shell_server.egress_api import _load  # noqa: PLC0415
+
+        return [{"domain": d} for d in _load()]
+
+    def add_egress_domain(self, *, domain: str, sender_uid: int) -> dict:
+        """Añade `domain` a la allow-list (egress-grants.json).
+
+        Sovereignty contract (non-negotiable):
+          - Validates with _normalize + _DOMAIN_RE (same as egress_api REST).
+          - Rejects IPs, wildcards, empty, whitespace, and paths.
+          - NEVER touches the blocklist, deny-list, or network mode.
+          - Only writes egress-grants.json (browser allow-list).
+          - Calls apply_persisted_grants() after save so the proxy applies
+            the new allow-list without restart.
+
+        Returns {"ok": True} on success, {"ok": False, "error": reason} on failure.
+        """
+        self._authorize_and_resolve(sender_uid, operation="add_egress_domain")
+        from hermes.shell_server.egress_api import (  # noqa: PLC0415
+            _DOMAIN_RE,
+            _load,
+            _normalize,
+            _save,
+            apply_persisted_grants,
+        )
+
+        normalised = _normalize(domain)
+        if not normalised or not _DOMAIN_RE.match(normalised):
+            logger.warning(
+                "hermes.dbus.add_egress_domain.invalid",
+                extra={"domain": domain[:64]},
+            )
+            return {"ok": False, "error": f"dominio inválido: {domain[:64]!r}"}
+
+        existing = set(_load())
+        if normalised in existing:
+            return {"ok": True, "domain": normalised, "already_present": True}
+
+        domains = sorted(existing | {normalised})
+        _save(domains)
+        apply_persisted_grants()
+        logger.info("hermes.dbus.egress_domain_added", extra={"domain": normalised})
+        return {"ok": True, "domain": normalised}
 
     # ------------------------------------------------------------------
     # GATE 0 / M2 — Conversaciones (chat) OS-nativas por D-Bus.
@@ -2638,6 +2802,7 @@ class DbusRuntimeServiceWiring:
         operator_id = self._authorize_and_resolve(
             sender_uid, operation="enqueue", operator_token=operator_token
         )
+        self._check_license_for_enqueue()  # raises LicenseExpired in associate if expired
         if self._cp_service is None:
             raise NotImplementedError(
                 "control_plane_service no inyectado en DbusRuntimeServiceWiring; "
@@ -5319,6 +5484,37 @@ _MCP_UV_CACHE = "/var/lib/hermes/uv-cache"
 _MCP_PREFETCH_TIMEOUT_S = 300  # generous: a cold npm/uv resolve can be slow
 
 
+def _grant_cache_group_write(cache_dir: str) -> None:
+    """Hace la cache del runner group-writable por `hermes-work` (FIX raíz del MCP).
+
+    El prefetch corre como `hermes` (umask del daemon → dirs 755 / ficheros 644: el GRUPO
+    no puede escribir). Pero el runtime spawnea `npx/uvx --offline` como `hermes-sandbox`
+    (grupo `hermes-work`), que NECESITA escribir en la cache (npm/uv crean ficheros tmp/lock
+    incluso en --offline). Sin g+w daba EACCES sobre `_cacache/tmp/...` → el proceso moría →
+    "StdioMcpClient: Handshake Failed … Connection Closed". Aquí, tras el prefetch, hacemos
+    dirs g+rwx+setgid y ficheros g+rw para que el sandbox (mismo grupo) pueda usar la cache.
+    Best-effort: un fallo de chmod no debe romper el install (el spawn lo revelará).
+    """
+    import os as __os  # noqa: PLC0415
+    import stat as __stat  # noqa: PLC0415
+
+    if not __os.path.isdir(cache_dir):
+        return
+    for root, _dirs, files in __os.walk(cache_dir):
+        try:
+            __os.chmod(root, (__os.stat(root).st_mode | 0o070 | __stat.S_ISGID) & 0o7777)
+        except OSError:
+            pass
+        for f in files:
+            fp = __os.path.join(root, f)
+            try:
+                m = __os.stat(fp).st_mode
+                # g+rw siempre; g+x solo si el dueño ya tiene x (preserva ejecutables).
+                __os.chmod(fp, (m | 0o060 | (0o010 if m & 0o100 else 0)) & 0o7777)
+            except OSError:
+                pass
+
+
 def _prefetch_mcp_package(server_id: str, argv: list[str]) -> None:
     """Download the MCP's package into the shared runner cache in the TRUSTED daemon path.
 
@@ -5395,6 +5591,9 @@ def _prefetch_mcp_package(server_id: str, argv: list[str]) -> None:
             raise RuntimeError(
                 f"prefetch del paquete MCP '{pkg_spec}' falló (rc={_r.returncode}): {_tail}"
             )
+        # FIX raíz MCP: la cache la escribe `hermes`; el runtime la USA como hermes-sandbox
+        # (grupo hermes-work) → debe ser group-writable o npx --offline muere con EACCES.
+        _grant_cache_group_write(_MCP_NPM_CACHE)
         logger.info(
             "hermes.dbus.mcp_prefetched server=%s ecosystem=%s pkg=%s (full tree)",
             server_id, ecosystem, pkg_spec,
@@ -5430,6 +5629,8 @@ def _prefetch_mcp_package(server_id: str, argv: list[str]) -> None:
         raise RuntimeError(
             f"prefetch del paquete MCP '{pkg_spec}' falló (rc={result.returncode}): {tail}"
         )
+    # FIX raíz MCP: cache uv group-writable para que `uvx --offline` (hermes-sandbox) escriba.
+    _grant_cache_group_write(_MCP_UV_CACHE)
     logger.info(
         "hermes.dbus.mcp_prefetched server=%s ecosystem=%s pkg=%s",
         server_id, ecosystem, pkg_spec,
@@ -5480,6 +5681,8 @@ def _prefetch_git_mcp(server_id: str, git_spec: str) -> None:
         raise RuntimeError(
             f"clone del MCP git '{git_spec}' falló (rc={result.returncode}): {tail}"
         )
+    # FIX raíz MCP: cache uv group-writable para que `uvx --offline` (hermes-sandbox) escriba.
+    _grant_cache_group_write(_MCP_UV_CACHE)
     logger.info(
         "hermes.dbus.mcp_git_prefetched server=%s git_host=%s spec=%s",
         server_id, host, git_spec,

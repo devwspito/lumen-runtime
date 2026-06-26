@@ -773,6 +773,14 @@ def create_app() -> FastAPI:
                 )
         return await call_next(request)
 
+    # ── Feature-gate middleware (Fase 3a) ─────────────────────────────────────
+    # Enforces view-level access control for associate edition. Must be registered
+    # AFTER operator-token so auth failures return 401 before feature checks.
+    # In CE (community), this middleware is a transparent no-op.
+    from hermes.shell_server.instance.feature_guard import FeatureGuardMiddleware  # noqa: PLC0415
+
+    app.add_middleware(FeatureGuardMiddleware, db_path=_DB_PATH, vault=vault)
+
     @app.post("/api/v1/session/refresh")
     async def _refresh_session() -> dict:  # noqa: ANN202
         # Back-compat no-op: the bearer is now stable (no TTL), so there is nothing
@@ -910,11 +918,20 @@ def create_app() -> FastAPI:
                 profile_name = f.read().strip()
         except OSError:
             pass
+        # Build-time edition baked into the image by the Containerfile.
+        # Falls back to "community" when the file is absent (dev / un-baked env).
+        image_edition = "community"
+        try:
+            with open("/usr/share/hermes/edition", encoding="utf-8") as f:
+                image_edition = f.read().strip() or "community"
+        except OSError:
+            pass
         display_name = _resolve_operator_display_name()
         return {
             "profile": profile_name,
             "user": os.environ.get("USER", ""),
             "display_name": display_name,
+            "edition": image_edition,
         }
 
     @app.get("/metrics")
@@ -1215,6 +1232,14 @@ def create_app() -> FastAPI:
     app.include_router(create_policies_router())
     app.include_router(create_egress_router())
 
+    from hermes.shell_server.metering.api import create_usage_router  # noqa: PLC0415
+    app.include_router(create_usage_router())
+
+    from hermes.shell_server.metering.agent_stats_api import (  # noqa: PLC0415
+        create_agent_stats_router,
+    )
+    app.include_router(create_agent_stats_router())
+
     # ------------------------------------------------------------------
     # D-Bus runtime proxy — shared by all new REST routers.
     # Instantiated once here; individual requests call it per-operation.
@@ -1277,6 +1302,15 @@ def create_app() -> FastAPI:
     # notification_id="read-all".  The router factory registers them in this
     # order internally; include_router preserves it.
     app.include_router(create_notifications_router())
+
+    # ------------------------------------------------------------------
+    # Enterprise pairing — instance association (Fase 2).
+    # Registered after the cowork routers; gated by the existing operator-
+    # token middleware (all POST /api/v1/* require Bearer).
+    # ------------------------------------------------------------------
+    from hermes.shell_server.instance.api import create_instance_router  # noqa: PLC0415
+
+    app.include_router(create_instance_router(_DB_PATH, vault))
 
     # ------------------------------------------------------------------
     # Static web UI — mounted LAST so it never shadows /api/v1/* or /ws/*.

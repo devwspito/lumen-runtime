@@ -202,18 +202,16 @@ _MCP_PROPERTIES: tuple[str, ...] = (
 # answers with 403, killing the handshake ("Connection closed"). --offline forbids any
 # network and uses the cache only. uvx: --offline (uv hard offline; the prefetch built
 # the tool into UV_CACHE_DIR). Idempotent: we skip injection if the flag is already present.
-# OWNER DECISION 2026-06-26 (Opción B). El offline duro hacía FRÁGIL el install: `npx
-# --offline` muere con "Connection closed" si el prefetch no calentó el árbol COMPLETO
-# (sub-deps ENOTCACHED). El dueño, soberano, eligió "npx de toda la vida": el MCP que YA
-# aprobó descarga de npm/PyPI a través del PROXY EGRESS AUDITADO (registry pre-concedido
-# SOLO al netns MCP, ver _CURATED_MCP_HOSTS). Sigue enjaulado: default-deny TODO lo demás,
-# todo logueado, y scan+MFA del dueño ANTES de instalar. TRADEOFF aceptado por el dueño:
-# reabre el "npm-PUT exfil residual" (un MCP malicioso aprobado podría exfiltrar vía un
-# publish al registry) — mitigado por scan/approval/audit/default-deny.
-#   npx: --prefer-offline → usa la cache del prefetch; baja por el proxy SOLO lo que falte.
-#   uvx: sin flag offline  → uv usa su cache y baja lo que falte por el proxy.
+# RAÍZ REAL (2026-06-26): el "Connection Closed" NO era la red — era que la cache npm/uv
+# (escrita por el daemon `hermes`) NO era group-writable, y el runtime corre npx/uvx como
+# `hermes-sandbox` (grupo hermes-work), que necesita ESCRIBIR la cache → EACCES → el proceso
+# moría. Arreglado en el daemon (_grant_cache_group_write tras el prefetch). Con la cache
+# escribible, `--offline` PURO funciona (verificado: "Secure MCP Filesystem Server running
+# on stdio"). Mantenemos OFFLINE DURO en runtime (jaula intacta: cero red a registries; el
+# prefetch los descargó+escaneó en el daemon de confianza). Idempotente: no duplica el flag.
 _OFFLINE_FLAGS: dict[str, str] = {
-    "npx": "--prefer-offline",
+    "npx": "--offline",
+    "uvx": "--offline",
 }
 
 

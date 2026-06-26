@@ -1,0 +1,285 @@
+"""PolicyBundle — the signed contract the cloud pushes to each associate.
+
+Wire format (JSON) — what the cloud endpoint returns:
+
+{
+  "version": 42,
+  "tenant_id": "00000000-0000-0000-0000-000000000001",
+  "issued_at": "2026-06-26T10:00:00Z",
+  "signature_hex": "<128-char Ed25519 hex>",
+  "payload": { ... }
+}
+
+SIGNING FORMAT (P0-1):
+  The cloud signs the FULL ENVELOPE — version + tenant_id + issued_at + payload.
+  Use `signing_bytes(version, tenant_id, issued_at, payload)` to produce the
+  byte sequence that is signed and verified.  Never sign/verify just the payload.
+
+  signing_bytes output shape (JSON, sort_keys, no whitespace, ASCII-safe):
+  {
+    "issued_at": "...",
+    "payload": { ... },
+    "tenant_id": "...",
+    "version": 42
+  }
+
+  `canonical_bytes(payload)` is kept as an internal helper for tests that need
+  the payload slice in isolation, but it is NEVER passed to verify_bundle().
+
+CARDINALIY CAPS (P1-3, enforced at Pydantic parse time):
+  agents ≤ 200, providers ≤ 50, mcp ≤ 100, skills ≤ 200, consents ≤ 200,
+  egress.allow_domains ≤ 500, mcp.env ≤ 100 keys.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from pydantic import BaseModel, Field, field_validator
+
+
+# ---------------------------------------------------------------------------
+# Agent spec
+# ---------------------------------------------------------------------------
+
+
+class AgentSpec(BaseModel):
+    """Cloud-managed agent descriptor.  provider_alias added in Fase 3c."""
+
+    model_config = {"populate_by_name": True}
+
+    agent_id: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=120)
+    role: str = Field(default="", max_length=512)
+    # Field stored as register_tone to avoid shadowing pydantic's BaseModel.register.
+    # Wire name (alias) remains "register" for backward compat with the cloud contract.
+    register_tone: str = Field(default="", max_length=512, alias="register")
+    primary_mission: str = Field(default="", max_length=2000)
+    instructions: str = Field(default="", max_length=8000)
+    language: str = Field(default="auto", max_length=20)
+    color: str = Field(default="#6366f1", max_length=30)
+    golden_rules: list[str] = Field(default_factory=list)
+    forbidden_phrases: list[str] = Field(default_factory=list)
+    autonomy_level: str = Field(default="balanced", max_length=32)
+    department: str | None = Field(default=None, max_length=64)
+    provider_alias: str | None = Field(default=None, max_length=120)
+    # Capability bindings: {"kind": "skill"|"mcp", "id": "...", "version": ""}
+    capabilities: list[dict[str, str]] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Provider spec
+# ---------------------------------------------------------------------------
+
+
+class ProviderSpec(BaseModel):
+    """Cloud-managed LLM provider.
+
+    base_url is validated against the SSRF blocklist in the applier (P2).
+    """
+
+    alias: str = Field(min_length=1, max_length=120)
+    kind: str = Field(min_length=1, max_length=64)
+    default_model: str = Field(min_length=1, max_length=256)
+    base_url: str | None = Field(default=None, max_length=1024)
+    set_active: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Integration spec (Composio key push)
+# ---------------------------------------------------------------------------
+
+
+class IntegrationSpec(BaseModel):
+    """Cloud-managed integration credential.
+
+    kind is always "composio" in Fase 4.  The api_key is covered by the
+    Ed25519 signature.  The applier never logs the key value (P0-4).
+    managed_by tracking for integrations is a Fase 5 follow-up (see applier.py).
+    """
+
+    kind: str = Field(min_length=1, max_length=64)  # "composio"
+    api_key: str = Field(min_length=1, max_length=512)
+    entity_id: str = Field(default="default", max_length=128)
+
+
+# ---------------------------------------------------------------------------
+# MCP spec
+# ---------------------------------------------------------------------------
+
+
+class McpSpec(BaseModel):
+    """Cloud-managed MCP server."""
+
+    server_id: str = Field(min_length=1, max_length=120)
+    label: str | None = Field(default=None, max_length=120)
+    argv: list[str] = Field(default_factory=list)
+    # P1-3: cap env at 100 keys.
+    env: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("env")
+    @classmethod
+    def _cap_env(cls, v: dict) -> dict:
+        if len(v) > 100:
+            raise ValueError(f"mcp.env exceeds 100 keys (got {len(v)})")
+        return v
+
+
+# ---------------------------------------------------------------------------
+# Skill spec
+# ---------------------------------------------------------------------------
+
+
+class SkillSpec(BaseModel):
+    """Cloud-managed hub skill (installed by identifier)."""
+
+    identifier: str = Field(min_length=1, max_length=256)
+
+
+# ---------------------------------------------------------------------------
+# Egress spec
+# ---------------------------------------------------------------------------
+
+
+class EgressSpec(BaseModel):
+    """Network egress additions.
+
+    The applier ONLY adds domains to the allow-list on top of existing owner
+    grants.  It never removes owner-granted domains, never touches the
+    blocklist, and never switches the network mode.
+    P1-3: capped at 500 domains.
+    """
+
+    allow_domains: list[str] = Field(default_factory=list, max_length=500)
+
+
+# ---------------------------------------------------------------------------
+# Consent spec
+# ---------------------------------------------------------------------------
+
+
+class ConsentSpec(BaseModel):
+    """Cloud-managed consent grant.
+
+    HIGH-risk consents (terminal_exec, file_write, …) are PROPOSED but not
+    auto-approved — the applier skips them and records the gap in ApplyResult.
+    """
+
+    capability: str = Field(min_length=1, max_length=128)
+    scope: str = Field(default="session", max_length=64)
+    granted_through: str = Field(default="cloud_sync", max_length=128)
+
+
+# ---------------------------------------------------------------------------
+# Features spec
+# ---------------------------------------------------------------------------
+
+
+class FeaturesSpec(BaseModel):
+    """Feature flags / UI-view entitlements."""
+
+    views: list[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# License spec
+# ---------------------------------------------------------------------------
+
+
+class LicenseSpec(BaseModel):
+    """License entitlements (stored in association_store.license_json)."""
+
+    plan: str = Field(default="starter", max_length=64)
+    max_agents: int = Field(default=5, ge=0)
+    expires_at: str = Field(default="", max_length=32)  # ISO-8601 date or ""
+    views: list[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Top-level payload and bundle
+# ---------------------------------------------------------------------------
+
+
+class PolicyPayload(BaseModel):
+    """The signable body of the bundle (everything except the signature)."""
+
+    # P1-3 cardinality caps enforced at parse time.
+    agents: list[AgentSpec] = Field(default_factory=list, max_length=200)
+    providers: list[ProviderSpec] = Field(default_factory=list, max_length=50)
+    integrations: list[IntegrationSpec] = Field(default_factory=list, max_length=50)
+    mcp: list[McpSpec] = Field(default_factory=list, max_length=100)
+    skills: list[SkillSpec] = Field(default_factory=list, max_length=200)
+    egress: EgressSpec = Field(default_factory=EgressSpec)
+    consents: list[ConsentSpec] = Field(default_factory=list, max_length=200)
+    features: FeaturesSpec = Field(default_factory=FeaturesSpec)
+    license: LicenseSpec = Field(default_factory=LicenseSpec)
+
+
+class PolicyBundle(BaseModel):
+    """The full signed bundle delivered by the cloud endpoint."""
+
+    version: int = Field(ge=0)
+    tenant_id: str = Field(min_length=1, max_length=128)
+    # issued_at is normalised to "YYYY-MM-DDTHH:MM:SSZ" (no fractions, trailing Z)
+    # by the cloud before signing so that signing_bytes is byte-identical on both sides.
+    issued_at: str = Field(min_length=1, max_length=64)
+    signature_hex: str = Field(min_length=128, max_length=128)
+    payload: PolicyPayload
+
+
+# ---------------------------------------------------------------------------
+# Canonical serialisation
+# ---------------------------------------------------------------------------
+
+
+def canonical_bytes(payload: PolicyPayload) -> bytes:
+    """Payload-only canonical encoding (internal helper / test utility).
+
+    NOT used for signature verification — use signing_bytes() for that.
+    Kept for test isolation and internal use.
+    """
+    raw: dict[str, Any] = payload.model_dump()
+    return json.dumps(raw, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+
+
+def signing_bytes(
+    *,
+    version: int,
+    tenant_id: str,
+    issued_at: str,
+    payload: PolicyPayload,
+) -> bytes:
+    """Return the deterministic bytes the cloud signs (and the associate verifies).
+
+    P0-1: Signs the FULL ENVELOPE — version + tenant_id + issued_at + payload —
+    so that mutating any envelope field (replay with a different version, tenant
+    swap, timestamp rollback) invalidates the signature.
+
+    Encoding rules (same as canonical_bytes):
+    - sort_keys=True at every nesting level
+    - separators=(',', ':') — no extra whitespace
+    - ensure_ascii=True — encoding-agnostic across platforms
+    - encode('ascii') — byte-identical on both sides of the wire
+
+    Wire format of the signed envelope (what the cloud must sign):
+    {
+      "issued_at": "...",
+      "payload":   { <PolicyPayload fields, sorted> },
+      "tenant_id": "...",
+      "version":   42
+    }
+
+    Test vector (committed):
+      See tests/unit/config_sync/test_policy_document.py::TestSigningBytes
+      for a stable byte-sequence fixture that pins the format.
+    """
+    envelope: dict[str, Any] = {
+        "version": version,
+        "tenant_id": tenant_id,
+        "issued_at": issued_at,
+        "payload": payload.model_dump(),
+    }
+    return json.dumps(
+        envelope, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("ascii")

@@ -79,6 +79,10 @@ class AgentDraft:
     autonomy_level: AutonomyLevel = _DEFAULT_AUTONOMY
     # Nullable: None → "mis-agentes" bucket in the roster view.
     department: str | None = None
+    # Nullable: None → use the globally active provider (fallback).
+    # Non-null → the engine resolves THIS provider for every cycle of this agent.
+    # The value is the provider alias as stored in the providers table.
+    provider_alias: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +104,9 @@ class Agent:
     autonomy_level: AutonomyLevel = _DEFAULT_AUTONOMY
     # Nullable: None → rendered in "mis-agentes" by the roster endpoint.
     department: str | None = None
+    # Nullable: None → engine falls back to the globally active provider.
+    # Non-null → the engine uses THIS provider alias for every cycle of this agent.
+    provider_alias: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(tz=UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(tz=UTC))
 

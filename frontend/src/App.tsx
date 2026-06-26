@@ -12,10 +12,17 @@ import SeguridadView from './views/SeguridadView'
 import MemoriaView from './views/MemoriaView'
 import ArchivosView from './views/ArchivosView'
 import { useActiveProvider } from './hooks/useActiveProvider'
+import { useFeatures } from './hooks/useFeatures'
 
 // Code-split OfficeView at the route boundary; it imports the canvas engine
 // which is non-trivial (~10 kB gzipped) and not needed on other routes.
 const OfficeView = lazy(() => import('./views/OfficeView'))
+
+// Code-split UsageView: recharts (~50 kB gzipped) not needed on other routes.
+const UsageView = lazy(() => import('./views/UsageView'))
+
+// Code-split DashboardView: shares Recharts with UsageView; not needed on other routes.
+const DashboardView = lazy(() => import('./views/DashboardView'))
 
 function OfficeFallback() {
   return (
@@ -23,6 +30,37 @@ function OfficeFallback() {
       <p className="state-label">Cargando Office…</p>
     </div>
   )
+}
+
+function UsageFallback() {
+  return (
+    <div className="state-container" aria-busy="true">
+      <p className="state-label">Cargando Coste…</p>
+    </div>
+  )
+}
+
+function DashboardFallback() {
+  return (
+    <div className="state-container" aria-busy="true">
+      <p className="state-label">Cargando Tablero…</p>
+    </div>
+  )
+}
+
+/**
+ * ViewGuard — wraps a route's element and redirects to /chat when the view is
+ * not in the allowed set for this user.  While features are still loading we
+ * render nothing (the Layout skeleton keeps the sidebar visible) to avoid a
+ * flash-redirect before the permission set is known.
+ *
+ * 'chat' is always allowed — useFeatures.allowed() enforces this invariant.
+ */
+function ViewGuard({ viewId, children }: { viewId: string; children: React.ReactNode }) {
+  const { isLoading, allowed } = useFeatures()
+  if (isLoading) return null
+  if (!allowed(viewId)) return <Navigate to="/chat" replace />
+  return <>{children}</>
 }
 
 // Shell: renders the Layout. The sidebar "connect a model" nudge was removed
@@ -42,22 +80,54 @@ export default function App() {
       <Routes>
         <Route element={<Shell />}>
           <Route index element={<Navigate to="/chat" replace />} />
+          {/* chat is always allowed — no guard needed */}
           <Route path="chat" element={<ChatView />} />
-          <Route path="programadas" element={<CalendarView />} />
-          {/* Agentes = the unified team view (cards + live floor). Office merged in. */}
-          <Route path="agentes" element={
-            <Suspense fallback={<OfficeFallback />}>
-              <OfficeView />
+          {/* tablero is always-on (forced in useFeatures) — no guard needed */}
+          <Route path="tablero" element={
+            <Suspense fallback={<DashboardFallback />}>
+              <DashboardView />
             </Suspense>
           } />
+          <Route path="programadas" element={
+            <ViewGuard viewId="programadas"><CalendarView /></ViewGuard>
+          } />
+          {/* Agentes = the unified team view (cards + live floor). Office merged in. */}
+          <Route path="agentes" element={
+            <ViewGuard viewId="agentes">
+              <Suspense fallback={<OfficeFallback />}>
+                <OfficeView />
+              </Suspense>
+            </ViewGuard>
+          } />
           <Route path="office" element={<Navigate to="/agentes" replace />} />
-          <Route path="skills" element={<SkillsView />} />
-          <Route path="integraciones" element={<IntegrationsView />} />
-          <Route path="mcp" element={<McpView />} />
-          <Route path="archivos" element={<ArchivosView />} />
-          <Route path="proveedores" element={<ProvidersView />} />
-          <Route path="seguridad" element={<SeguridadView />} />
-          <Route path="memoria" element={<MemoriaView />} />
+          <Route path="skills" element={
+            <ViewGuard viewId="skills"><SkillsView /></ViewGuard>
+          } />
+          <Route path="integraciones" element={
+            <ViewGuard viewId="integraciones"><IntegrationsView /></ViewGuard>
+          } />
+          <Route path="mcp" element={
+            <ViewGuard viewId="mcp"><McpView /></ViewGuard>
+          } />
+          <Route path="archivos" element={
+            <ViewGuard viewId="archivos"><ArchivosView /></ViewGuard>
+          } />
+          <Route path="proveedores" element={
+            <ViewGuard viewId="proveedores"><ProvidersView /></ViewGuard>
+          } />
+          <Route path="seguridad" element={
+            <ViewGuard viewId="seguridad"><SeguridadView /></ViewGuard>
+          } />
+          <Route path="memoria" element={
+            <ViewGuard viewId="memoria"><MemoriaView /></ViewGuard>
+          } />
+          <Route path="coste" element={
+            <ViewGuard viewId="coste">
+              <Suspense fallback={<UsageFallback />}>
+                <UsageView />
+              </Suspense>
+            </ViewGuard>
+          } />
         </Route>
       </Routes>
     </BrowserRouter>

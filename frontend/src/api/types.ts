@@ -456,6 +456,99 @@ export interface SkillDetails {
   created_at?: string
 }
 
+// ── Usage / Cost ──────────────────────────────────────────────────────────────
+
+export type UsagePeriod = '7d' | '30d' | 'mtd'
+export type UsageDimension = 'cost' | 'tokens'
+
+export interface UsageTopModel {
+  model: string
+  cost_usd: number
+  share: number
+}
+
+export interface UsageSummary {
+  available: boolean
+  period: string
+  currency: string
+  total_cost_usd: number
+  projected_cost_usd: number
+  total_tokens: number
+  cycles: number
+  failures: number
+  self_hosted_cycles: number
+  top_models: UsageTopModel[]
+}
+
+export interface UsageAgent {
+  agent_id: string
+  name: string
+  department: string
+  cost_usd: number
+  total_tokens: number
+  cycles: number
+  share: number
+}
+
+export interface UsageByAgent {
+  available: boolean
+  agents: UsageAgent[]
+}
+
+export interface UsageTimeseriesPoint {
+  day: string
+  cost_usd: number
+  tokens: number
+  cycles: number
+}
+
+export interface UsageTimeseries {
+  available: boolean
+  points: UsageTimeseriesPoint[]
+}
+
+export interface ConversationUsageCycle {
+  ts: string
+  model: string
+  prompt_tokens: number
+  completion_tokens: number
+  cost_usd: number
+  tool_calls: number
+  latency_ms: number
+  outcome: string
+}
+
+export interface ConversationUsage {
+  conversation_id: string
+  cost_usd: number
+  total_tokens: number
+  cycles: ConversationUsageCycle[]
+}
+
+// ── Agent stats ───────────────────────────────────────────────────────────────
+
+export interface AgentStatToday {
+  tokens: number
+  cost_usd: number
+  tasks: number
+}
+
+export interface AgentStat {
+  agent_id: string
+  name: string
+  department: string
+  color: string | null
+  state: 'idle' | 'working'
+  active_task_count: number
+  today: AgentStatToday
+  health: string | null
+}
+
+export interface AgentStatsResponse {
+  available: boolean
+  agents: AgentStat[]
+}
+
 // ── Training state ─────────────────────────────────────────────────────────────
 
 export interface TrainingState {

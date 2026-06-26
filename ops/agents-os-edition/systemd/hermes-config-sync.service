@@ -1,0 +1,62 @@
+# hermes-config-sync.service — Fase 4: cloud→associate policy sync.
+#
+# Pulls a signed PolicyBundle from the cloud endpoint, verifies the
+# Ed25519 signature, and applies the policy via the local D-Bus verbs.
+#
+# Gated on Enterprise Edition (EE): this unit is INSTALLED in the image
+# (the Containerfile COPY picks it up from ops/agents-os-edition/systemd/)
+# but NOT enabled by default.  The EE activation gate (Fase 6) enables it
+# with `systemctl enable --now hermes-config-sync.service` during tenant
+# onboarding after the instance has been successfully paired (is_associated()
+# returns True).
+#
+# To enable manually for testing inside the container:
+#   systemctl enable --now hermes-config-sync.service
+
+[Unit]
+Description=Hermes config sync — cloud policy pull (Enterprise Edition)
+# The runtime daemon MUST be ready before we push D-Bus mutators.
+After=network-online.target hermes-runtime.service hermes-keygen.service
+Wants=network-online.target hermes-keygen.service
+Requires=hermes-runtime.service
+PartOf=hermes-workspace.target
+
+[Service]
+Type=simple
+User=hermes
+Group=hermes
+# HERMES_HOME must be writable for hermes_cli config reads (same as other units).
+Environment=HERMES_HOME=/var/lib/hermes/hermes-home
+Environment=COMPOSIO_CACHE_DIR=/var/lib/hermes/composio-cache
+# The state DB path can be overridden for testing; default matches shell-server.
+Environment=HERMES_STATE_DB=/var/lib/hermes/shell-state.db
+# Sync interval in seconds (default 300).  Override with a drop-in for fast testing.
+Environment=HERMES_CONFIG_SYNC_INTERVAL=300
+
+ExecStart=/usr/bin/python3 -m hermes.config_sync
+Restart=always
+RestartSec=10
+
+Slice=agents-os.slice
+MemoryMax=64M
+OOMScoreAdjust=200
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+ReadWritePaths=/var/lib/hermes
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+# NOTE: do NOT add to WantedBy here — enable is gated by EE activation (Fase 6).
+# The ops script that enables this unit will run:
+#   systemctl enable --now hermes-config-sync.service
+# which writes the symlink into multi-user.target.wants/ at runtime.
+WantedBy=hermes-workspace.target

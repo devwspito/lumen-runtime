@@ -25,6 +25,9 @@ class TokenUsage:
     total_tokens: int = 0
     cost_usd: float = 0.0
     model: str = ""
+    cost_status: str = "unknown"
+    cost_source: str = "none"
+    provider: str = ""
 
 
 @dataclass(frozen=True, slots=True)

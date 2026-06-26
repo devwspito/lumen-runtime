@@ -6,14 +6,18 @@ import { OfficeState } from './engine/office-state'
 import { animateCamera, createCamera, fitZoomForMap, handleMouseDown, handleMouseMove, handleMouseUp, panToAll } from './engine/camera'
 import { startGameLoop } from './engine/game-loop'
 import { loadCharacterSprites, loadWallSprites } from './engine/sprites'
+import type { AgentStatsResponse } from '../../api/types'
 
 interface Props {
   agents: LumenAgent[]
   runtimeStatus: LumenRuntimeStatus
   onAgentClick?: (agentId: string, agentName: string) => void
+  /** Optional live stats from /runtime/agent-stats — rendered as a HUD overlay.
+   *  If absent, the canvas behaves exactly as before. */
+  agentStats?: AgentStatsResponse
 }
 
-export function OfficeCanvas({ agents, runtimeStatus, onAgentClick }: Props) {
+export function OfficeCanvas({ agents, runtimeStatus, onAgentClick, agentStats }: Props) {
   const t = useT()
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -275,6 +279,96 @@ export function OfficeCanvas({ agents, runtimeStatus, onAgentClick }: Props) {
         >
           <span style={{ fontWeight: 600 }}>{tooltip.name}</span>
           {tooltip.hint && <span style={{ marginLeft: 8, opacity: 0.65 }}>{tooltip.hint}</span>}
+        </div>
+      )}
+
+      {/* ── Agent-stats HUD overlay (additive; absent when agentStats not provided) ── */}
+      {agentStats && (agentStats.agents ?? []).filter(a => a.state === 'working').length > 0 && (
+        <div
+          aria-label="Empleados trabajando ahora"
+          style={{
+            position: 'absolute',
+            top: 12,
+            right: 12,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 4,
+            zIndex: 8,
+            pointerEvents: 'none',
+          }}
+        >
+          {(agentStats.agents ?? [])
+            .filter(a => a.state === 'working')
+            .slice(0, 6)
+            .map(a => (
+              <div
+                key={a.agent_id}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  background: 'rgba(0,0,0,0.72)',
+                  borderRadius: 20,
+                  padding: '3px 10px 3px 4px',
+                  backdropFilter: 'blur(4px)',
+                  border: '1px solid rgba(255,255,255,0.10)',
+                }}
+              >
+                <div
+                  style={{
+                    width: 20,
+                    height: 20,
+                    borderRadius: '50%',
+                    background: a.color ?? '#0A84FF',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    fontSize: 10,
+                    fontWeight: 700,
+                    color: '#fff',
+                    flexShrink: 0,
+                  }}
+                  aria-hidden="true"
+                >
+                  {a.name.charAt(0).toUpperCase()}
+                </div>
+                <span
+                  style={{
+                    fontSize: 11,
+                    color: '#fff',
+                    fontWeight: 600,
+                    maxWidth: 100,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {a.name}
+                </span>
+                {a.today.tasks > 0 && (
+                  <span
+                    style={{
+                      fontSize: 10,
+                      color: 'rgba(255,255,255,0.65)',
+                      marginLeft: 2,
+                    }}
+                  >
+                    {a.today.tasks} acción{a.today.tasks !== 1 ? 'es' : ''}
+                  </span>
+                )}
+                <span
+                  style={{
+                    width: 6,
+                    height: 6,
+                    borderRadius: '50%',
+                    background: '#F5B945',
+                    marginLeft: 2,
+                    animation: 'office-pulse 1.4s ease-in-out infinite',
+                  }}
+                  aria-hidden="true"
+                />
+              </div>
+            ))}
         </div>
       )}
     </div>

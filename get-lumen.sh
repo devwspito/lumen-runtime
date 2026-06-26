@@ -46,4 +46,16 @@ esac
 
 # First run: pull the image, run it with the cage, open the browser.
 # (Forwards LUMEN_IMAGE / LUMEN_PORT / LUMEN_SECCOMP_URL if you exported them.)
-exec "$BIN/lumen" update
+"$BIN/lumen" update
+
+# Enterprise pairing: if LUMEN_PAIR_CODE is set, associate after the first run.
+# The code is copied to a local variable and the env var is unset immediately
+# so it does not persist in the shell or appear in child process environments.
+# `lumen pair` internally passes the code to the container via stdin (not argv).
+if [ -n "${LUMEN_PAIR_CODE:-}" ]; then
+  _pair_code="$LUMEN_PAIR_CODE"
+  unset LUMEN_PAIR_CODE
+  echo "[*] Pairing with enterprise code (from env)..."
+  "$BIN/lumen" pair "$_pair_code"
+  unset _pair_code
+fi

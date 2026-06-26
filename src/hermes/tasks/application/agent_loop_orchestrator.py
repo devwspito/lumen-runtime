@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -73,6 +74,7 @@ class AgentLoopOrchestrator:
         conversation_repo: Any | None = None,  # SQLiteConversationRepository | None (Bug #2)
         notification_store: Any | None = None,  # SqliteNotificationStore | None (bell)
         memory_extraction_enabled: bool = True,  # Feature B: post-chat memory extraction
+        usage_repo: Any | None = None,  # SQLiteUsageRepository | None (metering)
     ) -> None:
         self._queue = queue
         self._state = state
@@ -92,6 +94,7 @@ class AgentLoopOrchestrator:
         self._conversation_repo = conversation_repo  # SQLiteConversationRepository | None
         self._notification_store = notification_store  # SqliteNotificationStore | None
         self._memory_extraction_enabled = memory_extraction_enabled
+        self._usage_repo = usage_repo  # SQLiteUsageRepository | None
         self._shutdown = asyncio.Event()
         self._wake: MonoWorkerWakeSignal = MonoWorkerWakeSignal()
         self._pool: Any | None = None  # set by run_forever(); read by active_worker_count()
@@ -153,6 +156,7 @@ class AgentLoopOrchestrator:
             conversation_repo=self._conversation_repo,
             notification_store=self._notification_store,
             memory_extraction_enabled=self._memory_extraction_enabled,
+            usage_repo=self._usage_repo,
         )
         # Propagar el shutdown event del orchestrator al pool.
         pool._shutdown = self._shutdown  # type: ignore[attr-defined]
@@ -281,9 +285,11 @@ class AgentLoopOrchestrator:
         # El taint por lectura externa se aplica POST-ciclo (ver abajo).
         pre_cycle_consent = _taint_consent_if_chat(base_consent, is_chat)
 
+        _cycle_start = time.monotonic()
         try:
             output = await self._engine.run_cycle(ctx)
         except Exception as exc:
+            _latency_ms = int((time.monotonic() - _cycle_start) * 1000)
             # exc_info + traceback explícito en el MENSAJE: el handler stderr→journald
             # NO serializa `extra=` (se perdía el detalle: "engine_error" a secas, sin
             # causa). El chat fallaba en silencio y era indebugable. Metemos la traza
@@ -329,6 +335,22 @@ class AgentLoopOrchestrator:
                         )
             await self._do_mark_failed(item, error_reason)
             return
+
+        _latency_ms = int((time.monotonic() - _cycle_start) * 1000)
+        if self._usage_repo is not None:
+            try:
+                _usage_agent_id = _resolve_chat_agent_id(item.payload) or None
+                self._usage_repo.record_cycle(
+                    agent_id=(_usage_agent_id if _usage_agent_id else None),
+                    conversation_id=(item.payload.get("conversation_id") or None),
+                    task_id=str(item.id),
+                    usage=output.usage,
+                    tool_calls=len(output.tool_steps),
+                    latency_ms=_latency_ms,
+                    outcome=("pending_approval" if output.tool_call_proposals else "completed"),
+                )
+            except Exception as _uexc:  # noqa: BLE001
+                logger.warning("hermes.tasks.loop.usage_record_failed: %s", _uexc)
 
         if not output.tool_call_proposals:
             if is_chat and output.narrative.strip():

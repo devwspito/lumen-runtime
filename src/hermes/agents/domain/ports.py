@@ -34,6 +34,22 @@ class CannotDeleteLastAgent(ValueError):
     """Siempre debe quedar al menos un agente."""
 
 
+class LicenseExceeded(RuntimeError):
+    """Associate license: max_agents limit reached.
+
+    Raised before any agent is created — no state is modified.
+    Data is never deleted to enforce this limit (invariant).
+    """
+
+
+class LicenseExpired(RuntimeError):
+    """Associate license: expires_at is in the past.
+
+    Raised for create_agent and enqueue when in associate edition.
+    Existing agents and their data are never deleted (invariant).
+    """
+
+
 @runtime_checkable
 class AgentRegistryPort(Protocol):
     """Estado nativo del daemon: roster de agentes + agente activo."""

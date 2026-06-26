@@ -70,6 +70,31 @@ class VaultProviderResolver:
 
         return None
 
+    def resolve_by_alias(self, alias: str) -> ResolvedModel | None:
+        """Resolve the provider with the given alias. Fail-soft → None.
+
+        Used by the per-agent provider binding: if the agent declares a
+        provider_alias, the engine calls this method to resolve its credentials
+        before falling back to the global active provider.
+        """
+        try:
+            provider = self._repo.get_by_alias(alias)
+        except Exception:
+            logger.debug(
+                "hermes.providers.vault_resolver.get_by_alias_failed: alias=%s",
+                alias,
+                exc_info=True,
+            )
+            return None
+
+        if provider is None:
+            logger.debug(
+                "hermes.providers.vault_resolver.alias_not_found: alias=%s", alias
+            )
+            return None
+
+        return self._build(provider)
+
     def canonical_for(self, kind: ProviderKind) -> CanonicalProvider:
         """Return the canonical descriptor for a kind (never fails)."""
         return canonical_for(kind)

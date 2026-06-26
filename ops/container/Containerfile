@@ -14,6 +14,22 @@
 # would force the dev-mode bypass = silent loss of the confinement moat.
 FROM mcr.microsoft.com/playwright:v1.59.0-noble
 
+# LUMEN_EDITION controls the image variant produced at build time.
+#   community  (default) — CE: hermes-config-sync is present but NOT enabled;
+#                          the sync service is a no-op without a pairing anyway.
+#   enterprise           — EE: hermes-config-sync is enabled in the image so the
+#                          sync loop starts automatically after pairing on boot.
+#
+# Build the EE tag:
+#   podman build --build-arg LUMEN_EDITION=enterprise \
+#                -f ops/container/Containerfile \
+#                -t ghcr.io/devwspito/lumen-enterprise:latest .
+#
+# Build the CE tag (default):
+#   podman build -f ops/container/Containerfile \
+#                -t ghcr.io/devwspito/lumen:latest .
+ARG LUMEN_EDITION=community
+
 ENV DEBIAN_FRONTEND=noninteractive PIP_BREAK_SYSTEM_PACKAGES=1
 
 # ── System packages we ADD on top of the Playwright base ─────────────────────
@@ -302,6 +318,20 @@ RUN systemctl enable \
       hermes-exec-launcher.service \
       hermes-audit-tail.service \
       hermes-workspace.target 2>&1 | tail -3 || true
+
+# ── Edition marker + EE service gate ─────────────────────────────────────────
+# Write the build-time edition to a file so the runtime can report it without
+# querying the association store.  shell-server reads /usr/share/hermes/edition
+# at startup and exposes it on /api/v1/profile.
+# The ARG is re-declared after the FROM so it is in scope for this RUN layer.
+ARG LUMEN_EDITION=community
+RUN mkdir -p /usr/share/hermes && echo "${LUMEN_EDITION}" > /usr/share/hermes/edition
+# Enterprise edition: enable the config-sync service so it starts at boot.
+# Community edition: the unit is present in the image (COPY above) but stays
+# disabled — it is a no-op without a pairing association anyway.
+RUN if [ "${LUMEN_EDITION}" = "enterprise" ]; then \
+      systemctl enable hermes-config-sync.service 2>&1 | tail -3 || true ; \
+    fi
 
 # podman-machine (macOS) compat: systemd's per-unit MemoryPressureWatch tries to bind the
 # unit's cgroup memory.pressure into its namespace; in the Mac podman VM's cgroup view this

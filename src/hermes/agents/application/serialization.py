@@ -27,6 +27,7 @@ def agent_to_dict(agent: Agent) -> dict[str, Any]:
         "autonomy_level": agent.autonomy_level.value,
         "is_default": agent.is_default,
         "department": agent.department,
+        "provider_alias": agent.provider_alias,
         "created_at": agent.created_at.isoformat(),
         "updated_at": agent.updated_at.isoformat(),
     }
@@ -52,6 +53,9 @@ def draft_from_dict(data: dict[str, Any]) -> AgentDraft:
     raw_dept = data.get("department")
     department: str | None = str(raw_dept).strip() or None if raw_dept is not None else None
 
+    raw_alias = data.get("provider_alias")
+    provider_alias: str | None = str(raw_alias).strip() or None if raw_alias is not None else None
+
     return AgentDraft(
         name=str(data.get("name", "")).strip(),
         role=str(data.get("role", "")),
@@ -66,4 +70,5 @@ def draft_from_dict(data: dict[str, Any]) -> AgentDraft:
         ),
         autonomy_level=autonomy,
         department=department,
+        provider_alias=provider_alias,
     )

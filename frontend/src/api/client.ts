@@ -45,6 +45,13 @@ import type {
   SecurityDecisionPayload,
   SkillDetails,
   TrainingState,
+  UsageSummary,
+  UsageByAgent,
+  UsageTimeseries,
+  ConversationUsage,
+  UsagePeriod,
+  UsageDimension,
+  AgentStatsResponse,
 } from './types'
 
 // Mirrors the timeout strategy in vanilla api.js: snappy GETs fail fast;
@@ -172,6 +179,17 @@ export function getAgentRoster(): Promise<AgentRoster> {
   return request<AgentRoster>('/agents/roster').catch(
     () => ({ departments: [] }),
   )
+}
+
+export function getDefaultRoster(): Promise<{ enabled: boolean }> {
+  return request<{ enabled: boolean }>('/agents/default-roster').catch(() => ({ enabled: true }))
+}
+
+export function setDefaultRoster(enabled: boolean): Promise<{ enabled: boolean }> {
+  return request<{ enabled: boolean }>('/agents/default-roster', {
+    method: 'POST',
+    body: JSON.stringify({ enabled }),
+  })
 }
 
 /**
@@ -460,6 +478,16 @@ export function getRuntimeStatus(): Promise<RuntimeStatus> {
   )
 }
 
+/**
+ * Per-agent live stats: state (idle/working), today's task count, cost, tokens.
+ * Falls back to an empty-but-valid shape so callers can guard with `?? []` on agents.
+ */
+export function getAgentStats(): Promise<AgentStatsResponse> {
+  return request<AgentStatsResponse>('/runtime/agent-stats').catch(
+    () => ({ available: false, agents: [] }),
+  )
+}
+
 // ── Chat ──────────────────────────────────────────────────────────────────────
 
 /**
@@ -720,6 +748,59 @@ export function workspaceDownloadUrl(path: string): string {
  */
 export function getMemoryEntry(entryId: string): Promise<MemoryEntryDetail> {
   return request<MemoryEntryDetail>(`/memory/${encodeURIComponent(entryId)}`)
+}
+
+// ── Instance / Edition ────────────────────────────────────────────────────────
+
+export interface InstanceFeatures {
+  edition: 'community' | 'associate'
+  /** Identifiers of views the current user may access. CE backend returns all views. */
+  views: string[]
+}
+
+/**
+ * Returns the edition and the list of allowed view identifiers.
+ * Never throws — callers normalise with ?? [] on the views array.
+ */
+export function getInstanceFeatures(): Promise<InstanceFeatures> {
+  return request<InstanceFeatures>('/instance/features')
+}
+
+// ── Usage / Cost ──────────────────────────────────────────────────────────────
+
+export function getUsageSummary(period: UsagePeriod): Promise<UsageSummary> {
+  return request<UsageSummary>(`/usage/summary?period=${encodeURIComponent(period)}`).catch(() => ({
+    available: false,
+    period,
+    currency: 'USD',
+    total_cost_usd: 0,
+    projected_cost_usd: 0,
+    total_tokens: 0,
+    cycles: 0,
+    failures: 0,
+    self_hosted_cycles: 0,
+    top_models: [],
+  }))
+}
+
+export function getUsageByAgent(period: UsagePeriod): Promise<UsageByAgent> {
+  return request<UsageByAgent>(`/usage/by-agent?period=${encodeURIComponent(period)}`).catch(() => ({
+    available: false,
+    agents: [],
+  }))
+}
+
+export function getUsageTimeseries(period: UsagePeriod, dimension: UsageDimension): Promise<UsageTimeseries> {
+  return request<UsageTimeseries>(
+    `/usage/timeseries?period=${encodeURIComponent(period)}&dimension=${encodeURIComponent(dimension)}`,
+  ).catch(() => ({
+    available: false,
+    points: [],
+  }))
+}
+
+export function getConversationUsage(id: string): Promise<ConversationUsage> {
+  return request<ConversationUsage>(`/chat/conversations/${encodeURIComponent(id)}/usage`)
 }
 
 // ── WebSocket stream ──────────────────────────────────────────────────────────

@@ -14,6 +14,7 @@
 set -e
 
 IMAGE="${LUMEN_IMAGE:-ghcr.io/devwspito/lumen:latest}"
+ENTERPRISE_IMAGE="${LUMEN_ENTERPRISE_IMAGE:-ghcr.io/devwspito/lumen-enterprise:latest}"
 NAME="${LUMEN_NAME:-lumen}"
 PORT_PIN="${LUMEN_PORT:-}"
 SECCOMP_URL="${LUMEN_SECCOMP_URL:-https://raw.githubusercontent.com/devwspito/lumen-runtime/main/ops/container/seccomp/lumen.json}"
@@ -29,6 +30,19 @@ OS="$(uname -s 2>/dev/null || echo unknown)"
 
 _exists()  { "$RT" inspect "$NAME" >/dev/null 2>&1; }
 _running() { [ "$("$RT" inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null || echo false)" = true ]; }
+
+# Enterprise marker — written to the persistent volume on pair, removed on unpair.
+# Stored inside the volume so it survives container recreates.
+_ENTERPRISE_MARKER="/var/lib/hermes/instance/.enterprise"
+
+_is_enterprise() {
+  _exists && "$RT" exec "$NAME" test -f "$_ENTERPRISE_MARKER" >/dev/null 2>&1
+}
+
+# Return the image to use: enterprise if the marker exists, community otherwise.
+_image() {
+  if _is_enterprise; then echo "$ENTERPRISE_IMAGE"; else echo "$IMAGE"; fi
+}
 
 # macOS: the cage runs inside a podman machine, which MUST be rootful.
 _ensure_machine() {
@@ -61,9 +75,11 @@ _ensure_seccomp() {
 }
 
 # Recreate the container with the hardened cage (loopback + min caps + seccomp).
+# Uses _image() so enterprise instances keep their tag after an update.
 _run() {
   _ensure_machine
   _ensure_seccomp
+  _active_image="$(_image)"
   "$RT" rm -f "$NAME" >/dev/null 2>&1 || true
   if [ -n "$PORT_PIN" ]; then publish="127.0.0.1:${PORT_PIN}:7517"; else publish="127.0.0.1::7517"; fi
   "$RT" run -d --name "$NAME" --systemd=always \
@@ -75,7 +91,7 @@ _run() {
     -v /sys/kernel/security:/sys/kernel/security:ro \
     -v lumen-data:/var/lib/hermes \
     --shm-size=1g \
-    "$IMAGE" >/dev/null
+    "$_active_image" >/dev/null
 }
 
 _port() {
@@ -163,10 +179,51 @@ cmd_restart() { cmd_stop; cmd_open; }
 cmd_update() {
   echo "[*] Fetching the latest Lumen image..."
   _ensure_machine
-  "$RT" pull "$IMAGE"
+  # Pull the correct image (enterprise or community) based on the current marker.
+  "$RT" pull "$(_image)"
   echo "[*] Recreating the container with the new image..."
   _run   # -v lumen-data keeps your config (keystore, MFA, providers)
   _open_and_print
+}
+
+# ---- enterprise pairing -----------------------------------------------------
+# NOTE: lumen-enterprise:latest is the image tag produced by Phase 6 of the
+# pairing roadmap.  Until that tag exists the pull will fail gracefully — the
+# pairing metadata is still written to the volume so the CE image runs in
+# associate mode once the enterprise tag ships.
+
+cmd_pair() {
+  _code="$1"
+  if [ -z "$_code" ]; then
+    echo "[x] Usage: lumen pair <code>"; exit 1
+  fi
+  _ensure_machine
+  # Pull the enterprise image (best-effort — CE image still works in associate mode).
+  echo "[*] Pulling the enterprise image (Phase 6 tag — may not exist yet)..."
+  "$RT" pull "$ENTERPRISE_IMAGE" 2>/dev/null || echo "[!] Enterprise image not yet available — continuing with CE image in associate mode."
+  # Ensure the container is running before we exec into it.
+  if ! _running; then
+    echo "[*] Starting Lumen to complete pairing..."
+    cmd_start
+  fi
+  # Run the pairing handshake inside the container.
+  # Code is passed via stdin (not argv) to avoid exposure in process listings.
+  echo "[*] Running pairing handshake..."
+  printf '%s' "$_code" | "$RT" exec -i "$NAME" python3 -m hermes.instance pair --stdin || { echo "[x] Pairing failed."; exit 1; }
+  # Write the enterprise marker so future _run / update uses the enterprise image.
+  "$RT" exec "$NAME" sh -c "mkdir -p /var/lib/hermes/instance && touch $_ENTERPRISE_MARKER" >/dev/null 2>&1 || true
+  echo "[ok] Enterprise association complete.  Restart Lumen to activate: lumen restart"
+}
+
+cmd_unpair() {
+  _ensure_machine
+  if ! _running; then
+    echo "[x] Lumen must be running to unpair.  Start it with: lumen start"; exit 1
+  fi
+  "$RT" exec "$NAME" python3 -m hermes.instance unpair || { echo "[x] Unpair failed."; exit 1; }
+  # Remove the enterprise marker so future runs use the CE image.
+  "$RT" exec "$NAME" rm -f "$_ENTERPRISE_MARKER" >/dev/null 2>&1 || true
+  echo "[ok] Instance unpaired.  Restart Lumen to revert to community edition: lumen restart"
 }
 
 cmd_status() {
@@ -192,6 +249,8 @@ lumen - control your local Lumen
   lumen update     pull the latest version and apply it (keeps your config)
   lumen status     is it running? on which port?
   lumen logs       follow the container journal
+  lumen pair <code>   associate with an enterprise tenant (switches to enterprise image)
+  lumen unpair        remove the enterprise association (reverts to community edition)
 EOF
 }
 
@@ -203,6 +262,8 @@ case "${1:-open}" in
   update|actualiza|actualizar) cmd_update ;;
   status|estado)               cmd_status ;;
   logs|log)                    cmd_logs ;;
+  pair|vincular)               cmd_pair "${2:-}" ;;
+  unpair|desvincular)          cmd_unpair ;;
   -h|--help|help|ayuda)        usage ;;
   *) echo "Unknown command: $1"; echo; usage; exit 1 ;;
 esac

@@ -276,6 +276,13 @@ const translations = {
     'agents.dept.new.placeholder':'Nombre del nuevo departamento',
     'agents.dept.clear.aria':     'Borrar búsqueda',
 
+    // Agents / Office view — default roster toggle
+    'agents.roster.toggle.label':        'Equipo por defecto',
+    'agents.roster.toggle.tooltip':      'Apágalo si quieres usar solo tu propio equipo; el CEO y tus agentes se mantienen.',
+    'agents.roster.toggle.on':           'Activado',
+    'agents.roster.toggle.off':          'Apagado',
+    'agents.roster.toggle.err':          'No se pudo cambiar el equipo por defecto.',
+
     // Agents / Office view — live canvas
     'agents.canvas.aria':                'Vista isométrica de la oficina con los agentes',
     'agents.canvas.hint.detail':         'ver detalle',
@@ -542,6 +549,13 @@ const translations = {
     'agents.dept.new':            'New department…',
     'agents.dept.new.placeholder':'New department name',
     'agents.dept.clear.aria':     'Clear',
+
+    // Agents / Office view — default roster toggle
+    'agents.roster.toggle.label':        'Default team',
+    'agents.roster.toggle.tooltip':      'Turn it off to use only your own team; the CEO and your agents remain.',
+    'agents.roster.toggle.on':           'On',
+    'agents.roster.toggle.off':          'Off',
+    'agents.roster.toggle.err':          'Could not change the default team setting.',
 
     // Agents / Office view — live canvas
     'agents.canvas.aria':                'Isometric office view with agents',
