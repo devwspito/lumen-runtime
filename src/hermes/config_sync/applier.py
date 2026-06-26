@@ -203,15 +203,26 @@ _CLOUD_MANAGED = "cloud"
 class ApplyResult:
     """Outcome of one policy application pass.
 
-    `ok` is True only if zero entities failed.  The sync loop advances
-    `last_applied_version` only when `ok` is True (retry-on-failure).
+    `ok` is True only if zero entities had TRANSITORY failures.
+    The sync loop advances `last_applied_version` when `ok` is True.
+
+    `rejected` holds permanent policy/security rejections (e.g. a skill
+    blocked by the Security Center scan verdict FAIL).  These are NOT
+    retried and do NOT block version advancement — a permanently-rejected
+    entity will always be rejected on the next attempt, so preventing the
+    version from advancing would loop forever.
+
+    Invariant: a permanent rejection NEVER causes the blocked entity to be
+    installed.  Only `failed` (transitory) prevents version advancement.
     """
 
     applied: int = 0
     failed: list[str] = field(default_factory=list)
+    rejected: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
+        """True when there are no TRANSITORY failures (version can advance)."""
         return len(self.failed) == 0
 
 
@@ -378,11 +389,26 @@ class PolicyApplier:
     async def _apply_skills(
         self, skills: list[SkillSpec], result: ApplyResult
     ) -> None:
-        """Install hub skills (idempotent; daemon is no-op if already installed)."""
+        """Install hub skills (idempotent; daemon is no-op if already installed).
+
+        Permanent rejection: the daemon returns {"ok": False, "blocked": True, ...}
+        when the Security Center scan verdict is FAIL and auto_block_fail=True.
+        This is a sovereignty decision — the install MUST NOT happen and retrying
+        is pointless.  Record it as `rejected` so it does not block version advancement.
+
+        Transitory failure: any other ok:false response (daemon down, network,
+        unknown error) is recorded as `failed` and will be retried.
+        """
         for spec in skills:
             resp = await self._call_mutator("install_hub_skill", spec.identifier, False)
             if _is_ok_lenient(resp):
                 result.applied += 1
+            elif _is_permanent_rejection(resp):
+                logger.warning(
+                    "hermes.config_sync.applier.skill_permanently_rejected",
+                    extra={"identifier": spec.identifier},
+                )
+                result.rejected.append(f"skill:{spec.identifier}:scan_blocked")
             else:
                 result.failed.append(f"skill:{spec.identifier}")
 
@@ -595,6 +621,26 @@ def _is_ok_strict(result: dict | bool | None) -> bool:
 
 def _is_high_risk_consent(capability: str) -> bool:
     return any(capability.startswith(prefix) for prefix in _HIGH_RISK_CONSENT_PREFIXES)
+
+
+def _is_permanent_rejection(result: dict | bool | None) -> bool:
+    """Return True when the daemon signals a permanent policy/security rejection.
+
+    Criterion: {"ok": False, "blocked": True, ...} — the Security Center scan
+    verdict FAIL (auto_block_fail=True) or a WARN without owner override.
+    This shape is produced exclusively by install_hub_skill (and add_mcp_server)
+    in DbusRuntimeServiceWiring._scan_hub_target / _scan_install_target.
+
+    A permanent rejection NEVER becomes transitory on retry — the scan verdict
+    is cached and the policy has not changed.  The applier records it in
+    `result.rejected` so the sync version can still advance.
+
+    Invariant: this function NEVER forces an install.  It only classifies
+    whether a failure is worth retrying.
+    """
+    if not isinstance(result, dict):
+        return False
+    return result.get("ok") is False and result.get("blocked") is True
 
 
 def _agent_draft(spec: AgentSpec) -> dict:

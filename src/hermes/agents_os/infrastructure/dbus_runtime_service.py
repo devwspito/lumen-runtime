@@ -455,7 +455,16 @@ class DbusRuntimeServiceWiring:
 
         max_agents = lic.get("max_agents")
         if max_agents is not None and self._agent_registry is not None:
-            current_count = len(self._agent_registry.list_agents())
+            # The license cap counts only CLOUD-MANAGED agents (the licensed
+            # workforce the company pays for). The local CE default roster
+            # (managed_by=None) is a Community freebie and must NOT count —
+            # otherwise the 28-agent default roster blocks the cloud from
+            # provisioning the employee's agent (max_agents typically < 28).
+            current_count = sum(
+                1
+                for a in self._agent_registry.list_agents()
+                if getattr(a, "managed_by", None) == "cloud"
+            )
             if current_count >= int(max_agents):
                 logger.warning(
                     "hermes.dbus.license_exceeded",
@@ -1132,30 +1141,57 @@ class DbusRuntimeServiceWiring:
             logger.warning("hermes.dbus.list_mcp_servers _load_mcp_config failed: %s", exc)
             neus_cfg = {}
 
+        # Authoritative daemon-side view of what is connected NOW (server_id → tools).
+        # After a reconnect-on-restart the manager holds the live connections even if
+        # Neus's get_mcp_status() per-server tracker lags at 0 — use it so the UI shows
+        # the real tool_count + healthy state instead of a stale 0. (fix 2026-06-27)
+        mgr: dict[str, int] = {}
+        try:
+            if self._mcp_manager is not None:
+                mgr = self._mcp_manager.snapshot()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.list_mcp_servers snapshot failed: %s", exc)
+
         # Build output: live statuses first (they carry tool_count), then any
-        # configured-but-not-connected entries not already in the live list.
+        # configured-but-not-connected entries not already in the live list. For every
+        # entry the manager snapshot wins when it reports MORE tools / a live connection.
         seen: set[str] = set()
         out: list[dict] = []
         for status in live_statuses:
             sid = status.get("name", "")
             seen.add(sid)
             argv = _neus_argv(neus_cfg.get(sid, {}))
+            tool_count = max(int(status.get("tools", 0) or 0), mgr.get(sid, 0))
+            connected = bool(status.get("connected")) or sid in mgr
             out.append({
                 "server_id": sid,
                 "label": sid,
                 "argv": argv,
-                "health": "healthy" if status.get("connected") else "disconnected",
-                "tool_count": status.get("tools", 0),
+                "health": "healthy" if connected else "disconnected",
+                "tool_count": tool_count,
             })
         for sid, cfg in neus_cfg.items():
+            if sid in seen:
+                continue
+            seen.add(sid)
+            out.append({
+                "server_id": sid,
+                "label": sid,
+                "argv": _neus_argv(cfg),
+                "health": "healthy" if sid in mgr else "disconnected",
+                "tool_count": mgr.get(sid, 0),
+            })
+        # Manager-connected servers absent from BOTH Neus sources (defensive — never drop
+        # a live connection from the list just because the status trackers don't list it).
+        for sid, tc in mgr.items():
             if sid in seen:
                 continue
             out.append({
                 "server_id": sid,
                 "label": sid,
-                "argv": _neus_argv(cfg),
-                "health": "disconnected",
-                "tool_count": 0,
+                "argv": _neus_argv(neus_cfg.get(sid, {})),
+                "health": "healthy",
+                "tool_count": tc,
             })
         return out
 
@@ -4380,29 +4416,40 @@ class DbusRuntimeServiceWiring:
         return {"ok": True}
 
     def list_recent_scans(self, *, limit: int = 50) -> list[dict]:
-        """Lista los escaneos de instalación recientes (read-only). [] si no hay tabla."""
+        """Lista los escaneos de instalación recientes (read-only). [] si no hay tabla.
+
+        Fuente ÚNICA = el ScanRepo donde ScanService PERSISTE cada scan (scan_records
+        en /var/lib/hermes/security/scans.db). El handler antiguo leía la tabla
+        `install_reviews` (otra DB, nunca poblada) → el Centro de Seguridad mostraba
+        el historial vacío aunque los scans ocurrían y bloqueaban. (fix 2026-06-27)
+        """
         try:
-            conn = self._security_db_conn()
-            rows = conn.execute(
-                "SELECT scan_id, identifier, kind, score, verdict, decision,"
-                "       risks_json, timestamp"
-                "  FROM install_reviews"
-                " ORDER BY timestamp DESC"
-                " LIMIT ?",
-                (max(1, int(limit)),),
-            ).fetchall()
+            from hermes.security_center.infrastructure.sqlite_scan_repo import (  # noqa: PLC0415
+                SQLiteScanRepo,
+            )
+            records = SQLiteScanRepo().list_recent(limit=max(1, int(limit)))
             return [
                 {
-                    "scan_id":    r["scan_id"],
-                    "identifier": r["identifier"],
-                    "kind":       r["kind"],
-                    "score":      r["score"],
-                    "verdict":    r["verdict"],
-                    "decision":   r["decision"],
-                    "risks":      json.loads(r["risks_json"] or "[]"),
-                    "timestamp":  r["timestamp"],
+                    "scan_id":      str(r.id),
+                    "identifier":   r.target.identifier,
+                    "kind":         r.target.kind,
+                    "score":        r.score.value,
+                    "verdict":      r.verdict.value,
+                    "decision":     r.decision,
+                    "engine":       r.engine,
+                    "engine_label": r.engine_label,
+                    "risks": [
+                        {
+                            "category":     rk.category,
+                            "severity":     rk.severity.value,
+                            "message":      rk.message,
+                            "evidence_ref": rk.evidence_ref,
+                        }
+                        for rk in r.score.risks
+                    ],
+                    "timestamp":    r.finished_at.isoformat(),
                 }
-                for r in rows
+                for r in records
             ]
         except Exception as exc:  # noqa: BLE001
             logger.warning("hermes.dbus.list_recent_scans_failed: %s", exc)

@@ -13,7 +13,13 @@ import logging
 from typing import Any, Callable
 
 from hermes.mcp.domain.entities import McpServer, McpTool
-from hermes.mcp.domain.value_objects import McpServerId, ServerSlug, Transport, TrustLevel
+from hermes.mcp.domain.value_objects import (
+    McpServerId,
+    ServerHealth,
+    ServerSlug,
+    Transport,
+    TrustLevel,
+)
 
 from .errors import McpConnectionError, McpServerNotFoundError, McpToolNotFoundError
 from .ports import McpClientPort
@@ -148,6 +154,20 @@ class McpServerManager:
         if server is None:
             return "unknown"
         return server.health.value
+
+    def snapshot(self) -> dict[str, int]:
+        """Map server_id → live tool_count for currently HEALTHY connections.
+
+        The authoritative daemon-side view of what is actually connected NOW. After a
+        reconnect-on-restart the manager holds the live connections (and their tools)
+        even if a separate per-server status tracker lags, so callers building the UI
+        list use this to report the real tool_count instead of a stale 0.
+        """
+        return {
+            sid: len(server.tools)
+            for sid, server in self._servers.items()
+            if server.health is ServerHealth.HEALTHY
+        }
 
     def _get_server(self, server_id: McpServerId) -> McpServer:
         server = self._servers.get(str(server_id))

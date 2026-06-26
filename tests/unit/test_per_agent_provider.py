@@ -486,3 +486,191 @@ class TestEngineRetroCompat:
             mock_env.return_value = _make_global_model_config("env/model")
             result = engine._resolve_model_config(None)
         assert result.model == "env/model"
+
+
+# ---------------------------------------------------------------------------
+# managed_by: domain, registry, serialization, adapter allow-list (Fase 4)
+# ---------------------------------------------------------------------------
+
+
+class TestManagedByDomain:
+    def test_agent_draft_managed_by_defaults_to_none(self) -> None:
+        draft = AgentDraft(name="X")
+        assert draft.managed_by is None
+
+    def test_agent_draft_accepts_managed_by_cloud(self) -> None:
+        draft = AgentDraft(name="X", managed_by="cloud")
+        assert draft.managed_by == "cloud"
+
+    def test_agent_managed_by_defaults_to_none(self) -> None:
+        from datetime import datetime, UTC
+        agent = Agent(
+            agent_id="a1",
+            name="Test",
+            created_at=datetime.now(tz=UTC),
+            updated_at=datetime.now(tz=UTC),
+        )
+        assert agent.managed_by is None
+
+    def test_agent_accepts_managed_by(self) -> None:
+        from datetime import datetime, UTC
+        agent = Agent(
+            agent_id="a1",
+            name="Test",
+            managed_by="cloud",
+            created_at=datetime.now(tz=UTC),
+            updated_at=datetime.now(tz=UTC),
+        )
+        assert agent.managed_by == "cloud"
+
+
+class TestManagedByRegistry:
+    def test_create_agent_with_managed_by_cloud_persists(self, tmp_path) -> None:
+        from hermes.agents.infrastructure.sqlite_agent_registry import SqliteAgentRegistry
+
+        reg = SqliteAgentRegistry(db_path=tmp_path / "s.db")
+        created = reg.create_agent(AgentDraft(name="CloudAgent", managed_by="cloud"))
+        fetched = reg.get_agent(created.agent_id)
+        assert fetched.managed_by == "cloud"
+
+    def test_create_agent_without_managed_by_has_none(self, tmp_path) -> None:
+        from hermes.agents.infrastructure.sqlite_agent_registry import SqliteAgentRegistry
+
+        reg = SqliteAgentRegistry(db_path=tmp_path / "s.db")
+        created = reg.create_agent(AgentDraft(name="LocalAgent"))
+        fetched = reg.get_agent(created.agent_id)
+        assert fetched.managed_by is None
+
+    def test_update_agent_preserves_managed_by_when_draft_has_none(self, tmp_path) -> None:
+        """update_agent with managed_by=None in draft preserves the existing value."""
+        from hermes.agents.infrastructure.sqlite_agent_registry import SqliteAgentRegistry
+
+        reg = SqliteAgentRegistry(db_path=tmp_path / "s.db")
+        created = reg.create_agent(AgentDraft(name="Bot", managed_by="cloud"))
+        reg.update_agent(
+            created.agent_id,
+            AgentDraft(name="Bot Updated", managed_by=None),
+        )
+        fetched = reg.get_agent(created.agent_id)
+        # managed_by=None in draft → preserve existing ("cloud")
+        assert fetched.managed_by == "cloud"
+
+    def test_update_agent_can_set_managed_by(self, tmp_path) -> None:
+        from hermes.agents.infrastructure.sqlite_agent_registry import SqliteAgentRegistry
+
+        reg = SqliteAgentRegistry(db_path=tmp_path / "s.db")
+        created = reg.create_agent(AgentDraft(name="Bot"))
+        reg.update_agent(
+            created.agent_id,
+            AgentDraft(name="Bot", managed_by="cloud"),
+        )
+        fetched = reg.get_agent(created.agent_id)
+        assert fetched.managed_by == "cloud"
+
+    def test_list_agents_exposes_managed_by_via_serialization(self, tmp_path) -> None:
+        from hermes.agents.infrastructure.sqlite_agent_registry import SqliteAgentRegistry
+        from hermes.agents.application.serialization import agent_to_dict
+
+        reg = SqliteAgentRegistry(db_path=tmp_path / "s.db")
+        cloud_agent = reg.create_agent(AgentDraft(name="CloudBot", managed_by="cloud"))
+        d = agent_to_dict(cloud_agent)
+        assert d["managed_by"] == "cloud"
+
+    def test_migration_idempotent_managed_by(self, tmp_path) -> None:
+        """Second construction on same DB must not raise (managed_by migration idempotent)."""
+        from hermes.agents.infrastructure.sqlite_agent_registry import SqliteAgentRegistry
+
+        db = tmp_path / "db.sqlite"
+        SqliteAgentRegistry(db_path=db)
+        # Re-open — ALTER TABLE ADD COLUMN must be a no-op.
+        reg2 = SqliteAgentRegistry(db_path=db)
+        agents = reg2.list_agents()
+        assert all(hasattr(a, "managed_by") for a in agents)
+
+
+class TestManagedBySerialization:
+    def test_agent_to_dict_includes_managed_by(self, tmp_path) -> None:
+        from hermes.agents.infrastructure.sqlite_agent_registry import SqliteAgentRegistry
+        from hermes.agents.application.serialization import agent_to_dict
+
+        reg = SqliteAgentRegistry(db_path=tmp_path / "s.db")
+        agent = reg.create_agent(AgentDraft(name="A", managed_by="cloud"))
+        d = agent_to_dict(agent)
+        assert d["managed_by"] == "cloud"
+
+    def test_agent_to_dict_null_managed_by_is_none(self, tmp_path) -> None:
+        from hermes.agents.infrastructure.sqlite_agent_registry import SqliteAgentRegistry
+        from hermes.agents.application.serialization import agent_to_dict
+
+        reg = SqliteAgentRegistry(db_path=tmp_path / "s.db")
+        agent = reg.create_agent(AgentDraft(name="A"))
+        d = agent_to_dict(agent)
+        assert d["managed_by"] is None
+
+    def test_draft_from_dict_parses_managed_by(self) -> None:
+        from hermes.agents.application.serialization import draft_from_dict
+
+        draft = draft_from_dict({"name": "X", "managed_by": "cloud"})
+        assert draft.managed_by == "cloud"
+
+    def test_draft_from_dict_missing_managed_by_is_none(self) -> None:
+        from hermes.agents.application.serialization import draft_from_dict
+
+        draft = draft_from_dict({"name": "X"})
+        assert draft.managed_by is None
+
+    def test_draft_from_dict_empty_string_managed_by_is_none(self) -> None:
+        from hermes.agents.application.serialization import draft_from_dict
+
+        draft = draft_from_dict({"name": "X", "managed_by": "   "})
+        assert draft.managed_by is None
+
+
+class TestAdapterAllowlistManagedBy:
+    """Boundary validation: provider_alias and managed_by must pass the allow-list gate."""
+
+    def test_provider_alias_in_allowed_keys(self) -> None:
+        from hermes.agents_os.infrastructure.dbus_fast_runtime_adapter import (
+            _AGENT_DRAFT_ALLOWED_KEYS,
+        )
+        assert "provider_alias" in _AGENT_DRAFT_ALLOWED_KEYS
+
+    def test_managed_by_in_allowed_keys(self) -> None:
+        from hermes.agents_os.infrastructure.dbus_fast_runtime_adapter import (
+            _AGENT_DRAFT_ALLOWED_KEYS,
+        )
+        assert "managed_by" in _AGENT_DRAFT_ALLOWED_KEYS
+
+    def test_draft_with_provider_alias_and_managed_by_passes_validation(self) -> None:
+        """A cloud draft with both fields must not raise DbusInputValidationError."""
+        from hermes.agents_os.infrastructure.dbus_fast_runtime_adapter import (
+            _parse_and_validate_agent_draft_json,
+        )
+        import json
+
+        raw = json.dumps({
+            "name": "CloudSales",
+            "provider_alias": "openai-gpt4",
+            "managed_by": "cloud",
+        })
+        parsed = _parse_and_validate_agent_draft_json(raw)
+        assert parsed["provider_alias"] == "openai-gpt4"
+        assert parsed["managed_by"] == "cloud"
+
+    def test_draft_roundtrip_provider_alias_and_managed_by(self) -> None:
+        """Full roundtrip: JSON → adapter validation → draft_from_dict → AgentDraft."""
+        from hermes.agents_os.infrastructure.dbus_fast_runtime_adapter import (
+            _parse_and_validate_agent_draft_json,
+        )
+        from hermes.agents.application.serialization import draft_from_dict
+        import json
+
+        raw = json.dumps({
+            "name": "CloudSales",
+            "provider_alias": "openai-gpt4",
+            "managed_by": "cloud",
+        })
+        validated = _parse_and_validate_agent_draft_json(raw)
+        draft = draft_from_dict(validated)
+        assert draft.provider_alias == "openai-gpt4"
+        assert draft.managed_by == "cloud"

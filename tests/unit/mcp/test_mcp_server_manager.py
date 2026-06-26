@@ -221,3 +221,43 @@ class TestHealth:
     def test_health_unknown_for_unconnected(self) -> None:
         manager = _make_manager(FakeMcpClient())
         assert manager.health(_sid()) == "unknown"
+
+
+class TestSnapshot:
+    """snapshot() reports {server_id: tool_count} for HEALTHY connections only.
+
+    Backs the daemon's list_mcp_servers tool_count after a reconnect-on-restart
+    (fix 2026-06-27): the manager is the authoritative live view even when a
+    separate per-server status tracker lags at 0.
+    """
+
+    @pytest.mark.asyncio
+    async def test_snapshot_reports_connected_tool_counts(self) -> None:
+        client = FakeMcpClient(tools=[
+            {"name": "a", "description": "", "annotations": {}},
+            {"name": "b", "description": "", "annotations": {}},
+        ])
+        manager = _make_manager(client)
+        sid = _sid()
+        await manager.connect(
+            server_id=sid, slug=_slug(), transport=_transport(),
+            trust_level=TrustLevel.BUILTIN,
+        )
+        snap = manager.snapshot()
+        assert snap == {str(sid): 2}
+
+    def test_snapshot_empty_when_nothing_connected(self) -> None:
+        manager = _make_manager(FakeMcpClient(tools=[]))
+        assert manager.snapshot() == {}
+
+    @pytest.mark.asyncio
+    async def test_snapshot_excludes_failed_server(self) -> None:
+        # A server whose client fails on init is never marked healthy → not in snapshot.
+        manager = _make_manager(FakeMcpClient(fail_on_init=True))
+        sid = _sid()
+        with pytest.raises(McpConnectionError):
+            await manager.connect(
+                server_id=sid, slug=_slug(), transport=_transport(),
+                trust_level=TrustLevel.BUILTIN,
+            )
+        assert str(sid) not in manager.snapshot()
