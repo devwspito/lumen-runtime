@@ -36,6 +36,10 @@ Environment=HERMES_SHELL_BIND_HOST=127.0.0.1
 # en crash-loop (nunca sirve → sin onboarding, "Sin modelo", connection refused).
 # Lo redirigimos a /var/lib/hermes (que sí está en ReadWritePaths=).
 Environment=COMPOSIO_CACHE_DIR=/var/lib/hermes/composio-cache
+# Must match the daemon's HERMES_HOME (hermes-runtime.service) so the shell-server
+# reads/writes the SAME $HERMES_HOME/skills the daemon scans — otherwise the
+# /skills daemon-down fallback returns [] and synthesized skills could drift dirs.
+Environment=HERMES_HOME=/var/lib/hermes/hermes-home
 # SECURITY (Finding 4 — auditable jail activation):
 # HERMES_BROWSER_JAIL=1 activates the root launcher path for browser spawns.
 # Explicit here so it appears in `systemctl show hermes-shell-server` and journal.

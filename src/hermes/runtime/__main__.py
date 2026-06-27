@@ -912,9 +912,12 @@ def _build_skill_store_adapter(db_path: Path):
     serán rechazadas con SurfaceAdapterNotFound en esos entornos. En producción
     (bootc con hermes-keygen) siempre está disponible.
 
-    El skill_store_root por defecto es /var/lib/hermes/skills — mismo que
-    SkillStoreAdapter.skill_store_root default. Sobreponible via env
-    HERMES_SKILL_STORE_ROOT para tests o deploys alternativos.
+    El skill_store_root por defecto es $HERMES_HOME/skills — EXACTAMENTE donde
+    list_skills_native()/_list_native_skills_primary leen y donde el agente
+    auto-descubre las skills para ejecutarlas. Forzar /var/lib/hermes/skills
+    (el bug anterior) hacía que skill_manage escribiera en una carpeta que la
+    vista Habilidades nunca lee → "todo ok" pero la skill no aparecía.
+    Sobreponible via env HERMES_SKILL_STORE_ROOT para tests/deploys alternativos.
     """
     try:
         from hermes.capabilities.infrastructure.skill_store_adapter import SkillStoreAdapter  # noqa: PLC0415
@@ -922,8 +925,11 @@ def _build_skill_store_adapter(db_path: Path):
         from hermes.training.application.skill_signer import SigningKeyError  # noqa: PLC0415
 
         kms = NativeKeyStoreAdapter()
+        # Canonical store = $HERMES_HOME/skills (the read/exec path). Only an
+        # explicit HERMES_SKILL_STORE_ROOT overrides it.
+        _hermes_home = os.environ.get("HERMES_HOME") or "/var/lib/hermes/hermes-home"
         skill_store_root = Path(
-            os.environ.get("HERMES_SKILL_STORE_ROOT", "/var/lib/hermes/skills")
+            os.environ.get("HERMES_SKILL_STORE_ROOT") or (Path(_hermes_home) / "skills")
         )
         adapter = SkillStoreAdapter(
             kms=kms,

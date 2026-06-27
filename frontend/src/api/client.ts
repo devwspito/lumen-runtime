@@ -449,11 +449,11 @@ export function createTask(payload: CreateTaskPayload): Promise<ConfiguredTask> 
 }
 
 export function getTask(taskId: string): Promise<ConfiguredTask> {
-  return request<ConfiguredTask>(`/tasks/${encodeURIComponent(taskId)}`)
+  return request<ConfiguredTask>(`/tasks/scheduled/${encodeURIComponent(taskId)}`)
 }
 
 export function updateTask(taskId: string, payload: UpdateTaskPayload): Promise<ConfiguredTask> {
-  return request<ConfiguredTask>(`/tasks/${encodeURIComponent(taskId)}`, {
+  return request<ConfiguredTask>(`/tasks/scheduled/${encodeURIComponent(taskId)}`, {
     method: 'PUT',
     body: JSON.stringify(payload),
   })

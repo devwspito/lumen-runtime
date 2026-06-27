@@ -81,7 +81,7 @@ def create_memory_router() -> APIRouter:
         """
         proxy = request.app.state.dbus_proxy
         try:
-            result = await proxy.call_dict("GetMemoryEntry", entry_id)
+            result = await proxy.call_dict("get_memory_entry", entry_id)
         except AgentUnavailable as exc:
             logger.warning(
                 "hermes.memory.get_entry_unavailable",
@@ -110,7 +110,7 @@ def create_memory_router() -> APIRouter:
         """
         proxy = request.app.state.dbus_proxy
         try:
-            result = await proxy.call_dict("ForgetMemoryEntry", entry_id)
+            result = await proxy.call_dict("forget_memory_entry", entry_id)
         except AgentUnavailable as exc:
             logger.warning(
                 "hermes.memory.delete_unavailable",
