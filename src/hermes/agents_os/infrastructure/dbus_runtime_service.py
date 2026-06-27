@@ -455,7 +455,15 @@ class DbusRuntimeServiceWiring:
 
         max_agents = lic.get("max_agents")
         if max_agents is not None and self._agent_registry is not None:
-            current_count = len(self._agent_registry.list_agents())
+            # The per-agent license caps only cloud-managed (enterprise-licensed)
+            # agents. The local CE roster + CEO are bundled with the runtime and
+            # never consume a seat — otherwise a fresh associate (28 default
+            # agents) would be over a 10-seat license before the cloud lands one.
+            current_count = sum(
+                1
+                for a in self._agent_registry.list_agents()
+                if getattr(a, "managed_by", None) == "cloud"
+            )
             if current_count >= int(max_agents):
                 logger.warning(
                     "hermes.dbus.license_exceeded",
@@ -513,11 +521,36 @@ class DbusRuntimeServiceWiring:
             )
 
     def list_agents(self) -> list[dict]:
+        """Return the visible agent list.
+
+        Associate mode (instance is paired with a cloud tenant):
+          When cloud-managed agents exist, expose only those to the employee UI.
+          This prevents the CE default roster of 28 agents from dominating the
+          associate's UI — the enterprise controls which agents are visible.
+          The default CEO (is_default=True) is always included as fallback.
+
+        Community / CE mode (not associated, or no cloud agents yet):
+          Returns the full registry list unchanged (default roster filtered per
+          the default_roster_enabled flag in the registry).
+        """
         from hermes.agents.application.serialization import agent_to_dict  # noqa: PLC0415
 
         if self._agent_registry is None:
             return []
-        return [agent_to_dict(a) for a in self._agent_registry.list_agents()]
+
+        all_agents = self._agent_registry.list_agents()
+        if self._is_associate_mode():
+            return _filter_associate_agents(all_agents, agent_to_dict)
+        return [agent_to_dict(a) for a in all_agents]
+
+    def _is_associate_mode(self) -> bool:
+        """True when the instance is paired with a cloud tenant."""
+        if self._association_store is None:
+            return False
+        try:
+            return self._association_store.is_associated()
+        except Exception:  # noqa: BLE001
+            return False
 
     def runtime_status(self) -> dict:
         """Return the real live runtime status: state, active_task_count,
@@ -1252,8 +1285,17 @@ class DbusRuntimeServiceWiring:
         # antes de conectar. FAIL con política auto_block → no se conecta. El
         # score se emite por señal → el modal InstallReview lo muestra. Defensa
         # en profundidad: aunque la UI no pre-escanee, este gate bloquea lo grave.
-        scan_result = self._scan_install_target(
-            "mcp_server", sid, argv=argv, emit_signals=False,
+        # Offload the (networked) scan off the daemon loop — _scan_install_target →
+        # _run_scan_sync parks the calling thread on .result(); inline it froze the loop
+        # (red-team 2026-06-27, finding #3 residual).
+        import asyncio as _asyncio_sc  # noqa: PLC0415
+        from functools import partial as _partial_sc  # noqa: PLC0415
+        scan_result = await _asyncio_sc.get_running_loop().run_in_executor(
+            None,
+            _partial_sc(
+                self._scan_install_target,
+                "mcp_server", sid, argv=argv, emit_signals=False,
+            ),
         )
         if scan_result is not None and scan_result.get("blocked"):
             if not force:
@@ -1273,8 +1315,12 @@ class DbusRuntimeServiceWiring:
                         "hermes.dbus.mcp_owner_override server=%s scan_id=%s — install "
                         "allowed by the owner's SOVEREIGN decision (MFA-gated)", sid, _sid_scan,
                     )
-                scan_result = self._scan_install_target(
-                    "mcp_server", sid, argv=argv, emit_signals=False, allow_warn=True,
+                scan_result = await _asyncio_sc.get_running_loop().run_in_executor(
+                    None,
+                    _partial_sc(
+                        self._scan_install_target,
+                        "mcp_server", sid, argv=argv, emit_signals=False, allow_warn=True,
+                    ),
                 )
                 if scan_result is not None and scan_result.get("blocked"):
                     return scan_result  # override could not clear it
@@ -4693,6 +4739,38 @@ def _consent_to_dict(consent: object) -> dict:
     }
 
 
+def _filter_associate_agents(all_agents: list, agent_to_dict_fn: Any) -> list[dict]:
+    """Return the agent list filtered for an associate instance (GAP 7).
+
+    Rule:
+      When cloud-managed agents exist, expose only those plus the default CEO.
+      This prevents the CE roster from dominating the associate UI — the
+      enterprise controls which agents employees see.
+
+      Fallback: if no cloud agents exist yet (e.g., first sync still pending),
+      return only the default CEO (is_default=True) so the UI is never empty.
+      If there is no CEO either, return the full list (never return empty).
+
+    Non-destructive: local and roster agents remain in the DB — only the view
+    returned to the UI is filtered.
+    """
+    cloud_agents = [a for a in all_agents if getattr(a, "managed_by", None) == "cloud"]
+    default_agents = [a for a in all_agents if getattr(a, "is_default", False)]
+
+    if cloud_agents:
+        # Deduplicate by agent_id (CEO may also be cloud-managed).
+        seen: dict[str, Any] = {}
+        for a in [*default_agents, *cloud_agents]:
+            seen.setdefault(a.agent_id, a)
+        visible = list(seen.values())
+    elif default_agents:
+        visible = default_agents
+    else:
+        visible = all_agents  # never return empty
+
+    return [agent_to_dict_fn(a) for a in visible]
+
+
 def _assert_platform_model_signature(model: Any, signer: Any, *, operation: str) -> None:
     """Verifica la firma del PlatformModel antes de una transición de ciclo de vida.
 
@@ -5460,22 +5538,23 @@ def _scanner_can_analyze_argv(argv: list[str]) -> bool:
     package-select / local-path option breaks the shape ⇒ REJECT (no analysis ⇒ no
     PASS). git+https remains a first-class operator-chosen path, checked next.
     """
-    # C1 PASS-4: git+https MCP (uvx --from git+https://host/owner/repo) is a FIRST-CLASS
-    # install path. The registry scanner cannot fetch a git repo, but this is an explicit
-    # operator-chosen source (argv comes from the operator over D-Bus, never the LLM): we
-    # accept it here so the gate does not reject it, and _prefetch_mcp_package CLONES it at
-    # install time (network limited to the git host) so the runtime spawns offline. Only
-    # uvx git+https — npx has no equivalent here, and other git transports are not accepted.
+    # git+https MCP — REJECTED (security-review 2026-06-27, finding #1). A git source is
+    # SOURCE only (no published wheel), so installing it requires a PEP 517 BUILD that runs
+    # the repo's setup.py / build-backend / build-deps as `hermes` in the host netns. A
+    # red-team proved 8 independent ways an attacker-controlled build executes code that a
+    # static content scan CANNOT catch (obfuscated setup.py, hatchling build hooks, a
+    # malicious build-system.requires dep, inline-table/triple-quoted pyproject, legacy
+    # no-backend fall-through, …). There is no `--ignore-scripts`/`--no-build` equivalent
+    # that keeps a source build working, so the only safe posture is REJECT: only PUBLISHED
+    # registry packages (npm/pypi-with-wheel) — whose bytes ARE statically inspected and
+    # which install with NO build — are allowed. (A sandboxed-build path could re-enable git.)
     git_spec = _git_spec_from_argv(argv)
     if git_spec is not None:
-        runner = argv[0].rsplit("/", 1)[-1]
-        if runner not in ("uvx",) or _git_host_from_spec(git_spec) is None:
-            logger.warning(
-                "hermes.dbus.mcp_argv_git_rejected — git+https sólo soportado vía uvx "
-                "con host parseable (gate C2 PASS-4)."
-            )
-            return False
-        return True
+        logger.warning(
+            "hermes.dbus.mcp_argv_git_rejected — MCP por git+https no soportado: su "
+            "instalación construye código no vettable. Usa un paquete publicado (npm/pypi)."
+        )
+        return False
     # STRICT ARGV-SHAPE allowlist (C2 PASS-5) — enforced BEFORE delegating to the
     # scanner probe so the gate stays closed even if the probe drifts. Closes the whole
     # class of interpreter-as-command + option forms in one rule.
@@ -5677,7 +5756,14 @@ def _prefetch_mcp_package(server_id: str, argv: list[str]) -> None:
         # --offline` finds a complete cache entry (a bare `uv pip download` would not
         # build the tool environment uvx needs). --help exits fast without running the
         # server. If the package has no --help the cache is still warmed by the resolve.
-        cmd = [uv, "tool", "install", "--quiet", name]
+        # --no-build (security-review 2026-06-27, finding #2): the pypi parallel of npm's
+        # --ignore-scripts. `uv tool install` would otherwise BUILD an sdist via PEP 517,
+        # running the package's setup.py / build-backend as hermes in the host netns — an
+        # unvetted RCE. --no-build forbids building from source: a package with a published
+        # WHEEL installs with no code execution; an sdist-only package fails here and is
+        # surfaced for the owner to review, rather than auto-built. The content gate already
+        # blocks non-standard/local build-backends BEFORE this point (defense in depth).
+        cmd = [uv, "tool", "install", "--no-build", "--quiet", name]
     else:
         raise RuntimeError(f"ecosistema no soportado para prefetch: {ecosystem!r}")
 
@@ -5707,54 +5793,17 @@ def _prefetch_mcp_package(server_id: str, argv: list[str]) -> None:
 
 
 def _prefetch_git_mcp(server_id: str, git_spec: str) -> None:
-    """Clone + build a git+https MCP tool into the shared uv cache (TRUSTED daemon path).
+    """REJECTED — git+https MCPs are not installable (security-review 2026-06-27, #1).
 
-    `uv tool install <git+https://…>` clones the repo over HTTPS into UV_CACHE_DIR and
-    builds the tool exactly as the runtime `uvx --offline` invocation will resolve it. The
-    network reach here is the git host only (the daemon has host-netns WAN); the RUNTIME
-    netns stays default-deny (the clone already happened — the runtime needs no git/registry
-    network). Raises RuntimeError on failure (FAIL-CLOSED — the caller refuses to add the
-    server). Never RuntimeErrors merely because the spec is git-based (the PASS-3 bug).
+    Installing a git source requires a PEP 517 BUILD that runs the repo's
+    setup.py / build-backend / build-deps as hermes in the host netns — an unvetted
+    RCE no static scan can gate (red-team proved 8 bypasses). The gate
+    (_scanner_can_analyze_argv) already rejects git argv before prefetch; this is the
+    fail-closed backstop. Only published registry packages (npm/pypi-with-wheel) install.
     """
-    import os as _os  # noqa: PLC0415
-    import shutil as _shutil  # noqa: PLC0415
-    import subprocess as _subprocess  # noqa: PLC0415
-
-    host = _git_host_from_spec(git_spec)
-    if host is None:
-        raise RuntimeError(f"git+https sin host parseable: {git_spec!r}")
-
-    uv = _shutil.which("uv")
-    if not uv:
-        raise RuntimeError("uv no está disponible para clonar el MCP git")
-
-    env = dict(_os.environ)
-    env["UV_CACHE_DIR"] = _MCP_UV_CACHE
-
-    # `uv tool install <git-url>` clones over HTTPS + builds into the shared cache. The
-    # spec is a fixed list (no shell); the URL was gate-validated as git+https.
-    cmd = [uv, "tool", "install", "--quiet", git_spec]
-    try:
-        result = _subprocess.run(  # noqa: S603 — cmd is a fixed list, no shell
-            cmd,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=_MCP_PREFETCH_TIMEOUT_S,
-            check=False,
-        )
-    except (OSError, _subprocess.TimeoutExpired) as exc:
-        raise RuntimeError(f"clone del MCP git falló: {exc}") from exc
-    if result.returncode != 0:
-        tail = (result.stderr or result.stdout or "").strip()[-500:]
-        raise RuntimeError(
-            f"clone del MCP git '{git_spec}' falló (rc={result.returncode}): {tail}"
-        )
-    # FIX raíz MCP: cache uv group-writable para que `uvx --offline` (hermes-sandbox) escriba.
-    _grant_cache_group_write(_MCP_UV_CACHE)
-    logger.info(
-        "hermes.dbus.mcp_git_prefetched server=%s git_host=%s spec=%s",
-        server_id, host, git_spec,
+    raise RuntimeError(
+        f"MCP por git+https no soportado ({git_spec!r}): su instalación construye "
+        "código no vettable. Usa un paquete publicado (npm/pypi)."
     )
 
 

@@ -21,10 +21,19 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from hermes.config_sync.applier import ApplyResult
 from hermes.config_sync.policy_document import PolicyBundle, PolicyPayload, signing_bytes
-from hermes.config_sync.__main__ import _sync_once
+from hermes.config_sync.__main__ import _policy_url, _sync_once
 from hermes.instance.association_store import InstanceAssociation
 
 pytestmark = pytest.mark.unit
+
+
+def test_policy_url_carries_applied_version_heartbeat() -> None:
+    """Each poll reports the currently-applied version so Fleet shows real
+    convergence (published vs applied), not just what was published."""
+    url = _policy_url("https://cloud.test/lumen-control/", "inst-1", 7)
+    assert url == "https://cloud.test/lumen-control/v1/policy?instance_id=inst-1&applied_version=7"
+    # Default (not yet applied anything) reports 0 — backward-compatible.
+    assert _policy_url("https://cloud.test", "inst-1").endswith("&applied_version=0")
 
 
 # ---------------------------------------------------------------------------

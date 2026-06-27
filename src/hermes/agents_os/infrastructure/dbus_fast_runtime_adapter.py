@@ -64,7 +64,9 @@ _AGENT_DRAFT_ALLOWED_KEYS = frozenset({
     "name", "role", "register", "primary_mission", "instructions",
     "color", "language", "golden_rules", "forbidden_phrases",
     "autonomy_level", "agent_id",
-    "department",  # nullable string; null → "mis-agentes" bucket in the roster
+    "department",       # nullable string; null → "mis-agentes" bucket in the roster
+    "provider_alias",   # nullable; non-null → per-agent provider binding (Fase 3c)
+    "managed_by",       # nullable; "cloud" → config-sync applier owns this agent (Fase 4)
 })
 
 # Allow-list of keys accepted in a house rule (Fix-10).
@@ -837,8 +839,17 @@ class Runtime1ServiceInterface(ServiceInterface):
         pasó el gate de operador (_resolve_current_sender_uid + _authorize_and_resolve).
         """
         sender_uid = await self._resolve_current_sender_uid()
-        return json.dumps(self._wiring.install_hub_skill(
-            identifier=identifier, sender_uid=sender_uid, force=bool(force)))
+        # Offload: install_hub_skill runs the networked content+CVE scan INLINE (before it
+        # spawns its worker thread), so on the daemon loop it froze chat/all D-Bus for the
+        # whole scan. (red-team round-2 2026-06-27)
+        import asyncio as _asyncio  # noqa: PLC0415
+        from functools import partial  # noqa: PLC0415
+        result = await _asyncio.get_running_loop().run_in_executor(
+            None,
+            partial(self._wiring.install_hub_skill,
+                    identifier=identifier, sender_uid=sender_uid, force=bool(force)),
+        )
+        return json.dumps(result)
 
     @method()
     async def UninstallHubSkill(self, name: "s") -> "s":  # noqa: N802,F821,UP037
@@ -880,9 +891,16 @@ class Runtime1ServiceInterface(ServiceInterface):
     async def InstallPackage(self, source: "s", package_id: "s") -> "s":  # noqa: N802,F821,UP037
         """Inicia instalación async. authZ operador. Devuelve {op_id} o {error}."""
         sender_uid = await self._resolve_current_sender_uid()
-        return json.dumps(self._wiring.install_package(
-            source=source, package_id=package_id, sender_uid=sender_uid
-        ))
+        # Offload: install_package runs the networked scan INLINE before start_install
+        # (red-team round-2 2026-06-27) — would freeze the daemon loop on the daemon path.
+        import asyncio as _asyncio  # noqa: PLC0415
+        from functools import partial  # noqa: PLC0415
+        result = await _asyncio.get_running_loop().run_in_executor(
+            None,
+            partial(self._wiring.install_package,
+                    source=source, package_id=package_id, sender_uid=sender_uid),
+        )
+        return json.dumps(result)
 
     @method()
     async def UninstallPackage(self, source: "s", package_id: "s") -> "s":  # noqa: N802,F821,UP037
@@ -1479,7 +1497,16 @@ class Runtime1ServiceInterface(ServiceInterface):
             self._wiring._authorize_and_resolve(sender_uid, operation="scan_install")
         except PermissionError as exc:
             raise DBusError("org.hermes.Error.Unauthorized", str(exc)) from exc
-        return self._wiring.scan_install(kind=k, identifier=ident)
+        # Offload off the daemon loop: scan_install → _run_scan_sync parks the calling
+        # thread on .result() for the whole networked scan. Inline, that FROZE the daemon
+        # event loop (the in-scanner asyncio.to_thread only frees await-path callers, not
+        # this sync-inline verb). Mirror the sibling verbs' run_in_executor pattern.
+        # (red-team 2026-06-27, finding #3 residual)
+        import asyncio as _asyncio  # noqa: PLC0415
+        from functools import partial  # noqa: PLC0415
+        return await _asyncio.get_running_loop().run_in_executor(
+            None, partial(self._wiring.scan_install, kind=k, identifier=ident),
+        )
 
     @method()
     async def ScanInstallDraft(self, draft_json: "s") -> "s":  # noqa: N802,F821,UP037
@@ -1488,7 +1515,12 @@ class Runtime1ServiceInterface(ServiceInterface):
         The UI gate: scans (no install), emits the score → InstallReview modal.
         Read-only, sin authZ (mismo patrón que ScanInstall — no muta nada).
         """
-        return self._wiring.scan_install_draft(draft_json=draft_json)
+        # Offload — same daemon-loop freeze as ScanInstall (red-team 2026-06-27).
+        import asyncio as _asyncio  # noqa: PLC0415
+        from functools import partial  # noqa: PLC0415
+        return await _asyncio.get_running_loop().run_in_executor(
+            None, partial(self._wiring.scan_install_draft, draft_json=draft_json),
+        )
 
     @method()
     async def GetSecurityPolicy(self) -> "s":  # noqa: N802,F821,UP037

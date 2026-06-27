@@ -203,15 +203,26 @@ _CLOUD_MANAGED = "cloud"
 class ApplyResult:
     """Outcome of one policy application pass.
 
-    `ok` is True only if zero entities failed.  The sync loop advances
-    `last_applied_version` only when `ok` is True (retry-on-failure).
+    `ok` is True only if zero entities had TRANSITORY failures.
+    The sync loop advances `last_applied_version` when `ok` is True.
+
+    `rejected` holds permanent policy/security rejections (e.g. a skill
+    blocked by the Security Center scan verdict FAIL).  These are NOT
+    retried and do NOT block version advancement — a permanently-rejected
+    entity will always be rejected on the next attempt, so preventing the
+    version from advancing would loop forever.
+
+    Invariant: a permanent rejection NEVER causes the blocked entity to be
+    installed.  Only `failed` (transitory) prevents version advancement.
     """
 
     applied: int = 0
     failed: list[str] = field(default_factory=list)
+    rejected: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
+        """True when there are no TRANSITORY failures (version can advance)."""
         return len(self.failed) == 0
 
 
@@ -378,11 +389,26 @@ class PolicyApplier:
     async def _apply_skills(
         self, skills: list[SkillSpec], result: ApplyResult
     ) -> None:
-        """Install hub skills (idempotent; daemon is no-op if already installed)."""
+        """Install hub skills (idempotent; daemon is no-op if already installed).
+
+        Permanent rejection: the daemon returns {"ok": False, "blocked": True, ...}
+        when the Security Center scan verdict is FAIL and auto_block_fail=True.
+        This is a sovereignty decision — the install MUST NOT happen and retrying
+        is pointless.  Record it as `rejected` so it does not block version advancement.
+
+        Transitory failure: any other ok:false response (daemon down, network,
+        unknown error) is recorded as `failed` and will be retried.
+        """
         for spec in skills:
             resp = await self._call_mutator("install_hub_skill", spec.identifier, False)
             if _is_ok_lenient(resp):
                 result.applied += 1
+            elif _is_permanent_rejection(resp):
+                logger.warning(
+                    "hermes.config_sync.applier.skill_permanently_rejected",
+                    extra={"identifier": spec.identifier},
+                )
+                result.rejected.append(f"skill:{spec.identifier}:scan_blocked")
             else:
                 result.failed.append(f"skill:{spec.identifier}")
 
@@ -418,7 +444,17 @@ class PolicyApplier:
     async def _apply_consents(
         self, consents: list[ConsentSpec], result: ApplyResult
     ) -> None:
-        """Grant LOW-risk consents.  HIGH-risk are skipped (human approval required)."""
+        """Grant LOW-risk consents.
+
+        Consent semantics (sovereignty model):
+        - HIGH-risk consents (terminal_exec, file_write, …): always operator-gated
+          — recorded as pending_operator so the version can still advance.
+        - LOW-risk consents: attempted via D-Bus.  Operator-gated failures
+          (authorization/permission denied — by design, as config_sync uid is not
+          in authorized_uids for grant_consent) are classified as pending_operator,
+          NOT transitory failed.  Only genuine transitory failures (daemon down,
+          unknown error) block version advancement.
+        """
         existing = await self._proxy.call_list("list_consents")
         existing_caps = {c.get("capability", "") for c in existing}
 
@@ -428,17 +464,22 @@ class PolicyApplier:
                     "hermes.config_sync.applier.high_risk_consent_skipped",
                     extra={"capability": spec.capability},
                 )
-                result.failed.append(f"consent:high_risk:{spec.capability}")
+                result.rejected.append(f"consent:pending_operator:{spec.capability}")
                 continue
             if spec.capability in existing_caps:
                 result.applied += 1
                 continue
-            resp = await self._call_mutator(
-                "grant_consent", spec.capability, spec.scope
+            resp, is_auth_failure = await self._call_grant_consent(
+                spec.capability, spec.scope
             )
-            # P2: strict check for consent — None/{} not treated as success.
             if _is_ok_strict(resp):
                 result.applied += 1
+            elif is_auth_failure:
+                logger.info(
+                    "hermes.config_sync.applier.consent_pending_operator",
+                    extra={"capability": spec.capability},
+                )
+                result.rejected.append(f"consent:pending_operator:{spec.capability}")
             else:
                 result.failed.append(f"consent:{spec.capability}")
 
@@ -532,6 +573,43 @@ class PolicyApplier:
             )
             return []
 
+    async def _call_grant_consent(
+        self, capability: str, scope: str
+    ) -> tuple[dict, bool]:
+        """Call grant_consent, distinguishing authorization failures from transitory ones.
+
+        Returns (response_dict, is_auth_failure).
+
+        is_auth_failure=True when the daemon rejected the call because the
+        config_sync process uid is not in authorized_uids (operator-gating by
+        design — not a bug, not a transitory failure).  Detected by inspecting
+        the HTTP status on HTTPException (401) or the error text on AgentUnavailable
+        and raw DBusError/PermissionError.
+
+        is_auth_failure=False on genuine transitory failures (daemon down, network,
+        parse error) — these remain in result.failed and block version advancement.
+        """
+        if "grant_consent" not in _ALLOWED_VERBS:
+            return {"ok": False, "error": "verb_not_in_allowlist"}, False
+
+        try:
+            raw = await self._proxy.call_mutator("grant_consent", capability, scope)
+            resp = raw if isinstance(raw, dict) else {"ok": bool(raw)}
+            return resp, False
+        except Exception as exc:  # noqa: BLE001
+            is_auth = _is_authorization_error(exc)
+            if is_auth:
+                logger.info(
+                    "hermes.config_sync.applier.consent_operator_gated",
+                    extra={"capability": capability, "reason": type(exc).__name__},
+                )
+            else:
+                logger.warning(
+                    "hermes.config_sync.applier.consent_mutator_failed",
+                    extra={"capability": capability, "reason": str(exc)},
+                )
+            return {"ok": False}, is_auth
+
     async def _call_mutator(self, verb: str, *args: Any) -> dict:
         """Call a D-Bus mutator guarded by the allow-list.  Never raises."""
         if verb not in _ALLOWED_VERBS:
@@ -597,6 +675,63 @@ def _is_high_risk_consent(capability: str) -> bool:
     return any(capability.startswith(prefix) for prefix in _HIGH_RISK_CONSENT_PREFIXES)
 
 
+def _is_authorization_error(exc: Exception) -> bool:
+    """Return True when exc signals an operator-gating / authorization failure.
+
+    Operator-gated = the daemon rejected the call because the config_sync
+    service uid is not in authorized_uids for grant_consent.  This is permanent
+    by design (the policy does not change between retries), so the consent should
+    be classified as pending_operator, not as a transitory failure.
+
+    Detection heuristic (no hard import of fastapi/dbus_fast to stay dependency-free):
+    1. HTTPException with status_code == 401 (raised by _translate_dbus_error in
+       DbusRuntimeProxy when it sees org.hermes.Error.Unauthorized).
+    2. PermissionError (Python built-in — raised directly by the wiring authorize path
+       in tests / in-process calls).
+    3. Exception message contains auth/permission keywords from the D-Bus error name
+       or from AgentUnavailable carrying the D-Bus error text.
+    """
+    # Case 1: fastapi HTTPException (no import — check via attribute).
+    status = getattr(exc, "status_code", None)
+    if status == 401:
+        return True
+
+    # Case 2: Python PermissionError.
+    if isinstance(exc, PermissionError):
+        return True
+
+    # Case 3: message-based heuristic (AgentUnavailable wrapping the D-Bus error,
+    # or DbusAuthorizationError message).
+    msg = str(exc).lower()
+    return (
+        "unauthorized" in msg
+        or "not authorized" in msg
+        or "rejected send message" in msg
+        or "authz_denied" in msg
+        or "no autorizado" in msg
+    )
+
+
+def _is_permanent_rejection(result: dict | bool | None) -> bool:
+    """Return True when the daemon signals a permanent policy/security rejection.
+
+    Criterion: {"ok": False, "blocked": True, ...} — the Security Center scan
+    verdict FAIL (auto_block_fail=True) or a WARN without owner override.
+    This shape is produced exclusively by install_hub_skill (and add_mcp_server)
+    in DbusRuntimeServiceWiring._scan_hub_target / _scan_install_target.
+
+    A permanent rejection NEVER becomes transitory on retry — the scan verdict
+    is cached and the policy has not changed.  The applier records it in
+    `result.rejected` so the sync version can still advance.
+
+    Invariant: this function NEVER forces an install.  It only classifies
+    whether a failure is worth retrying.
+    """
+    if not isinstance(result, dict):
+        return False
+    return result.get("ok") is False and result.get("blocked") is True
+
+
 def _agent_draft(spec: AgentSpec) -> dict:
     return {
         "name": spec.name,
@@ -615,6 +750,12 @@ def _agent_draft(spec: AgentSpec) -> dict:
 
 
 def _provider_draft(spec: ProviderSpec) -> dict:
+    """Build the draft dict sent to add_provider / update_provider.
+
+    api_key is included when the cloud bundle carries one.  The daemon
+    stores it encrypted in the SecretsVault — identical to how a locally-
+    configured key is stored.  NEVER log or expose the key here.
+    """
     draft: dict = {
         "kind": spec.kind,
         "alias": spec.alias,
@@ -623,4 +764,6 @@ def _provider_draft(spec: ProviderSpec) -> dict:
     }
     if spec.base_url:
         draft["base_url"] = spec.base_url
+    if spec.api_key:
+        draft["api_key"] = spec.api_key
     return draft

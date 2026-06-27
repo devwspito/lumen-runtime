@@ -236,9 +236,27 @@ _EVIDENCE_MAX = 160
 #       sinks an attacker uses so no `-o`/`>` appears on the fetch itself.
 # Both land the remote bytes on disk, where a later step executes them — the
 # "download" half of a split dropper.
+# Output-flag alternation is CLUSTER-AWARE: short flags bundle, and the value-bearing
+# letter is the LAST in the cluster — `-o`, `-so`, `-fsSLo`, `-qo` all take the file
+# operand. `\s-[a-zA-Z]*o[=\s]` matches the lowercase value form; `\s-[a-zA-Z]*O\b` the
+# uppercase default-name form (no value). Without this, `curl -fsSLo /tmp/x …; bash /tmp/x`
+# evaded the split-dropper correlation (security-review 2026-06-27, finding #4).
 _FETCH_TO_FILE = (
     _FETCH + r"\b[^\n;|&]*?"
-    r"(?:\s-o\s|\s--output[=\s]|\s-O\b|\s>\s|\s>>\s|\s-OutFile\b)"
+    r"(?:"
+    # LONG flags FIRST — else the generic short-`o` branch hijacks `-OutFile`/`--output`
+    # (matching `-`+empty+`O` then a value-lookahead at `u`, capturing `utFile`) and the
+    # real file is never seeded (red-team round-2 2026-06-27). PowerShell `-OutFile` takes
+    # a `:`/`=`/space separator.
+    r"\s-OutFile[:=\s]+"
+    r"|\s--output(?:-document)?[=\s]+"   # curl --output / wget --output-document (+=)
+    # then the short-flag cluster whose LAST letter is o/O — the value letter. The
+    # pre-cluster EXCLUDES o/O so [oO] is an unambiguous boundary, and the value may be
+    # ATTACHED (lookahead, consumes nothing → captured whole) or separated by `=`/space.
+    # Catches `-o F`, `-so F`, `-fsSLo F`, `-opayload.sh`, `-Opayload.sh`, `-fsSLO`.
+    r"|\s-[a-np-zA-NP-Z]*[oO](?:[=\s]+|(?=[\w/~.-]))"
+    r"|\s>\s|\s>>\s"
+    r")"
     r"\s*\$?[\"']?(?P<dropfile>[^\s\"';|&]+)"
 )
 _FETCH_TO_FILE_RE = re.compile(_FETCH_TO_FILE, re.IGNORECASE)

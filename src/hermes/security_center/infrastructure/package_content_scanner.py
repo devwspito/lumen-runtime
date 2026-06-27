@@ -34,6 +34,7 @@ still applies.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import re
@@ -188,6 +189,19 @@ _NPM_RUN_ON_INSTALL_HOOKS = ("preinstall", "install", "postinstall")
 # dev-only hook ONLY when the command itself is malicious, and never block on it.
 _NPM_DEV_ONLY_HOOKS = ("prepare", "prepublish", "prepublishOnly")
 
+# PyPI build-backends whose code is NOT attacker-supplied. A PEP 517 build runs the
+# backend's code at install/build time (the pypi parallel of npm postinstall), so a
+# NON-STANDARD backend — or a LOCAL in-tree backend (backend-path) — means the sdist
+# ships arbitrary build code that runs unattended. Allowlist the well-known backends;
+# anything else is default-deny. (security-review 2026-06-27, finding #2)
+_STANDARD_PYPI_BUILD_BACKENDS = frozenset({
+    "setuptools.build_meta", "setuptools.build_meta:__legacy__",
+    "hatchling.build", "flit_core.buildapi", "flit.buildapi",
+    "poetry.core.masonry.api", "poetry.masonry.api",
+    "pdm.backend", "pdm.pep517.api",
+    "maturin", "scikit_build_core.build", "mesonpy",
+})
+
 # Inline code-execution forms a benign install hook never needs: an interpreter fed
 # a one-liner (-e/--eval/-p/-c/--require/--import) or an obfuscation primitive
 # (eval/atob/fromCharCode/Buffer.from(base64)/Function). In a RUNS-ON-INSTALL hook
@@ -234,8 +248,16 @@ class PackageContentScanner:
             # with no package). Stay silent — do NOT manufacture a clean score.
             return []
         ecosystem, name, version = coord
+        # Offload the BLOCKING work (sync httpx fetch + CPU-bound extract/regex) off the
+        # event loop. The scanner OWNS its blocking I/O, so fixing it here protects EVERY
+        # caller — the terminal review path (security_center_install_reviewer) awaited this
+        # directly and froze the daemon loop for the whole bounded download. asyncio.to_thread
+        # is correct from a running daemon loop AND from _run_scan_sync's fresh per-thread loop
+        # (it just nests one short-lived worker). (security-review 2026-06-27, finding #3)
         try:
-            blob = await self._download_artifact(ecosystem, name, version)
+            blob = await asyncio.to_thread(
+                self._download_artifact, ecosystem, name, version
+            )
         except _Unanalyzable as exc:
             # SECURITY-FIRST: we were asked to inspect a real package and could
             # not. Absence of analysis is treated as risk, never as PASS.
@@ -259,7 +281,7 @@ class PackageContentScanner:
                 ),
                 evidence_ref=f"content:error:{ecosystem}:{name}",
             )]
-        return self._analyze_blob(ecosystem, name, blob)
+        return await asyncio.to_thread(self._analyze_blob, ecosystem, name, blob)
 
     # ------------------------------------------------------------------
     # Coordinate resolution
@@ -441,7 +463,7 @@ class PackageContentScanner:
             headers={"Accept": "application/json"},
         )
 
-    async def _download_artifact(self, eco: str, name: str, version: str) -> bytes:
+    def _download_artifact(self, eco: str, name: str, version: str) -> bytes:
         """Resolve the tarball URL from the registry and download it (bounded)."""
         if eco == "npm":
             url = self._npm_tarball_url(name, version)
@@ -585,7 +607,8 @@ class PackageContentScanner:
         return low.endswith((
             ".js", ".cjs", ".mjs", ".ts", ".json",
             ".py", ".pyi", ".sh", ".cfg", ".toml", ".ini",
-        )) or low.endswith("package.json") or low.endswith("setup.py")
+        )) or low.endswith("package.json") or low.endswith("setup.py") \
+            or low.endswith("setup.cfg") or low.endswith("pyproject.toml")
 
     def _check_install_hooks(self, eco: str, files: dict[str, bytes]) -> list[Risk]:
         risks: list[Risk] = []
@@ -710,30 +733,94 @@ class PackageContentScanner:
         return risks
 
     def _pypi_hooks(self, files: dict[str, bytes]) -> list[Risk]:
+        """The REAL PEP 517 install surface: pyproject.toml [build-system] + setup.cfg +
+        setup.py. A `uv tool install` BUILDS the package, running the backend's code — so
+        a non-standard / local (backend-path) build-backend is the pypi parallel of the
+        npm postinstall RCE. (security-review 2026-06-27, finding #2)
+        """
+        risks: list[Risk] = []
         for path, data in files.items():
             base = path.rsplit("/", 1)[-1]
-            if base != "setup.py":
-                continue
             text = data.decode("utf-8", "replace")
-            # setup.py runs arbitrary Python at install time; custom cmdclass /
-            # install subclasses are the pypi equivalent of postinstall.
-            if re.search(r"cmdclass\s*=|class\s+\w+\(install\)|class\s+\w+\(.*PostInstall", text):
-                return [Risk(
-                    category="content",
-                    severity=Severity.CRITICAL,
-                    message=(
-                        "setup.py define un cmdclass/install personalizado — código "
-                        "que se ejecuta al instalar (hook de instalación pypi)."
-                    ),
-                    evidence_ref="content:pypi_install_hook:setup_cmdclass",
-                )]
-            if re.search(r"os\.system|subprocess|urllib|requests|socket", text):
-                return [Risk(
-                    category="content",
-                    severity=Severity.HIGH,
-                    message="setup.py invoca red/proceso al instalar (ejecución no interactiva).",
-                    evidence_ref="content:pypi_install_hook:setup_side_effect",
-                )]
+            if base == "pyproject.toml":
+                risks.extend(self._pyproject_build_backend_risks(text))
+            elif base == "setup.py":
+                risks.extend(self._setup_py_risks(text))
+            elif base == "setup.cfg":
+                risks.extend(self._setup_cfg_risks(text))
+        return risks
+
+    @staticmethod
+    def _pyproject_build_backend_risks(text: str) -> list[Risk]:
+        # Parse the REAL TOML, not line-regexes (red-team 2026-06-27): the inline-table
+        # form `build-system = { build-backend = "evil", backend-path = ["."] }`, a
+        # multi-line/triple-quoted value, and an ABSENT build-backend key (→ PEP 517
+        # defaults to setuptools + runs setup.py) all evaded the line-anchored regexes.
+        # tomllib reads the table uniformly; an unparseable pyproject is fail-closed
+        # (the build frontend may still parse + build it).
+        import tomllib  # noqa: PLC0415
+        try:
+            data = tomllib.loads(text)
+        except Exception:  # noqa: BLE001 — TOMLDecodeError or any malformation
+            return [Risk(
+                category="content", severity=Severity.CRITICAL,
+                message="pyproject.toml no es TOML válido — no inspeccionable, tratado como riesgo.",
+                evidence_ref="content:pypi_build_hook:unparseable",
+            )]
+        bs = data.get("build-system")
+        bs = bs if isinstance(bs, dict) else {}
+        backend = bs.get("build-backend")
+        risks: list[Risk] = []
+        if "backend-path" in bs:
+            risks.append(Risk(
+                category="content", severity=Severity.CRITICAL,
+                message=(
+                    "pyproject.toml declara backend-path (build-backend LOCAL en el sdist) — "
+                    "código arbitrario que se ejecuta al CONSTRUIR el paquete (equivalente "
+                    "pypi del postinstall)."
+                ),
+                evidence_ref="content:pypi_build_hook:backend_path",
+            ))
+        if isinstance(backend, str) and backend.strip() not in _STANDARD_PYPI_BUILD_BACKENDS:
+            risks.append(Risk(
+                category="content", severity=Severity.CRITICAL,
+                message=(
+                    f"pyproject.toml usa un build-backend NO estándar '{backend}' — su "
+                    "código corre al construir el paquete (hook de build pypi)."
+                ),
+                evidence_ref="content:pypi_build_hook:nonstandard_backend",
+            ))
+        return risks
+
+    @staticmethod
+    def _setup_py_risks(text: str) -> list[Risk]:
+        # setup.py runs arbitrary Python at install/build time; custom cmdclass / install
+        # subclasses are the pypi equivalent of postinstall.
+        if re.search(r"cmdclass\s*=|class\s+\w+\(install\)|class\s+\w+\(.*PostInstall", text):
+            return [Risk(
+                category="content", severity=Severity.CRITICAL,
+                message=(
+                    "setup.py define un cmdclass/install personalizado — código que se "
+                    "ejecuta al instalar (hook de instalación pypi)."
+                ),
+                evidence_ref="content:pypi_install_hook:setup_cmdclass",
+            )]
+        if re.search(r"os\.system|subprocess|urllib|requests|socket", text):
+            return [Risk(
+                category="content", severity=Severity.HIGH,
+                message="setup.py invoca red/proceso al instalar (ejecución no interactiva).",
+                evidence_ref="content:pypi_install_hook:setup_side_effect",
+            )]
+        return []
+
+    @staticmethod
+    def _setup_cfg_risks(text: str) -> list[Risk]:
+        if re.search(r"(?m)^\s*cmdclass\s*=", text):
+            return [Risk(
+                category="content", severity=Severity.CRITICAL,
+                message="setup.cfg declara cmdclass — hook de instalación pypi.",
+                evidence_ref="content:pypi_install_hook:cfg_cmdclass",
+            )]
         return []
 
     def _check_source_patterns(self, files: dict[str, bytes]) -> list[Risk]:

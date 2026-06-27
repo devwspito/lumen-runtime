@@ -93,6 +93,12 @@ def _draft(name: str = "Test") -> object:
     return draft_from_dict({"name": name})
 
 
+def _cloud_draft(name: str = "Test") -> object:
+    """A cloud-managed agent — the only kind that consumes a per-agent license
+    seat. The CE roster + locally-created agents are bundled and never count."""
+    return draft_from_dict({"name": name, "managed_by": "cloud"})
+
+
 # ---------------------------------------------------------------------------
 # create_agent — CE (no association_store)
 # ---------------------------------------------------------------------------
@@ -164,24 +170,47 @@ class TestCreateAgentLicenseExceeded:
     def test_raises_license_exceeded_when_at_max(
         self, registry: SqliteAgentRegistry
     ) -> None:
-        current = len(registry.list_agents())
-        store = _make_store(max_agents=current)
+        # The license caps cloud-managed agents only. Fill the single seat with a
+        # cloud-managed agent, then a second cloud-managed agent must be rejected.
+        store = _make_store(max_agents=1)
         w = _wiring(registry, association_store=store)
+        asyncio.run(w.create_agent(draft=_cloud_draft("Cloud-1"), sender_uid=_OPERATOR_UID))
         with pytest.raises(LicenseExceeded):
-            asyncio.run(w.create_agent(draft=_draft("X"), sender_uid=_OPERATOR_UID))
+            asyncio.run(w.create_agent(draft=_cloud_draft("Cloud-2"), sender_uid=_OPERATOR_UID))
 
     def test_no_agent_created_when_exceeded(
         self, registry: SqliteAgentRegistry
     ) -> None:
         """Invariant: no data is created when limit is reached."""
-        current = len(registry.list_agents())
-        store = _make_store(max_agents=current)
+        store = _make_store(max_agents=1)
         w = _wiring(registry, association_store=store)
+        asyncio.run(w.create_agent(draft=_cloud_draft("Cloud-1"), sender_uid=_OPERATOR_UID))
+        after_first = len(registry.list_agents())
         try:
-            asyncio.run(w.create_agent(draft=_draft("Y"), sender_uid=_OPERATOR_UID))
+            asyncio.run(w.create_agent(draft=_cloud_draft("Cloud-2"), sender_uid=_OPERATOR_UID))
         except LicenseExceeded:
             pass
-        assert len(registry.list_agents()) == current  # no agent was created
+        assert len(registry.list_agents()) == after_first  # no agent was created
+
+    def test_local_agents_do_not_consume_license_seats(
+        self, registry: SqliteAgentRegistry
+    ) -> None:
+        """FIX 3: only cloud-managed agents count against the per-agent license.
+        The CE roster + locally-created agents never consume a seat — otherwise a
+        fresh associate (28 default agents) would exceed any small license."""
+        store = _make_store(max_agents=1)
+        w = _wiring(registry, association_store=store)
+        # Local agents create freely even with a 1-seat license...
+        asyncio.run(w.create_agent(draft=_draft("Local-1"), sender_uid=_OPERATOR_UID))
+        asyncio.run(w.create_agent(draft=_draft("Local-2"), sender_uid=_OPERATOR_UID))
+        # ...and the single cloud seat is still available.
+        created = asyncio.run(
+            w.create_agent(draft=_cloud_draft("Cloud-1"), sender_uid=_OPERATOR_UID)
+        )
+        assert created["name"] == "Cloud-1"
+        # The 2nd cloud-managed agent exceeds the 1-seat license.
+        with pytest.raises(LicenseExceeded):
+            asyncio.run(w.create_agent(draft=_cloud_draft("Cloud-2"), sender_uid=_OPERATOR_UID))
 
     def test_default_agent_untouched_when_exceeded(
         self, registry: SqliteAgentRegistry

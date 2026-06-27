@@ -77,6 +77,9 @@ class ProviderSpec(BaseModel):
     """Cloud-managed LLM provider.
 
     base_url is validated against the SSRF blocklist in the applier (P2).
+    api_key is optional — present when the enterprise configures the provider
+    key centrally.  It travels in the Ed25519-signed bundle over HTTPS and is
+    stored in the associate's SecretsVault on landing.  NEVER logged.
     """
 
     alias: str = Field(min_length=1, max_length=120)
@@ -84,6 +87,8 @@ class ProviderSpec(BaseModel):
     default_model: str = Field(min_length=1, max_length=256)
     base_url: str | None = Field(default=None, max_length=1024)
     set_active: bool = False
+    # Enterprise-supplied API key — signed by the cloud, stored in vault on landing.
+    api_key: str | None = Field(default=None, max_length=512)
 
 
 # ---------------------------------------------------------------------------

@@ -94,8 +94,14 @@ def _interval_s() -> int:
         return _DEFAULT_INTERVAL_S
 
 
-def _policy_url(cloud_endpoint: str, instance_id: str) -> str:
-    return f"{cloud_endpoint.rstrip('/')}/v1/policy?instance_id={instance_id}"
+def _policy_url(cloud_endpoint: str, instance_id: str, applied_version: int = 0) -> str:
+    # applied_version is the heartbeat: on each poll we tell the cloud which
+    # version we currently have applied, so the Fleet view shows real convergence
+    # (published vs applied), not just what was published.
+    return (
+        f"{cloud_endpoint.rstrip('/')}/v1/policy"
+        f"?instance_id={instance_id}&applied_version={applied_version}"
+    )
 
 
 def _endpoint_is_safe(endpoint: str) -> bool:
@@ -225,7 +231,7 @@ async def _sync_once(
         logger.warning("hermes.config_sync.no_instance_secret")
         return
 
-    url = _policy_url(assoc.cloud_endpoint, assoc.instance_id)
+    url = _policy_url(assoc.cloud_endpoint, assoc.instance_id, assoc.last_applied_version)
     bundle = _fetch_bundle(url=url, instance_secret=instance_secret)
     if bundle is None:
         return
