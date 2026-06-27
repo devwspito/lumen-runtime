@@ -101,6 +101,7 @@ _ALLOWED_VERBS: frozenset[str] = frozenset(
         # Provider management
         "add_provider",
         "update_provider",
+        "delete_provider",  # reconciliation: drop cloud providers absent from bundle
         # Composio integration
         "set_composio_api_key",
         "get_composio_status",
@@ -286,12 +287,17 @@ class PolicyApplier:
     async def _apply_providers(
         self, providers: list[ProviderSpec], result: ApplyResult
     ) -> None:
-        """Upsert cloud providers.  No delete in Fase 4 (follow-up: managed_by).
+        """Upsert cloud providers, then reconcile (the cloud owns the set).
 
         P2: base_url validated against SSRF blocklist before calling the daemon.
 
         UpdateProvider requires (provider_id, draft_json): the existing list is
         indexed by alias to retrieve the provider_id before calling the verb.
+
+        Reconciliation: any provider previously stamped managed_by="cloud" whose
+        alias is no longer in the bundle is deleted — so removing a provider in
+        the console removes it on the associate. Locally-owned providers
+        (managed_by=None) are never touched.
         """
         existing = await self._proxy.call_list("list_providers")
         existing_by_alias = {p.get("alias", ""): p for p in existing}
@@ -318,6 +324,18 @@ class PolicyApplier:
                 result.applied += 1
             else:
                 result.failed.append(f"provider:{spec.alias}")
+
+        # Reconcile: drop cloud-managed providers the bundle no longer lists.
+        bundle_aliases = {spec.alias for spec in providers}
+        for p in existing:
+            if p.get("managed_by") != "cloud" or p.get("alias", "") in bundle_aliases:
+                continue
+            pid = p.get("provider_id", "")
+            resp = await self._call_mutator("delete_provider", pid)
+            if _is_ok_lenient(resp):
+                result.applied += 1
+            else:
+                result.failed.append(f"provider:delete:{p.get('alias', '')}")
 
     async def _apply_integrations(
         self, integrations: list[IntegrationSpec], result: ApplyResult
@@ -761,6 +779,10 @@ def _provider_draft(spec: ProviderSpec) -> dict:
         "alias": spec.alias,
         "default_model": spec.default_model,
         "set_active": spec.set_active,
+        # Stamp ownership so the daemon marks the row cloud-managed: the local
+        # operator may not edit/delete it, and the applier can reconcile stale
+        # cloud providers. Mirrors how cloud agents carry managed_by="cloud".
+        "managed_by": "cloud",
     }
     if spec.base_url:
         draft["base_url"] = spec.base_url

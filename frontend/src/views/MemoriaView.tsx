@@ -9,7 +9,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { sileo } from 'sileo'
-import { Brain, Search, Trash2 } from 'lucide-react'
+import { Brain, CalendarClock, ChevronRight, Search, Trash2 } from 'lucide-react'
 import { listMemory, searchMemory, forgetMemoryItem, getMemoryEntry, ApiError } from '../api/client'
 import type { MemoryItem, MemoryEntryDetail } from '../api/types'
 import { Drawer } from '../components/ui/Drawer'
@@ -27,6 +27,7 @@ import {
   motion,
   TWEEN,
 } from '../components/ui/motion'
+import styles from './MemoriaView.module.css'
 
 // ── State machine ─────────────────────────────────────────────────────────────
 
@@ -60,6 +61,39 @@ function entryId(item: MemoryItem): string {
   return target ? `${target}:${idx}` : ''
 }
 
+// ── Skeleton rows (mirrors final item layout) ─────────────────────────────────
+
+function MemorySkeletonRows() {
+  return (
+    <div className={styles.skeletonList} aria-busy="true" aria-label="Cargando entradas de memoria">
+      {[80, 65, 72, 55].map((w, i) => (
+        <div
+          key={i}
+          className={styles.skeletonRow}
+          style={{ animationDelay: `${i * 40}ms` }}
+        >
+          <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
+            <div
+              className="skeleton"
+              style={{ width: 28, height: 28, borderRadius: 'var(--radius-sm)', flexShrink: 0 }}
+            />
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div
+                className="skeleton skeleton--line"
+                style={{ width: `${w}%` }}
+              />
+              <div
+                className="skeleton skeleton--line-sm"
+                style={{ width: '40%' }}
+              />
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 // ── Memory row ────────────────────────────────────────────────────────────────
 
 interface MemoryRowProps {
@@ -74,15 +108,39 @@ function MemoryRow({ item, index, onClick }: MemoryRowProps) {
 
   return (
     <HoverRow
-      className="memory-item memory-item--clickable"
+      className={`memory-item ${styles.memItem}`}
       role="button"
       tabIndex={0}
       onClick={onClick}
       onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick() } }}
       aria-label={`Entrada de memoria ${index + 1}${item.target ? ` — ${item.target}` : ''}`}
     >
-      <div className="memory-item__content">{content}</div>
-      {time && <div className="memory-item__time">{time}</div>}
+      {/* Left icon chip */}
+      <span className={styles.memIcon} aria-hidden="true">
+        <Brain size={13} />
+      </span>
+
+      {/* Body */}
+      <div className={styles.memBody}>
+        <p className={styles.memContent}>{content || '(sin contenido)'}</p>
+        {(item.target || time) && (
+          <div className={styles.memMeta}>
+            {item.target && (
+              <span className={styles.memTarget}>{item.target}</span>
+            )}
+            {time && (
+              <span className={styles.memTime}>{time}</span>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Chevron affordance */}
+      <ChevronRight
+        size={13}
+        className={styles.memChevron}
+        aria-hidden="true"
+      />
     </HoverRow>
   )
 }
@@ -124,7 +182,6 @@ export default function MemoriaView() {
     setDrawer({ open: true, item, detail: null, loading: true })
     const id = entryId(item)
     if (!id) {
-      // No resolvable ID — show what we have without fetching
       setDrawer({ open: true, item, detail: null, loading: false })
       return
     }
@@ -132,7 +189,6 @@ export default function MemoriaView() {
       const detail = await getMemoryEntry(id)
       setDrawer(prev => prev.open ? { ...prev, detail, loading: false } : prev)
     } catch {
-      // Show truncated content as fallback
       setDrawer(prev => prev.open ? { ...prev, detail: null, loading: false } : prev)
     }
   }
@@ -161,6 +217,7 @@ export default function MemoriaView() {
 
   const isSuccess = state.status === 'success'
   const activeQuery = isSuccess ? state.query : ''
+  const itemCount = isSuccess ? state.items.length : 0
 
   // The list key changes when the query changes so AnimatePresence fires a
   // cross-fade between the old and new result sets.
@@ -174,34 +231,29 @@ export default function MemoriaView() {
       />
 
       <div className="view-body cv-view-body">
-        <Stagger style={{ display: 'flex', flexDirection: 'column', gap: 'var(--sp-8)' }}>
+        <Stagger style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
 
-          {/* Search */}
+          {/* ── Search ──────────────────────────────────────────────────────── */}
           <StaggerItem>
-            <section className="cv-section" aria-label="Buscar en memoria">
-              <div className="cv-search-row">
-                <label className="sr-only" htmlFor="memory-search">Buscar en memoria</label>
-                <div style={{ position: 'relative', flex: 1 }}>
+            <div className={styles.searchPanel} role="search" aria-label="Buscar en memoria">
+              <div className={styles.searchRow}>
+                <div className={styles.searchInputWrap}>
                   <Search
-                    size={14}
+                    size={13}
                     aria-hidden="true"
-                    style={{
-                      position: 'absolute', left: 10, top: '50%',
-                      transform: 'translateY(-50%)', color: 'var(--ink4)',
-                      pointerEvents: 'none',
-                    }}
+                    className={styles.searchIcon}
                   />
+                  <label className="sr-only" htmlFor="memory-search">Buscar en memoria</label>
                   <input
                     id="memory-search"
                     ref={inputRef}
-                    className="cv-input"
+                    className={styles.searchInput}
                     type="search"
                     placeholder="Buscar en memoria…"
                     autoComplete="off"
                     value={searchInput}
                     onChange={e => setSearchInput(e.target.value)}
                     onKeyDown={e => { if (e.key === 'Enter') handleSearch() }}
-                    style={{ paddingLeft: 30 }}
                   />
                 </div>
                 <Button
@@ -213,29 +265,32 @@ export default function MemoriaView() {
                   Buscar
                 </Button>
               </div>
-            </section>
+            </div>
           </StaggerItem>
 
-          {/* Results */}
+          {/* ── Results ─────────────────────────────────────────────────────── */}
           <StaggerItem>
-            <section className="cv-section" aria-label="Entradas de memoria">
-              <h2 className="cv-section-label">
-                {activeQuery ? `Resultados para "${activeQuery}"` : 'Entradas recientes'}
-              </h2>
+            <section className={styles.resultsSection} aria-label="Entradas de memoria">
 
-              {state.status === 'loading' && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }} aria-busy="true">
-                  {[...Array(4)].map((_, i) => (
-                    <div key={i} className="cv-skeleton" style={{ height: 52 }} />
-                  ))}
-                </div>
-              )}
+              {/* Section header */}
+              <div className={styles.sectionHead}>
+                <h2 className={styles.sectionLabel}>
+                  {activeQuery ? `Resultados para "${activeQuery}"` : 'Entradas recientes'}
+                </h2>
+                {isSuccess && itemCount > 0 && (
+                  <span className={styles.countChip}>{itemCount}</span>
+                )}
+              </div>
 
+              {/* Loading skeleton */}
+              {state.status === 'loading' && <MemorySkeletonRows />}
+
+              {/* Error state */}
               {state.status === 'error' && (
                 <FadeIn>
-                  <div role="alert">
-                    <p className="state-error">{state.message}</p>
-                    <Button variant="secondary" size="sm" onClick={handleRetry} style={{ marginTop: 8 }}>
+                  <div role="alert" className={styles.errorState}>
+                    <p className={styles.errorMessage}>{state.message}</p>
+                    <Button variant="secondary" size="sm" onClick={handleRetry}>
                       Reintentar
                     </Button>
                   </div>
@@ -254,7 +309,7 @@ export default function MemoriaView() {
                   >
                     {state.items.length === 0 && (
                       <EmptyState
-                        icon={<Brain size={40} />}
+                        icon={<Brain size={36} />}
                         title={activeQuery
                           ? `Sin resultados para "${activeQuery}"`
                           : 'Aún no hay recuerdos'}
@@ -265,7 +320,7 @@ export default function MemoriaView() {
                     )}
 
                     {state.items.length > 0 && (
-                      <ul className="cv-list memory-list" role="list">
+                      <ul className="cv-list memory-list" role="list" style={{ gap: 'var(--space-2)' }}>
                         <AnimatePresence initial={false}>
                           {state.items.map((item, i) => (
                             <AnimatedListItem key={item.id ?? i}>
@@ -282,36 +337,21 @@ export default function MemoriaView() {
                   </motion.div>
                 )}
               </AnimatePresence>
+
             </section>
           </StaggerItem>
 
         </Stagger>
       </div>
 
-      {/* Full-content drawer (Drawer uses AnimatedDrawer internally) */}
+      {/* ── Full-content drawer ──────────────────────────────────────────────── */}
       <Drawer
         open={drawer.open}
-        title={drawer.open && drawer.item.target ? drawer.item.target : 'Detalle'}
+        title={drawer.open && drawer.item.target ? drawer.item.target : 'Detalle de entrada'}
         onClose={closeDrawer}
-      >
-        {drawer.open && (
-          <div className="mem-drawer-content">
-            {drawer.item.target && (
-              <p className="mem-drawer-target">{drawer.item.target}</p>
-            )}
-
-            {drawer.loading ? (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--sp-2)', padding: 'var(--sp-4) 0', color: 'var(--ink4)' }}>
-                <Spinner size={16} label="Cargando contenido completo…" />
-                <span style={{ fontSize: 'var(--text-label)' }}>Cargando…</span>
-              </div>
-            ) : (
-              <p className="mem-drawer-body">
-                {(drawer.detail?.content ?? memoryContent(drawer.item)) || '(sin contenido)'}
-              </p>
-            )}
-
-            <div className="mem-drawer-actions">
+        footer={
+          drawer.open ? (
+            <div className={styles.drawerFooter}>
               <Button
                 variant="danger"
                 size="sm"
@@ -319,10 +359,53 @@ export default function MemoriaView() {
                 loading={deleting}
                 aria-label="Eliminar esta entrada de memoria"
               >
-                <Trash2 size={14} aria-hidden="true" />
-                Eliminar
+                <Trash2 size={13} aria-hidden="true" />
+                Eliminar entrada
               </Button>
             </div>
+          ) : undefined
+        }
+      >
+        {drawer.open && (
+          <div className={styles.drawerContent}>
+
+            {/* Entry metadata */}
+            {(drawer.item.target || drawer.item.created_at) && (
+              <div className={styles.drawerMeta}>
+                {drawer.item.target && (
+                  <>
+                    <p className={styles.drawerTargetLabel}>Contexto</p>
+                    <p className={styles.drawerTargetValue}>{drawer.item.target}</p>
+                  </>
+                )}
+                {drawer.item.created_at && (
+                  <div className={styles.drawerDateRow}>
+                    <CalendarClock size={11} aria-hidden="true" />
+                    <span>{formatDate(drawer.item.created_at)}</span>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Content body */}
+            {drawer.loading ? (
+              <div className={styles.drawerLoadingWrap}>
+                <Spinner size={14} label="Cargando contenido completo…" />
+                <div className="skeleton skeleton--line" style={{ width: '90%' }} />
+                <div className="skeleton skeleton--line" style={{ width: '75%' }} />
+                <div className="skeleton skeleton--line-sm" style={{ width: '55%' }} />
+              </div>
+            ) : (
+              <FadeIn>
+                <div className={styles.drawerBody}>
+                  {(drawer.detail?.content ?? memoryContent(drawer.item))
+                    ? (drawer.detail?.content ?? memoryContent(drawer.item))
+                    : <span className={styles.drawerBodyEmpty}>(sin contenido)</span>
+                  }
+                </div>
+              </FadeIn>
+            )}
+
           </div>
         )}
       </Drawer>

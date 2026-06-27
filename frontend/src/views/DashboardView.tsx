@@ -40,7 +40,9 @@ import type {
 } from '../api/types'
 import { PageHeader } from '../components/ui/PageHeader'
 import { Button } from '../components/ui/Button'
+import { Badge, StatusDot } from '../components/ui/Badge'
 import { Stagger, StaggerItem, FadeIn } from '../components/ui/motion'
+import styles from './DashboardView.module.css'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -123,109 +125,145 @@ function reducer(_s: State, action: Action): State {
   }
 }
 
-// ── Skeleton pieces ───────────────────────────────────────────────────────────
+// ── Skeleton — mirrors final layout ──────────────────────────────────────────
 
-function SkeletonCard({ height = 88 }: { height?: number }) {
+/** Inline shimmer span — avoids Skeleton's style prop limitation. */
+function Sh({ w, h, extra }: { w: string; h: string; extra?: React.CSSProperties }) {
   return (
-    <div
-      className="cv-skeleton"
-      style={{ height, borderRadius: 'var(--r-md)' }}
+    <span
+      className={styles.shimmer}
+      style={{ width: w, height: h, ...extra }}
       aria-hidden="true"
     />
   )
 }
 
-// ── Hero stat card ─────────────────────────────────────────────────────────────
+function DashboardSkeleton() {
+  return (
+    <Stagger style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
 
-interface HeroCardProps {
+      {/* KPI row */}
+      <StaggerItem>
+        <div className={styles.skeletonKpiGrid} aria-hidden="true">
+          {[0, 1, 2, 3].map(i => (
+            <div key={i} className={styles.skeletonKpiCard}>
+              <Sh w="72px" h="11px" />
+              <Sh w="110px" h="28px" />
+              <Sh w="56px" h="10px" />
+            </div>
+          ))}
+        </div>
+      </StaggerItem>
+
+      {/* Health strip */}
+      <StaggerItem>
+        <Sh w="96px" h="11px" extra={{ marginBottom: 'var(--space-3)', display: 'block' }} />
+        <div className={styles.skeletonHealth} aria-hidden="true">
+          {[0, 1, 2].map(i => (
+            <div key={i} className={styles.skeletonHealthCard}>
+              <Sh w="9px" h="9px" extra={{ borderRadius: '50%', flexShrink: 0 }} />
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-1)', flex: 1 }}>
+                <Sh w="60px" h="10px" />
+                <Sh w="90px" h="14px" />
+              </div>
+            </div>
+          ))}
+        </div>
+      </StaggerItem>
+
+      {/* Chart */}
+      <StaggerItem>
+        <Sh w="96px" h="11px" extra={{ marginBottom: 'var(--space-3)', display: 'block' }} />
+        <div className={styles.skeletonPanel}>
+          <Sh w="100%" h="140px" extra={{ borderRadius: 'var(--radius-md)' }} />
+        </div>
+      </StaggerItem>
+
+      {/* Two-column */}
+      <StaggerItem>
+        <div className={styles.twoCol}>
+          <div>
+            <Sh w="80px" h="11px" extra={{ marginBottom: 'var(--space-3)', display: 'block' }} />
+            <div className={styles.skeletonPanel}>
+              {[0, 1, 2, 3].map(i => (
+                <div key={i} className={styles.skeletonRow}>
+                  <Sh w="26px" h="26px" extra={{ borderRadius: '50%', flexShrink: 0 }} />
+                  <Sh w="120px" h="13px" />
+                  <Sh w="60px" h="13px" extra={{ marginLeft: 'auto' }} />
+                </div>
+              ))}
+            </div>
+          </div>
+          <div>
+            <Sh w="96px" h="11px" extra={{ marginBottom: 'var(--space-3)', display: 'block' }} />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-1)' }}>
+              {[0, 1, 2, 3].map(i => (
+                <Sh key={i} w="100%" h="52px" extra={{ borderRadius: 'var(--radius-md)' }} />
+              ))}
+            </div>
+          </div>
+        </div>
+      </StaggerItem>
+
+    </Stagger>
+  )
+}
+
+// ── KPI hero card ─────────────────────────────────────────────────────────────
+
+interface KpiCardProps {
   label: string
   value: string
   suffix?: string
-  highlight?: boolean
-  alert?: boolean
+  subtext?: string
+  variant?: 'default' | 'highlight' | 'alert'
   onClick?: () => void
 }
 
-function HeroCard({ label, value, suffix, highlight, alert, onClick }: HeroCardProps) {
+function KpiCard({ label, value, suffix, subtext, variant = 'default', onClick }: KpiCardProps) {
   const Tag = onClick ? 'button' : 'div'
+  const cardClass = [
+    styles.kpiCard,
+    onClick ? styles['kpiCard--clickable'] : '',
+    variant === 'highlight' ? styles['kpiCard--highlight'] : '',
+    variant === 'alert' ? styles['kpiCard--alert'] : '',
+  ].filter(Boolean).join(' ')
+
   return (
     <Tag
       type={onClick ? 'button' : undefined}
       onClick={onClick}
-      className={onClick ? 'usage-agent-row' : undefined}
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 'var(--sp-2)',
-        flex: 1,
-        minWidth: 0,
-        padding: 'var(--sp-5)',
-        background: highlight
-          ? 'linear-gradient(135deg, color-mix(in srgb, var(--accent) 14%, var(--card)) 0%, var(--card) 100%)'
-          : 'var(--card)',
-        border: highlight
-          ? '1px solid color-mix(in srgb, var(--accent) 30%, var(--line))'
-          : alert
-            ? '1px solid color-mix(in srgb, var(--warn) 40%, var(--line))'
-            : '1px solid var(--line)',
-        borderRadius: 'var(--r-md)',
-        textAlign: 'left',
-        cursor: onClick ? 'pointer' : 'default',
-      }}
+      className={cardClass}
       aria-label={onClick ? `${label}: ${value}${suffix ? ' ' + suffix : ''}. Ver detalle.` : undefined}
     >
-      <span
-        style={{
-          fontSize: 'var(--text-label)',
-          color: 'var(--ink3)',
-          fontWeight: 500,
-        }}
-      >
-        {label}
-      </span>
-      <span
-        style={{
-          fontSize: 'var(--text-title)',
-          fontWeight: 650,
-          color: alert ? 'var(--warn)' : 'var(--ink)',
-          letterSpacing: '-0.03em',
-          lineHeight: 1.2,
-        }}
-      >
+      <span className={styles.kpiLabel}>{label}</span>
+      <span className={variant === 'alert' ? `${styles.kpiValue} ${styles['kpiValue--alert']}` : styles.kpiValue}>
         {value}
-        {suffix && (
-          <span
-            style={{
-              fontSize: 'var(--text-label)',
-              fontWeight: 400,
-              color: 'var(--ink3)',
-              marginLeft: 4,
-            }}
-          >
-            {suffix}
-          </span>
-        )}
+        {suffix && <span className={styles.kpiSuffix}>{suffix}</span>}
       </span>
+      {subtext && <span className={styles.kpiSubtext}>{subtext}</span>}
     </Tag>
   )
 }
 
-// ── Section title ──────────────────────────────────────────────────────────────
+// ── Section header ─────────────────────────────────────────────────────────────
 
-function SectionTitle({ children }: { children: React.ReactNode }) {
+interface SectionHeaderProps {
+  title: string
+  onLinkClick?: () => void
+  linkLabel?: string
+}
+
+function SectionHeader({ title, onLinkClick, linkLabel = 'Ver todos' }: SectionHeaderProps) {
   return (
-    <h2
-      style={{
-        fontSize: 'var(--text-label)',
-        fontWeight: 650,
-        color: 'var(--ink3)',
-        letterSpacing: '0.06em',
-        textTransform: 'uppercase',
-        marginBottom: 'var(--sp-3)',
-      }}
-    >
-      {children}
-    </h2>
+    <div className={styles.sectionHeader}>
+      <h2 className={styles.sectionTitle}>{title}</h2>
+      {onLinkClick && (
+        <button type="button" className={styles.sectionLink} onClick={onLinkClick}>
+          {linkLabel}
+        </button>
+      )}
+    </div>
   )
 }
 
@@ -241,19 +279,9 @@ function ChartTooltip({ active, payload, label }: ChartTooltipProps) {
   if (!active || !(payload ?? []).length) return null
   const value = (payload ?? [])[0]?.value ?? 0
   return (
-    <div
-      style={{
-        background: 'var(--surface)',
-        border: '1px solid var(--line2)',
-        borderRadius: 'var(--r-sm)',
-        padding: 'var(--sp-2) var(--sp-3)',
-        fontSize: 'var(--text-label)',
-        color: 'var(--ink)',
-        boxShadow: 'var(--shadow-floating)',
-      }}
-    >
-      <div style={{ color: 'var(--ink3)', marginBottom: 2 }}>{label ? formatDay(label) : ''}</div>
-      <div style={{ fontWeight: 600 }}>{formatUSD(value)}</div>
+    <div className={styles.chartTooltip}>
+      <div className={styles.chartTooltipDate}>{label ? formatDay(label) : ''}</div>
+      <div className={styles.chartTooltipValue}>{formatUSD(value)}</div>
     </div>
   )
 }
@@ -272,87 +300,43 @@ function SystemHealth({ runtimeStatus, agentStats }: SystemHealthProps) {
   const withIncident = agents.filter(a => a.health && a.health !== 'ok').length
 
   return (
-    <div
-      style={{
-        display: 'flex',
-        flexWrap: 'wrap',
-        gap: 'var(--sp-3)',
-      }}
-    >
-      <div
-        style={{
-          background: 'var(--card)',
-          border: '1px solid var(--line)',
-          borderRadius: 'var(--r-md)',
-          padding: 'var(--sp-4)',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 'var(--sp-3)',
-          flex: 1,
-          minWidth: 200,
-        }}
-      >
+    <div className={styles.healthStrip}>
+      {/* System state */}
+      <div className={styles.healthCard}>
         <span
-          style={{
-            width: 10,
-            height: 10,
-            borderRadius: '50%',
-            background: ok ? 'var(--ok)' : 'var(--danger)',
-            flexShrink: 0,
-          }}
+          className={`${styles.healthDot} ${ok ? styles['healthDot--ok'] : styles['healthDot--error']}`}
           aria-hidden="true"
         />
-        <div>
-          <div style={{ fontSize: 'var(--text-caption)', color: 'var(--ink4)', fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-            Sistema
-          </div>
-          <div style={{ fontSize: 'var(--text-body)', fontWeight: 600, color: 'var(--ink)', marginTop: 2 }}>
-            {label}
-          </div>
+        <div className={styles.healthMeta}>
+          <span className={styles.healthMetaLabel}>Sistema</span>
+          <span className={styles.healthMetaValue}>{label}</span>
+        </div>
+        <Badge variant={ok ? 'success' : 'danger'}>{ok ? 'Operativo' : 'Alerta'}</Badge>
+      </div>
+
+      {/* Empleados activos */}
+      <div className={styles.healthCard}>
+        <StatusDot state={working > 0 ? 'warning' : 'success'} />
+        <div className={styles.healthMeta}>
+          <span className={styles.healthMetaLabel}>Empleados activos</span>
+          <span className={`${styles.healthNum}`}>{working > 0 ? working : '—'}</span>
+          {agents.length > 0 && (
+            <span className={styles.healthMetaSub}>de {agents.length} en la plataforma</span>
+          )}
         </div>
       </div>
 
-      <div
-        style={{
-          background: 'var(--card)',
-          border: '1px solid var(--line)',
-          borderRadius: 'var(--r-md)',
-          padding: 'var(--sp-4)',
-          flex: 1,
-          minWidth: 200,
-        }}
-      >
-        <div style={{ fontSize: 'var(--text-caption)', color: 'var(--ink4)', fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-          Empleados activos ahora
-        </div>
-        <div style={{ fontSize: 'var(--text-subtitle)', fontWeight: 650, color: 'var(--ink)', marginTop: 4, letterSpacing: '-0.02em' }}>
-          {working > 0 ? working : '—'}
-        </div>
-        {working > 0 && (
-          <div style={{ fontSize: 'var(--text-caption)', color: 'var(--ink4)', marginTop: 2 }}>
-            de {agents.length} en la plataforma
-          </div>
-        )}
-      </div>
-
+      {/* Incidencias (sólo si hay) */}
       {withIncident > 0 && (
-        <div
-          style={{
-            background: 'color-mix(in srgb, var(--warn) 10%, var(--card))',
-            border: '1px solid color-mix(in srgb, var(--warn) 30%, var(--line))',
-            borderRadius: 'var(--r-md)',
-            padding: 'var(--sp-4)',
-            flex: 1,
-            minWidth: 200,
-          }}
-          role="alert"
-        >
-          <div style={{ fontSize: 'var(--text-caption)', color: 'var(--ink4)', fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-            Incidencias
+        <div className={`${styles.healthCard} ${styles['healthCard--warning']}`} role="alert">
+          <span className={`${styles.healthDot} ${styles['healthDot--error']}`} aria-hidden="true" />
+          <div className={styles.healthMeta}>
+            <span className={styles.healthMetaLabel}>Incidencias</span>
+            <span className={`${styles.healthMetaValue} ${styles['healthMetaValue--warning']}`}>
+              {withIncident} empleado{withIncident > 1 ? 's' : ''} con alerta
+            </span>
           </div>
-          <div style={{ fontSize: 'var(--text-subtitle)', fontWeight: 650, color: 'var(--warn)', marginTop: 4, letterSpacing: '-0.02em' }}>
-            {withIncident} empleado{withIncident > 1 ? 's' : ''} con alerta
-          </div>
+          <Badge variant="warning">{withIncident}</Badge>
         </div>
       )}
     </div>
@@ -371,154 +355,73 @@ function EmployeeTable({ agentStats, onRowClick }: EmployeeTableProps) {
 
   if (!agentStats.available || agents.length === 0) {
     return (
-      <p className="cv-empty">
-        Sin datos de empleados disponibles aún.
-      </p>
+      <div className={styles.emptyPanel}>
+        <svg className={styles.emptyIcon} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.501 20.118a7.5 7.5 0 0 1 14.998 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.499-1.632Z" />
+        </svg>
+        <span className={styles.emptyTitle}>Sin datos de empleados aún</span>
+        <span className={styles.emptyDesc}>La actividad aparecerá aquí en cuanto comiencen a trabajar.</span>
+      </div>
     )
   }
 
   return (
-    <div
-      style={{ overflowX: 'auto' }}
-      role="region"
-      aria-label="Tabla de empleados"
-    >
-      <table
-        style={{
-          width: '100%',
-          borderCollapse: 'collapse',
-          fontSize: 'var(--text-body)',
-        }}
-      >
-        <thead>
+    <div style={{ overflowX: 'auto' }} role="region" aria-label="Tabla de empleados">
+      <table className={styles.table}>
+        <thead className={styles.tableHead}>
           <tr>
-            {['Empleado', 'Estado', 'Tareas hoy', 'Gasto hoy'].map(h => (
-              <th
-                key={h}
-                scope="col"
-                style={{
-                  padding: 'var(--sp-2) var(--sp-3)',
-                  textAlign: h === 'Tareas hoy' || h === 'Gasto hoy' ? 'right' : 'left',
-                  fontSize: 'var(--text-caption)',
-                  fontWeight: 600,
-                  color: 'var(--ink4)',
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.05em',
-                  borderBottom: '1px solid var(--line)',
-                  whiteSpace: 'nowrap',
-                }}
-              >
-                {h}
-              </th>
-            ))}
+            <th scope="col">Empleado</th>
+            <th scope="col">Estado</th>
+            <th scope="col" className={styles.alignRight}>Tareas hoy</th>
+            <th scope="col" className={styles.alignRight}>Gasto hoy</th>
           </tr>
         </thead>
         <tbody>
           {agents.map(agent => (
             <tr
               key={agent.agent_id}
-              style={{ cursor: 'pointer' }}
+              className={styles.tableRow}
               onClick={onRowClick}
               onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onRowClick() } }}
               tabIndex={0}
               role="button"
               aria-label={`Ver detalle de ${agent.name}`}
-              className="dashboard-agent-row"
             >
-              <td
-                style={{
-                  padding: 'var(--sp-3)',
-                  borderBottom: '1px solid var(--line)',
-                }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--sp-2)' }}>
+              <td className={styles.tableCell}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
                   <div
-                    style={{
-                      width: 28,
-                      height: 28,
-                      borderRadius: '50%',
-                      background: agent.color ?? 'var(--accent)',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      fontSize: 'var(--text-label)',
-                      fontWeight: 700,
-                      color: '#fff',
-                      flexShrink: 0,
-                    }}
+                    className={styles.agentAvatar}
+                    style={{ background: agent.color ?? 'var(--color-accent)' }}
                     aria-hidden="true"
                   >
                     {agent.name.charAt(0).toUpperCase()}
                   </div>
                   <div style={{ minWidth: 0 }}>
-                    <div
-                      style={{
-                        fontWeight: 600,
-                        color: 'var(--ink)',
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
-                      }}
-                    >
-                      {agent.name}
-                    </div>
+                    <div className={styles.agentName}>{agent.name}</div>
                     {agent.department && (
-                      <div
-                        style={{
-                          fontSize: 'var(--text-caption)',
-                          color: 'var(--ink4)',
-                        }}
-                      >
-                        {agent.department}
-                      </div>
+                      <div className={styles.agentDept}>{agent.department}</div>
                     )}
                   </div>
                 </div>
               </td>
-              <td
-                style={{
-                  padding: 'var(--sp-3)',
-                  borderBottom: '1px solid var(--line)',
-                }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--sp-2)' }}>
+              <td className={styles.tableCell}>
+                <div className={styles.stateBadgeRow}>
                   <span
-                    style={{
-                      width: 8,
-                      height: 8,
-                      borderRadius: '50%',
-                      background: agent.state === 'working' ? 'var(--warn)' : 'var(--ok)',
-                      flexShrink: 0,
-                    }}
+                    className={`${styles.stateDot} ${agent.state === 'working' ? styles['stateDot--working'] : styles['stateDot--idle']}`}
                     aria-hidden="true"
                   />
-                  <span style={{ color: 'var(--ink2)', fontSize: 'var(--text-label)' }}>
+                  <span className={styles.stateLabel}>
                     {agent.state === 'working' ? 'Trabajando' : 'En espera'}
                   </span>
                 </div>
               </td>
-              <td
-                style={{
-                  padding: 'var(--sp-3)',
-                  borderBottom: '1px solid var(--line)',
-                  textAlign: 'right',
-                  fontVariantNumeric: 'tabular-nums',
-                  color: 'var(--ink2)',
-                }}
-              >
-                {formatNumber(agent.today.tasks)}
+              <td className={`${styles.tableCell} ${styles['tableCell--right']}`}>
+                <span className={styles.numCell}>{formatNumber(agent.today.tasks)}</span>
               </td>
-              <td
-                style={{
-                  padding: 'var(--sp-3)',
-                  borderBottom: '1px solid var(--line)',
-                  textAlign: 'right',
-                  fontVariantNumeric: 'tabular-nums',
-                  fontWeight: 600,
-                  color: agent.today.cost_usd > 0 ? 'var(--ink)' : 'var(--ink4)',
-                }}
-              >
-                {agent.today.cost_usd > 0 ? formatUSD(agent.today.cost_usd) : '—'}
+              <td className={`${styles.tableCell} ${styles['tableCell--right']}`}>
+                <span className={agent.today.cost_usd > 0 ? styles.numCellPrimary : styles.numCellDim}>
+                  {agent.today.cost_usd > 0 ? formatUSD(agent.today.cost_usd) : '—'}
+                </span>
               </td>
             </tr>
           ))}
@@ -540,74 +443,38 @@ function UpcomingTasks({ tasks, onRowClick }: UpcomingTasksProps) {
 
   if (enabled.length === 0) {
     return (
-      <p className="cv-empty">Sin tareas programadas activas.</p>
+      <div className={styles.emptyPanel}>
+        <svg className={styles.emptyIcon} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 0 1 2.25-2.25h13.5A2.25 2.25 0 0 1 21 7.5v11.25m-18 0A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75m-18 0v-7.5A2.25 2.25 0 0 1 5.25 9h13.5A2.25 2.25 0 0 1 21 11.25v7.5" />
+        </svg>
+        <span className={styles.emptyTitle}>Sin tareas programadas activas</span>
+        <span className={styles.emptyDesc}>Configura la primera tarea desde el panel de programación.</span>
+      </div>
     )
   }
 
   return (
-    <ul role="list" style={{ display: 'flex', flexDirection: 'column', gap: 4, listStyle: 'none' }}>
+    <ul className={styles.taskList} role="list">
       {enabled.map((task, i) => {
         const id = task.trigger_id ?? task.task_id ?? task.id ?? String(i)
         return (
           <li key={id}>
             <button
               type="button"
+              className={styles.taskRow}
               onClick={onRowClick}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 'var(--sp-3)',
-                width: '100%',
-                padding: 'var(--sp-3) var(--sp-4)',
-                background: 'var(--card)',
-                border: '1px solid var(--line)',
-                borderRadius: 'var(--r-sm)',
-                cursor: 'pointer',
-                textAlign: 'left',
-                transition: 'border-color var(--ease-hover), background var(--ease-hover)',
-              }}
-              className="usage-agent-row"
               aria-label={`Ver tarea: ${taskLabel(task)}`}
             >
-              <div
-                style={{
-                  width: 8,
-                  height: 8,
-                  borderRadius: '50%',
-                  background: 'var(--ok)',
-                  flexShrink: 0,
-                }}
-                aria-hidden="true"
-              />
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div
-                  style={{
-                    fontSize: 'var(--text-body)',
-                    fontWeight: 600,
-                    color: 'var(--ink)',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {taskLabel(task)}
-                </div>
+              <span className={styles.taskDot} aria-hidden="true" />
+              <div className={styles.taskBody}>
+                <div className={styles.taskName}>{taskLabel(task)}</div>
                 {(task.cron ?? task.recurrence_human) && (
-                  <div style={{ fontSize: 'var(--text-caption)', color: 'var(--ink4)', marginTop: 1 }}>
+                  <div className={styles.taskRecurrence}>
                     {task.recurrence_human ?? task.cron}
                   </div>
                 )}
               </div>
-              <span
-                style={{
-                  fontSize: 'var(--text-caption)',
-                  color: 'var(--ink3)',
-                  flexShrink: 0,
-                  whiteSpace: 'nowrap',
-                }}
-              >
-                {taskNextRun(task)}
-              </span>
+              <span className={styles.taskNextRun}>{taskNextRun(task)}</span>
             </button>
           </li>
         )
@@ -659,7 +526,7 @@ export default function DashboardView() {
         title="Tablero"
         subtitle="Resumen de actividad, gasto y estado del equipo."
         actions={
-          <Button variant="secondary" onClick={load} style={{ fontSize: 'var(--text-label)' }}>
+          <Button variant="secondary" size="sm" onClick={load}>
             Actualizar
           </Button>
         }
@@ -668,29 +535,17 @@ export default function DashboardView() {
       <div className="view-body cv-view-body">
 
         {/* ── Loading ── */}
-        {state.status === 'loading' && (
-          <Stagger style={{ display: 'flex', flexDirection: 'column', gap: 'var(--sp-8)' }}>
-            <StaggerItem>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 'var(--sp-3)' }}>
-                {[...Array(4)].map((_, i) => <SkeletonCard key={i} />)}
-              </div>
-            </StaggerItem>
-            <StaggerItem><SkeletonCard height={80} /></StaggerItem>
-            <StaggerItem><SkeletonCard height={200} /></StaggerItem>
-            <StaggerItem>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 'var(--sp-6)' }}>
-                <SkeletonCard height={220} />
-                <SkeletonCard height={160} />
-              </div>
-            </StaggerItem>
-          </Stagger>
-        )}
+        {state.status === 'loading' && <DashboardSkeleton />}
 
         {/* ── Error ── */}
         {state.status === 'error' && (
           <FadeIn>
-            <div className="state-container" role="alert">
-              <p className="state-error">{state.message}</p>
+            <div className={styles.errorPanel} role="alert">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="var(--color-danger)" strokeWidth="1.5" aria-hidden="true">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+              </svg>
+              <p className={styles.errorMessage}>{state.message}</p>
+              <p className={styles.errorHint}>Comprueba la conexión con el servidor y vuelve a intentarlo.</p>
               <Button variant="secondary" onClick={load}>Reintentar</Button>
             </div>
           </FadeIn>
@@ -711,41 +566,39 @@ export default function DashboardView() {
           }))
 
           return (
-            <Stagger style={{ display: 'flex', flexDirection: 'column', gap: 'var(--sp-8)' }}>
+            <Stagger style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
 
-              {/* ── 1. Fila héroe ── */}
+              {/* ── 1. Fila héroe de KPIs ── */}
               <StaggerItem>
                 <div
-                  style={{
-                    display: 'grid',
-                    gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
-                    gap: 'var(--sp-3)',
-                  }}
+                  className={styles.kpiGrid}
                   role="list"
                   aria-label="Métricas principales"
                 >
-                  <HeroCard
+                  <KpiCard
                     label="Gasto (7 días)"
                     value={formatUSD(summary.total_cost_usd)}
-                    highlight
+                    subtext="Últimos 7 días"
+                    variant="highlight"
                     onClick={() => navigate('/coste')}
                   />
-                  <HeroCard
+                  <KpiCard
                     label="Actividad (7 días)"
                     value={formatNumber(summary.cycles)}
                     suffix="acciones"
                     onClick={() => navigate('/coste')}
                   />
-                  <HeroCard
+                  <KpiCard
                     label="Empleados activos"
                     value={activeAgents > 0 ? String(activeAgents) : '—'}
                     suffix={totalAgents > 0 ? `de ${totalAgents}` : undefined}
                     onClick={() => navigate('/agentes')}
                   />
-                  <HeroCard
+                  <KpiCard
                     label="Pendientes de aprobar"
                     value={pendingCount > 0 ? String(pendingCount) : 'Ninguna'}
-                    alert={pendingCount > 0}
+                    subtext={pendingCount > 0 ? 'Requieren tu atención' : 'Todo al día'}
+                    variant={pendingCount > 0 ? 'alert' : 'default'}
                     onClick={() => navigate('/seguridad')}
                   />
                 </div>
@@ -754,7 +607,7 @@ export default function DashboardView() {
               {/* ── 2. Estado del sistema ── */}
               <StaggerItem>
                 <section aria-label="Estado del sistema">
-                  <SectionTitle>Estado del sistema</SectionTitle>
+                  <SectionHeader title="Estado del sistema" />
                   <SystemHealth runtimeStatus={runtimeStatus} agentStats={agentStats} />
                 </section>
               </StaggerItem>
@@ -763,51 +616,48 @@ export default function DashboardView() {
               {chartPoints.length > 0 && (
                 <StaggerItem>
                   <section aria-label="Gasto reciente">
-                    <SectionTitle>Gasto últimos 7 días</SectionTitle>
-                    <div
-                      style={{
-                        background: 'var(--card)',
-                        border: '1px solid var(--line)',
-                        borderRadius: 'var(--r-md)',
-                        padding: 'var(--sp-5)',
-                      }}
-                    >
-                      <ResponsiveContainer width="100%" height={140}>
+                    <SectionHeader title="Gasto — últimos 7 días" />
+                    <div className={styles.chartPanel}>
+                      <ResponsiveContainer width="100%" height={148}>
                         <AreaChart data={chartPoints} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
                           <defs>
-                            <linearGradient id="dbGradient" x1="0" y1="0" x2="0" y2="1">
-                              <stop offset="5%" stopColor="var(--accent)" stopOpacity={0.25} />
-                              <stop offset="95%" stopColor="var(--accent)" stopOpacity={0.02} />
+                            <linearGradient id="dbCostGradient" x1="0" y1="0" x2="0" y2="1">
+                              <stop offset="5%"  stopColor="var(--color-accent)" stopOpacity={0.22} />
+                              <stop offset="95%" stopColor="var(--color-accent)" stopOpacity={0.01} />
                             </linearGradient>
                           </defs>
-                          <CartesianGrid strokeDasharray="3 3" stroke="var(--line)" vertical={false} />
+                          <CartesianGrid
+                            strokeDasharray="3 3"
+                            stroke="var(--color-border-subtle)"
+                            vertical={false}
+                          />
                           <XAxis
                             dataKey="day"
                             tickFormatter={formatDay}
-                            tick={{ fontSize: 11, fill: 'var(--ink4)' }}
+                            tick={{ fontSize: 11, fill: 'var(--color-text-dim)', fontFamily: 'var(--font-ui)' }}
                             axisLine={false}
                             tickLine={false}
                             interval="preserveStartEnd"
                           />
                           <YAxis
                             tickFormatter={v => formatUSD(v as number)}
-                            tick={{ fontSize: 11, fill: 'var(--ink4)' }}
+                            tick={{ fontSize: 11, fill: 'var(--color-text-dim)', fontFamily: 'var(--font-mono)' }}
                             axisLine={false}
                             tickLine={false}
-                            width={56}
+                            width={60}
                           />
                           <Tooltip
                             content={<ChartTooltip />}
-                            cursor={{ stroke: 'var(--line2)', strokeWidth: 1 }}
+                            cursor={{ stroke: 'var(--color-border)', strokeWidth: 1 }}
                           />
                           <Area
                             type="monotone"
                             dataKey="value"
-                            stroke="var(--accent)"
+                            stroke="var(--color-accent)"
                             strokeWidth={2}
-                            fill="url(#dbGradient)"
+                            fill="url(#dbCostGradient)"
                             dot={false}
-                            activeDot={{ r: 4, fill: 'var(--accent)', strokeWidth: 0 }}
+                            activeDot={{ r: 4, fill: 'var(--color-accent)', strokeWidth: 0 }}
                           />
                         </AreaChart>
                       </ResponsiveContainer>
@@ -818,34 +668,13 @@ export default function DashboardView() {
 
               {/* ── 4. Dos columnas: empleados + próximas tareas ── */}
               <StaggerItem>
-                <div
-                  style={{
-                    display: 'grid',
-                    gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))',
-                    gap: 'var(--sp-6)',
-                    alignItems: 'start',
-                  }}
-                >
+                <div className={styles.twoCol}>
                   <section aria-label="Estado de empleados">
-                    <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 'var(--sp-3)' }}>
-                      <SectionTitle>Por empleado</SectionTitle>
-                      <button
-                        type="button"
-                        className="cv-btn cv-btn--ghost cv-btn--sm"
-                        onClick={() => navigate('/agentes')}
-                        style={{ fontSize: 'var(--text-caption)' }}
-                      >
-                        Ver todos
-                      </button>
-                    </div>
-                    <div
-                      style={{
-                        background: 'var(--card)',
-                        border: '1px solid var(--line)',
-                        borderRadius: 'var(--r-md)',
-                        overflow: 'hidden',
-                      }}
-                    >
+                    <SectionHeader
+                      title="Por empleado"
+                      onLinkClick={() => navigate('/agentes')}
+                    />
+                    <div className={styles.tablePanel}>
                       <EmployeeTable
                         agentStats={agentStats}
                         onRowClick={() => navigate('/agentes')}
@@ -854,17 +683,10 @@ export default function DashboardView() {
                   </section>
 
                   <section aria-label="Próximas tareas programadas">
-                    <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 'var(--sp-3)' }}>
-                      <SectionTitle>Próximas tareas</SectionTitle>
-                      <button
-                        type="button"
-                        className="cv-btn cv-btn--ghost cv-btn--sm"
-                        onClick={() => navigate('/programadas')}
-                        style={{ fontSize: 'var(--text-caption)' }}
-                      >
-                        Ver todas
-                      </button>
-                    </div>
+                    <SectionHeader
+                      title="Próximas tareas"
+                      onLinkClick={() => navigate('/programadas')}
+                    />
                     <UpcomingTasks
                       tasks={tasks}
                       onRowClick={() => navigate('/programadas')}

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import { sileo } from 'sileo'
-import { X, Zap, Search as SearchIcon, ChevronRight, Package } from 'lucide-react'
+import { X, Zap, Search as SearchIcon, ChevronRight, Package, AlertTriangle } from 'lucide-react'
 import { useT } from '../lib/i18n'
 import {
   listSkills, searchSkillsHub, listHubSkills, installSkill, getHubOpStatus,
@@ -13,7 +13,6 @@ import {
 } from '../api/client'
 import type { Skill, HubSkillResult, HubInstallResponse, InstallScanResponse, SkillDetails } from '../api/types'
 import { useConfirmDialog } from '../components/ConfirmDialog'
-import Badge, { type BadgeVariant } from '../components/Badge'
 import InstallScanModal from '../components/InstallScanModal'
 import SkillDetailsModal from '../components/SkillDetailsModal'
 import type { MfaFactors } from '../components/MfaModal'
@@ -30,7 +29,9 @@ import {
   motion,
   useReducedMotion,
   SPRING,
+  TWEEN_FAST,
 } from '../components/ui/motion'
+import s from './SkillsView.module.css'
 
 // ── Poll helper ───────────────────────────────────────────────────────────────
 
@@ -48,9 +49,9 @@ function pollHubOp(opId: string, { onDone, onError }: { onDone?: () => void; onE
     if (tries++ > 40) { onError?.('timeout'); return }
     const st = await getHubOpStatus(opId)
     if (cancelled) return
-    const s = String(st?.status ?? '').toLowerCase()
-    if (s === 'done' || s === 'completed' || s === 'success') { onDone?.(); return }
-    if (s === 'error' || s === 'failed') { onError?.(st?.error ?? st?.message ?? 'error'); return }
+    const status = String(st?.status ?? '').toLowerCase()
+    if (status === 'done' || status === 'completed' || status === 'success') { onDone?.(); return }
+    if (status === 'error' || status === 'failed') { onError?.(st?.error ?? st?.message ?? 'error'); return }
     if (!cancelled) timer = setTimeout(tick, 2500)
   }
 
@@ -151,8 +152,8 @@ export default function SkillsView() {
       // in search but never appeared in the INSTALADAS list. Adapt hub items to the
       // Skill shape and dedup against the native ones (same key → native wins).
       const native = Array.isArray(skills) ? skills : []
-      const keyOf = (s: { skill_name?: string; name?: string; slug?: string; identifier?: string }) =>
-        (s.skill_name ?? s.name ?? s.slug ?? s.identifier ?? '').trim().toLowerCase()
+      const keyOf = (sk: { skill_name?: string; name?: string; slug?: string; identifier?: string }) =>
+        (sk.skill_name ?? sk.name ?? sk.slug ?? sk.identifier ?? '').trim().toLowerCase()
       const nativeKeys = new Set(native.map(keyOf).filter(Boolean))
       const hubOnly: Skill[] = hubArr
         .filter(h => { const k = keyOf(h); return k && !nativeKeys.has(k) })
@@ -171,7 +172,7 @@ export default function SkillsView() {
     } catch (e) {
       dispatch({
         type: 'FAILED',
-        message: e instanceof ApiError ? e.message : 'No se pudieron cargar las skills.',
+        message: e instanceof ApiError ? e.message : 'No se pudieron cargar las habilidades.',
       })
     }
   }, [])
@@ -246,7 +247,7 @@ export default function SkillsView() {
   async function doInstallSkill(
     identifier: string,
     name: string,
-    onBtnUpdate: (s: 'installing' | 'installed' | 'ready') => void,
+    onBtnUpdate: (st: 'installing' | 'installed' | 'ready') => void,
     force: boolean,
   ) {
     try {
@@ -278,7 +279,7 @@ export default function SkillsView() {
     }
   }
 
-  function handleInstallOp(op: HubInstallResponse, name: string, onBtnUpdate: (s: 'installing' | 'installed' | 'ready') => void) {
+  function handleInstallOp(op: HubInstallResponse, name: string, onBtnUpdate: (st: 'installing' | 'installed' | 'ready') => void) {
     if (op?.op_id) {
       show(`Instalando "${name}"…`, 'ok')
       trackPoll(pollHubOp(op.op_id, {
@@ -295,15 +296,15 @@ export default function SkillsView() {
   async function handleTeachStart() {
     const name = teachNameRef.current?.value.trim() ?? ''
     const description = teachDescRef.current?.value.trim() ?? ''
-    if (!name) { show('Ponle un nombre a la skill', 'warn'); return }
+    if (!name) { show('Ponle un nombre a la habilidad', 'warn'); return }
     teachNameValueRef.current = name
     try {
-      const s = await createTrainingSession({ skill_name: name, description, surface_kind: 'browser' })
-      teachSessionRef.current = s.session_id
-      await startTrainingRecording(s.session_id)
+      const sess = await createTrainingSession({ skill_name: name, description, surface_kind: 'browser' })
+      teachSessionRef.current = sess.session_id
+      await startTrainingRecording(sess.session_id)
       setTeachPhase('recording')
     } catch (e) {
-      show(`No se pudo crear la skill: ${e instanceof Error ? e.message : 'error'}`, 'error')
+      show(`No se pudo crear la habilidad: ${e instanceof Error ? e.message : 'error'}`, 'error')
       if (teachSessionRef.current) {
         abandonTrainingSession(teachSessionRef.current)
         teachSessionRef.current = null
@@ -341,14 +342,14 @@ export default function SkillsView() {
     try {
       await stopTrainingRecording(sid)
       await synthesizeSkill(sid)
-      show(`Skill "${name}" creada`, 'ok')
+      show(`Habilidad "${name}" creada`, 'ok')
       setTeachPhase('idle')
       loadInstalled()
     } catch (e) {
       const status = e instanceof ApiError ? e.status : 0
       const msg = status === 409
-        ? 'Conecta un modelo en Proveedores para crear skills.'
-        : `No se pudo crear la skill: ${e instanceof Error ? e.message : 'error'}`
+        ? 'Conecta un modelo en Proveedores para crear habilidades.'
+        : `No se pudo crear la habilidad: ${e instanceof Error ? e.message : 'error'}`
       show(msg, status === 409 ? 'warn' : 'error')
       setTeachPhase('idle')
     } finally {
@@ -383,9 +384,12 @@ export default function SkillsView() {
     }
   }
 
+  const installedCount = state.status === 'success' ? state.skills.length : null
+
   return (
     <>
       {ConfirmDialogNode}
+
       {pendingSkillInstall && (
         <InstallScanModal
           scan={pendingSkillInstall.scan}
@@ -397,70 +401,75 @@ export default function SkillsView() {
           }}
         />
       )}
+
       {skillDetails && (
         <SkillDetailsModal
           details={skillDetails}
           onClose={() => setSkillDetails(null)}
         />
       )}
+
       <PageHeader
         title="Habilidades"
-        subtitle="Amplía lo que puede hacer el agente. Busca e instala en segundos."
+        subtitle="Amplía las capacidades del agente. Busca, instala o enséñale desde una demostración."
       />
 
-      <div className="view-body cv-view-body">
-        <Stagger style={{ display: 'flex', flexDirection: 'column', gap: 'var(--sp-8)' }}>
+      <div className={s.viewBody}>
+        <Stagger style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
 
           {/* ── Hub search ──────────────────────────────────────────────── */}
           <StaggerItem>
-            <section className="cv-section" aria-label="Catálogo de habilidades">
-              <h2 className="cv-section-label">Catálogo</h2>
+            <section className={s.section} aria-label="Catálogo de habilidades">
+              <div className={s.sectionHead}>
+                <span className={s.sectionLabel}>Catálogo</span>
+              </div>
 
-              {!hubSearching && hubResults.length === 0 && (
-                <motion.div
-                  layout
-                  style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--sp-2)', marginBottom: 'var(--sp-3)' }}
-                  aria-label="Búsquedas sugeridas"
-                >
-                  <AnimatePresence>
-                    {HUB_SUGGESTIONS.map((chip) => (
+              {/* Suggestion pills — only visible when no search results yet */}
+              <AnimatePresence>
+                {!hubSearching && hubResults.length === 0 && (
+                  <motion.div
+                    className={s.pillsRow}
+                    aria-label="Búsquedas sugeridas"
+                    initial={{ opacity: 0, y: 4 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -4 }}
+                    transition={{ ...SPRING, delay: 0.06 }}
+                  >
+                    {HUB_SUGGESTIONS.map((chip, i) => (
                       <motion.button
                         key={chip}
                         type="button"
-                        className="suggestion-pill"
+                        className={s.pill}
                         onClick={() => runSearchFor(chip)}
-                        layout
-                        initial={{ opacity: 0, scale: 0.92 }}
+                        initial={{ opacity: 0, scale: 0.9 }}
                         animate={{ opacity: 1, scale: 1 }}
-                        exit={{ opacity: 0, scale: 0.88 }}
-                        transition={{ ...SPRING, delay: HUB_SUGGESTIONS.indexOf(chip) * 0.04 }}
+                        transition={{ ...SPRING, delay: i * 0.04 }}
+                        aria-label={`Buscar ${chip}`}
                       >
                         {chip}
                       </motion.button>
                     ))}
-                  </AnimatePresence>
-                </motion.div>
-              )}
+                  </motion.div>
+                )}
+              </AnimatePresence>
 
-              <div className="cv-search-row">
-                <label className="sr-only" htmlFor="hub-search">Buscar en el hub de skills</label>
-                <div style={{ position: 'relative', flex: 1 }}>
-                  <SearchIcon
-                    size={14}
-                    aria-hidden="true"
-                    style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--ink4)', pointerEvents: 'none' }}
-                  />
+              {/* Search row */}
+              <div className={s.searchRow}>
+                <label className="sr-only" htmlFor="hub-search">Buscar en el catálogo de habilidades</label>
+                <div className={s.searchWrap}>
+                  <span className={s.searchIcon} aria-hidden="true">
+                    <SearchIcon size={14} />
+                  </span>
                   <input
                     id="hub-search"
                     ref={hubInputRef}
-                    className="cv-input"
+                    className={s.searchInput}
                     type="search"
-                    placeholder="Buscar skills…"
+                    placeholder="Buscar habilidades…"
                     autoComplete="off"
                     value={hubQuery}
                     onChange={e => setHubQuery(e.target.value)}
                     onKeyDown={e => { if (e.key === 'Enter') runSearch() }}
-                    style={{ paddingLeft: 30 }}
                   />
                 </div>
                 <Button
@@ -473,23 +482,29 @@ export default function SkillsView() {
                 </Button>
               </div>
 
+              {/* Empty search results */}
               {!hubSearching && hubQuery && hubResults.length === 0 && (
-                <EmptyState
-                  icon={<SearchIcon size={32} />}
-                  title={`Sin resultados para "${hubQuery}"`}
-                />
+                <FadeIn>
+                  <EmptyState
+                    icon={<SearchIcon size={28} />}
+                    title={`Sin resultados para "${hubQuery}"`}
+                    description="Prueba con otro término o explora las búsquedas sugeridas."
+                  />
+                </FadeIn>
               )}
 
+              {/* Results list */}
               <AnimatePresence mode="popLayout">
                 {hubResults.length > 0 && (
                   <motion.ul
-                    className="cv-list"
+                    className={s.list}
                     role="list"
                     key="hub-results"
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
                     exit={{ opacity: 0 }}
                     transition={{ duration: 0.15 }}
+                    aria-label={`${hubResults.length} resultados`}
                   >
                     <AnimatePresence initial={false}>
                       {hubResults.map((item, i) => (
@@ -510,64 +525,90 @@ export default function SkillsView() {
 
           {/* ── Installed skills ─────────────────────────────────────────── */}
           <StaggerItem>
-            <section className="cv-section" aria-label="Skills activas">
-              <h2 className="cv-section-label">{t('skills.installed.label')}</h2>
+            <section className={s.section} aria-label="Habilidades instaladas">
+              <div className={s.sectionHead}>
+                <span className={s.sectionLabel}>{t('skills.installed.label')}</span>
+                {installedCount !== null && installedCount > 0 && (
+                  <span className={s.sectionCount} aria-label={`${installedCount} habilidades`}>
+                    {installedCount}
+                  </span>
+                )}
+              </div>
 
+              {/* Loading skeletons */}
               {state.status === 'loading' && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }} aria-busy="true">
-                  {[...Array(2)].map((_, i) => <div key={i} className="cv-skeleton" style={{ height: 48 }} />)}
-                </div>
+                <ul className={s.list} aria-busy="true" aria-label="Cargando habilidades">
+                  {[0, 1, 2].map(i => (
+                    <li key={i}>
+                      <SkillRowSkeleton delay={i * 60} />
+                    </li>
+                  ))}
+                </ul>
               )}
 
+              {/* Error */}
               {state.status === 'error' && (
                 <FadeIn>
-                  <div role="alert">
-                    <p className="state-error">{state.message}</p>
-                    <Button variant="secondary" size="sm" onClick={loadInstalled} style={{ marginTop: 8 }}>Reintentar</Button>
+                  <div role="alert" className={s.errorInline}>
+                    <span className={s.errorIcon} aria-hidden="true">
+                      <AlertTriangle size={16} />
+                    </span>
+                    <div className={s.errorBody}>
+                      <p className={s.errorTitle}>No se pudieron cargar las habilidades</p>
+                      <p className={s.errorDesc}>{state.message}</p>
+                      <div className={s.errorActions}>
+                        <Button variant="secondary" size="sm" onClick={loadInstalled}>
+                          Reintentar
+                        </Button>
+                      </div>
+                    </div>
                   </div>
                 </FadeIn>
               )}
 
+              {/* Success */}
               {state.status === 'success' && (
                 state.skills.length === 0
                   ? (
-                    <EmptyState
-                      icon={<Zap size={36} />}
-                      title={t('skills.installed.empty')}
-                      action={
-                        <Button
-                          variant="secondary"
-                          size="sm"
-                          onClick={() => {
-                            hubInputRef.current?.focus()
-                            hubInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-                          }}
-                        >
-                          Buscar en el catálogo
-                        </Button>
-                      }
-                    />
+                    <FadeIn>
+                      <EmptyState
+                        icon={<Zap size={28} />}
+                        title={t('skills.installed.empty')}
+                        description="Busca en el catálogo e instala la primera en segundos."
+                        action={
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => {
+                              hubInputRef.current?.focus()
+                              hubInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+                            }}
+                          >
+                            Explorar el catálogo
+                          </Button>
+                        }
+                      />
+                    </FadeIn>
                   )
                   : (
-                    <ul className="cv-list" role="list">
+                    <ul className={s.list} role="list">
                       <AnimatePresence initial={false}>
-                        {state.skills.map(s => (
-                          <AnimatedListItem key={s.package_id ?? s.skill_id}>
+                        {state.skills.map(sk => (
+                          <AnimatedListItem key={sk.package_id ?? sk.skill_id}>
                             <SkillRow
-                              skill={s}
-                              loadingDetails={loadingDetailsId === (s.package_id ?? s.skill_id ?? '')}
-                              onView={() => handleViewSkillDetails(s)}
+                              skill={sk}
+                              loadingDetails={loadingDetailsId === (sk.package_id ?? sk.skill_id ?? '')}
+                              onView={() => handleViewSkillDetails(sk)}
                               onPromote={async () => {
-                                const pkgId = s.package_id ?? s.skill_id ?? ''
+                                const pkgId = sk.package_id ?? sk.skill_id ?? ''
                                 try {
                                   await promoteSkill(pkgId)
                                   show('El agente puede usar esta habilidad de forma autónoma', 'ok')
                                   loadInstalled()
-                                }
-                                catch (e) { show(e instanceof Error ? e.message : 'Error', 'error') }
+                                } catch (e) { show(e instanceof Error ? e.message : 'Error', 'error') }
                               }}
                               onUninstall={async () => {
-                                const name = s.skill_name ?? s.name ?? s.package_id ?? ''
+                                const name = sk.skill_name ?? sk.name ?? sk.package_id ?? ''
                                 const ok = await confirm({
                                   title: `¿Desinstalar "${name}"?`,
                                   description: 'El agente dejará de tener esta habilidad.',
@@ -597,9 +638,9 @@ export default function SkillsView() {
             </section>
           </StaggerItem>
 
-          {/* ── Teach a skill (animated accordion at the bottom) ────────── */}
+          {/* ── Teach a skill ────────────────────────────────────────────── */}
           <StaggerItem>
-            <section className="cv-section" aria-label="Enseñar una habilidad">
+            <section className={s.section} aria-label="Enseñar una habilidad">
               <TeachSkillExpander
                 teachPhase={teachPhase}
                 open={teachOpen}
@@ -625,17 +666,38 @@ export default function SkillsView() {
   )
 }
 
+// ── Skeleton row (mirrors installed skill row layout) ─────────────────────────
+
+function SkillRowSkeleton({ delay }: { delay: number }) {
+  return (
+    <div
+      className={s.skeletonRow}
+      style={{ animationDelay: `${delay}ms` }}
+    >
+      <div className={`skeleton ${s.skeletonIcon}`} />
+      <div className={s.skeletonBody}>
+        <div className={`skeleton skeleton--line ${s.skeletonTitle}`} />
+        <div className={`skeleton skeleton--line-sm ${s.skeletonMeta}`} />
+      </div>
+      <div className={s.skeletonActions}>
+        <div className={`skeleton ${s.skeletonBtn}`} />
+        <div className={`skeleton ${s.skeletonBtn}`} style={{ width: 28 }} />
+      </div>
+    </div>
+  )
+}
+
 // ── Installed skill row ───────────────────────────────────────────────────────
 
-type StateMeta = { label: string; variant: BadgeVariant }
+type StateMeta = { label: string; badgeCls: string }
 
-function useStateMeta(state: string): StateMeta {
+function useStateMeta(rawState: string): StateMeta {
   const t = useT()
-  const s = state.toLowerCase()
-  if (s.includes('autonom')) return { label: t('skills.state.autonomous'), variant: 'ok' }
-  if (s.includes('deprec'))  return { label: t('skills.state.deprecated'), variant: 'neutral' }
-  if (s.includes('valid'))   return { label: t('skills.state.validated'), variant: 'accent' }
-  return { label: state, variant: 'neutral' }
+  const lower = rawState.toLowerCase()
+  if (lower.includes('autonom')) return { label: t('skills.state.autonomous'), badgeCls: s.stateBadge + ' ' + s['stateBadge--ok'] }
+  if (lower.includes('deprec'))  return { label: t('skills.state.deprecated'), badgeCls: s.stateBadge + ' ' + s['stateBadge--neutral'] }
+  if (lower.includes('valid'))   return { label: t('skills.state.validated'),  badgeCls: s.stateBadge + ' ' + s['stateBadge--accent'] }
+  return { label: rawState, badgeCls: s.stateBadge + ' ' + s['stateBadge--neutral'] }
 }
 
 interface SkillRowProps {
@@ -657,28 +719,37 @@ function SkillRow({ skill, loadingDetails, onView, onPromote, onUninstall }: Ski
     : (skill.surface_kinds ?? '')
   const sub = [version, surfaces].filter(Boolean).join(' · ')
   const isValidated = (skill.state ?? '').toLowerCase().includes('valid')
+  const isAutonomous = (skill.state ?? '').toLowerCase().includes('autonom')
 
   return (
     <motion.div
-      className="skill-row"
+      className={`${s.skillRow}${isAutonomous ? ' ' + s['skillRow--autonomous'] : ''}`}
       whileHover={reduced ? undefined : { y: -2 }}
       transition={SPRING}
       layout
     >
-      <span className="ds-icon-chip" aria-hidden="true"><Zap size={14} /></span>
-      <div className="skill-row__info">
-        <div className="skill-row__name">{name}</div>
-        {sub && <div className="skill-row__desc">{sub}</div>}
+      <span
+        className={`${s.skillIcon}${isAutonomous ? ' ' + s['skillIcon--autonomous'] : ''}`}
+        aria-hidden="true"
+      >
+        <Zap size={14} />
+      </span>
+
+      <div className={s.skillInfo}>
+        <div className={s.skillName}>{name}</div>
+        {sub && <div className={s.skillMeta}>{sub}</div>}
       </div>
-      <div className="skill-row__actions">
+
+      <div className={s.skillActions}>
         {meta.label && (
-          <Badge variant={meta.variant}>{meta.label}</Badge>
+          <span className={meta.badgeCls}>{meta.label}</span>
         )}
         <button
           className="cv-btn cv-btn--secondary cv-btn--sm"
           onClick={onView}
           disabled={loadingDetails}
           aria-label={`Ver instrucciones de ${name}`}
+          aria-busy={loadingDetails}
         >
           {loadingDetails ? '…' : 'Ver'}
         </button>
@@ -696,7 +767,7 @@ function SkillRow({ skill, loadingDetails, onView, onPromote, onUninstall }: Ski
           onClick={onUninstall}
           aria-label={`Desinstalar ${name}`}
         >
-          <X size={14} aria-hidden="true" />
+          <X size={13} aria-hidden="true" />
         </button>
       </div>
     </motion.div>
@@ -705,14 +776,19 @@ function SkillRow({ skill, loadingDetails, onView, onPromote, onUninstall }: Ski
 
 // ── Hub result row ────────────────────────────────────────────────────────────
 
-const TRUST_VARIANT: Record<string, BadgeVariant> = {
-  official: 'ok', verified: 'ok', community: 'warn',
+type TrustLevel = 'official' | 'verified' | 'community' | string
+
+function trustBadgeClass(trust: TrustLevel): string {
+  const t = trust.toLowerCase()
+  if (t === 'official' || t === 'verified') return s.trustBadge + ' ' + s['trustBadge--official']
+  if (t === 'community') return s.trustBadge + ' ' + s['trustBadge--community']
+  return s.trustBadge + ' ' + s['trustBadge--neutral']
 }
 
 interface HubResultRowProps {
   item: HubSkillResult
   installedNames: Set<string>
-  onInstall: (item: HubSkillResult, onBtnUpdate: (s: 'installing' | 'installed' | 'ready') => void) => void
+  onInstall: (item: HubSkillResult, onBtnUpdate: (st: 'installing' | 'installed' | 'ready') => void) => void
 }
 
 function HubResultRow({ item, installedNames, onInstall }: HubResultRowProps) {
@@ -722,45 +798,66 @@ function HubResultRow({ item, installedNames, onInstall }: HubResultRowProps) {
   const already = installedNames.has(name) || installedNames.has(item.identifier ?? '')
   const docUrl = skillDocUrl(item)
   const trust = item.trust_level ?? ''
-  const trustVariant: BadgeVariant = TRUST_VARIANT[trust.toLowerCase()] ?? 'neutral'
+
+  const installLabel =
+    already || btnState === 'installed' ? 'Instalada' :
+    btnState === 'installing' ? 'Instalando…' :
+    'Instalar'
 
   return (
     <motion.div
-      className="skill-hub-result"
-      whileHover={reduced ? undefined : { y: -2 }}
+      className={s.hubRow}
+      whileHover={reduced ? undefined : { y: -1 }}
       transition={SPRING}
       layout
     >
-      <span className="ds-icon-chip ds-icon-chip--neutral" aria-hidden="true"><Package size={14} /></span>
-      <div className="skill-hub-result__info">
-        <div className="skill-hub-result__name">
+      <span className={s.hubIcon} aria-hidden="true">
+        <Package size={14} />
+      </span>
+
+      <div className={s.hubInfo}>
+        <div className={s.hubName}>
           {name}
-          {trust && <Badge variant={trustVariant}>{trust}</Badge>}
-          {item.source && <Badge variant="neutral">{item.source}</Badge>}
+          {trust && (
+            <span className={trustBadgeClass(trust)}>{trust}</span>
+          )}
+          {item.source && (
+            <span className={`${s.trustBadge} ${s['trustBadge--neutral']}`}>{item.source}</span>
+          )}
         </div>
         {item.description && (
-          <div className="skill-hub-result__desc" title={item.description}>{item.description}</div>
+          <div className={s.hubDesc} title={item.description}>
+            {item.description}
+          </div>
         )}
       </div>
-      <div className="skill-hub-result__actions">
+
+      <div className={s.hubActions}>
         {docUrl && (
-          <a href={docUrl} target="_blank" rel="noopener noreferrer" className="cv-link cv-btn--sm">
-            Documentación
+          <a
+            href={docUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className={s.docLink}
+            aria-label={`Documentación de ${name} (abre en nueva pestaña)`}
+          >
+            Docs
           </a>
         )}
         <button
           className="cv-btn cv-btn--secondary cv-btn--sm"
           disabled={already || btnState !== 'ready'}
           onClick={() => onInstall(item, setBtnState)}
+          aria-label={`${installLabel} ${name}`}
         >
-          {already || btnState === 'installed' ? 'Instalada' : btnState === 'installing' ? 'Instalando…' : 'Instalar'}
+          {installLabel}
         </button>
       </div>
     </motion.div>
   )
 }
 
-// ── Teach skill expander (replaces <details> with animated accordion) ─────────
+// ── Teach skill expander ──────────────────────────────────────────────────────
 
 interface TeachSkillExpanderProps {
   teachPhase: TeachPhase
@@ -786,33 +883,32 @@ function TeachSkillExpander({
 
   return (
     <div>
-      {/* Clickable header row — replaces <summary> */}
       <button
         type="button"
-        className="cv-teach-expander"
+        className={s.teachExpander}
         onClick={onToggle}
         aria-expanded={open}
         aria-controls="teach-skill-body"
       >
         <motion.span
+          className={s.teachChevron}
           aria-hidden="true"
           animate={reduced ? undefined : { rotate: open ? 90 : 0 }}
           transition={{ type: 'tween', ease: [0.4, 0, 0.2, 1], duration: 0.18 }}
           style={{ display: 'inline-flex', flexShrink: 0 }}
         >
-          <ChevronRight size={13} className="cv-teach-chevron" style={{ transform: 'none' }} />
+          <ChevronRight size={13} />
         </motion.span>
         {t('skills.teach.header')}
       </button>
 
-      {/* Animated body */}
       <AnimatedExpanderContent open={open}>
-        <div id="teach-skill-body" className="cv-teach-card" style={{ marginTop: 'var(--sp-3)' }}>
-          <p className="cv-teach-intro">
+        <div id="teach-skill-body" className={s.teachCard}>
+          <p className={s.teachIntro}>
             Enséñale a Lumen a operar en el navegador grabando una demostración. Aprende a usar plataformas y a operar por ti.
           </p>
-          <p className="cv-hint" style={{ marginBottom: 8 }}>
-            La demostración ocurre en un navegador aislado dentro de Lumen. No interrumpe otras tareas.
+          <p className={s.teachHint}>
+            La demostración ocurre en un navegador aislado dentro de Lumen y no interrumpe otras tareas.
           </p>
 
           <AnimatePresence mode="wait" initial={false}>
@@ -822,10 +918,14 @@ function TeachSkillExpander({
                 initial={reduced ? false : { opacity: 0, y: 4 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={reduced ? undefined : { opacity: 0, y: -4 }}
-                transition={{ type: 'tween', ease: [0.4, 0, 0.2, 1], duration: 0.15 }}
+                transition={TWEEN_FAST}
               >
-                <button className="cv-btn cv-btn--primary cv-btn--sm" onClick={() => onSetPhase('form')} style={{ alignSelf: 'flex-start' }}>
-                  + Enseñar skill
+                <button
+                  type="button"
+                  className="cv-btn cv-btn--secondary cv-btn--sm"
+                  onClick={() => onSetPhase('form')}
+                >
+                  + Nueva habilidad
                 </button>
               </motion.div>
             )}
@@ -833,32 +933,32 @@ function TeachSkillExpander({
             {teachPhase === 'form' && (
               <motion.div
                 key="form"
-                className="cv-form-stack"
+                className={s.teachFormStack}
                 initial={reduced ? false : { opacity: 0, y: 4 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={reduced ? undefined : { opacity: 0, y: -4 }}
-                transition={{ type: 'tween', ease: [0.4, 0, 0.2, 1], duration: 0.15 }}
+                transition={TWEEN_FAST}
               >
-                <label className="sr-only" htmlFor="teach-name">Nombre de la skill</label>
+                <label className="sr-only" htmlFor="teach-name">Nombre de la habilidad</label>
                 <input
                   id="teach-name"
                   ref={teachNameRef as React.RefObject<HTMLInputElement>}
-                  className="cv-input"
+                  className={s.teachInput}
                   type="text"
-                  placeholder='Nombre de la skill (p. ej. "Publicar en LinkedIn")'
+                  placeholder='Nombre (p. ej. "Publicar en LinkedIn")'
                   autoComplete="off"
                 />
-                <label className="sr-only" htmlFor="teach-desc">Descripción de la skill</label>
+                <label className="sr-only" htmlFor="teach-desc">Descripción de la habilidad</label>
                 <textarea
                   id="teach-desc"
                   ref={teachDescRef as React.RefObject<HTMLTextAreaElement>}
-                  className="cv-textarea"
-                  rows={4}
-                  placeholder="Describe qué hace y los pasos — el agente aprende la skill de aquí"
+                  className={s.teachTextarea}
+                  rows={3}
+                  placeholder="Describe qué hace y los pasos — el agente aprende la habilidad de aquí"
                 />
-                <div className="cv-form-actions">
-                  <button className="cv-btn cv-btn--primary cv-btn--sm" onClick={onStart}>Empezar</button>
-                  <button className="cv-btn cv-btn--ghost cv-btn--sm" onClick={onCancel}>Cancelar</button>
+                <div className={s.teachActions}>
+                  <Button variant="primary" size="sm" onClick={onStart}>Empezar grabación</Button>
+                  <Button variant="ghost" size="sm" onClick={onCancel}>Cancelar</Button>
                 </div>
               </motion.div>
             )}
@@ -866,19 +966,20 @@ function TeachSkillExpander({
             {teachPhase === 'recording' && (
               <motion.div
                 key="recording"
-                className="cv-form-stack"
+                className={s.teachFormStack}
                 initial={reduced ? false : { opacity: 0, y: 4 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={reduced ? undefined : { opacity: 0, y: -4 }}
-                transition={{ type: 'tween', ease: [0.4, 0, 0.2, 1], duration: 0.15 }}
+                transition={TWEEN_FAST}
               >
-                <p className="teach-recording-label" role="status" aria-live="polite">
+                <p className={s.recordingLabel} role="status" aria-live="polite">
+                  <span className={s.recordingDot} aria-hidden="true" />
                   Grabando la demostración…
                 </p>
-                <div className="cv-form-actions">
-                  <button className="cv-btn cv-btn--secondary cv-btn--sm" onClick={onPause} type="button">Pausar</button>
-                  <button className="cv-btn cv-btn--primary cv-btn--sm" onClick={onStop} type="button">{t('skills.teach.stop')}</button>
-                  <button className="cv-btn cv-btn--ghost cv-btn--sm cv-btn--danger" onClick={onCancel} type="button">Cancelar</button>
+                <div className={s.teachActions}>
+                  <Button variant="secondary" size="sm" onClick={onPause}>Pausar</Button>
+                  <Button variant="primary" size="sm" onClick={onStop}>{t('skills.teach.stop')}</Button>
+                  <Button variant="danger" size="sm" onClick={onCancel}>Cancelar</Button>
                 </div>
               </motion.div>
             )}
@@ -886,17 +987,19 @@ function TeachSkillExpander({
             {teachPhase === 'paused' && (
               <motion.div
                 key="paused"
-                className="cv-form-stack"
+                className={s.teachFormStack}
                 initial={reduced ? false : { opacity: 0, y: 4 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={reduced ? undefined : { opacity: 0, y: -4 }}
-                transition={{ type: 'tween', ease: [0.4, 0, 0.2, 1], duration: 0.15 }}
+                transition={TWEEN_FAST}
               >
-                <p className="state-label" role="status" aria-live="polite">Grabación en pausa.</p>
-                <div className="cv-form-actions">
-                  <button className="cv-btn cv-btn--primary cv-btn--sm" onClick={onResume} type="button">Reanudar</button>
-                  <button className="cv-btn cv-btn--secondary cv-btn--sm" onClick={onStop} type="button">{t('skills.teach.stop_paused')}</button>
-                  <button className="cv-btn cv-btn--ghost cv-btn--sm cv-btn--danger" onClick={onCancel} type="button">Cancelar</button>
+                <p className={s.statusLabel} role="status" aria-live="polite">
+                  Grabación en pausa.
+                </p>
+                <div className={s.teachActions}>
+                  <Button variant="primary" size="sm" onClick={onResume}>Reanudar</Button>
+                  <Button variant="secondary" size="sm" onClick={onStop}>{t('skills.teach.stop_paused')}</Button>
+                  <Button variant="danger" size="sm" onClick={onCancel}>Cancelar</Button>
                 </div>
               </motion.div>
             )}
@@ -904,7 +1007,7 @@ function TeachSkillExpander({
             {teachPhase === 'synth' && (
               <motion.p
                 key="synth"
-                className="state-label"
+                className={s.statusLabel}
                 aria-live="polite"
                 aria-busy="true"
                 initial={reduced ? false : { opacity: 0 }}

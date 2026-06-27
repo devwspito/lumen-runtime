@@ -1,0 +1,108 @@
+/* ─── Design Tokens — WorkOS/Radix slate-blue, dark-first ─────────────────── */
+/*     Single source of truth for Community. Port of the enterprise token set.  */
+:root {
+  /* ── Slate scale (Radix 12-step) ─────────────────────────────────────────── */
+  --slate-1:  #151718;
+  --slate-2:  #1a1d1e;
+  --slate-3:  #202425;
+  --slate-4:  #26292b;
+  --slate-5:  #2b2f31;
+  --slate-6:  #313538;
+  --slate-7:  #3a3f42;
+  --slate-8:  #4c5155;
+  --slate-9:  #697177;
+  --slate-10: #787f85;
+  --slate-11: #9ba1a6;
+  --slate-12: #ecedee;
+
+  /* ── Semantic surfaces ────────────────────────────────────────────────────── */
+  --color-bg:            var(--slate-1);
+  --color-surface:       var(--slate-2);
+  --color-surface-raise: var(--slate-3);
+  --color-surface-hover: rgba(255, 255, 255, 0.04);
+  --color-surface-press: rgba(255, 255, 255, 0.06);
+  --color-border-subtle: var(--slate-6);
+  --color-border:        var(--slate-7);
+  --color-text:          var(--slate-12);
+  --color-text-muted:    var(--slate-11);
+  --color-text-dim:      var(--slate-9);
+
+  /* ── Blue accent — primary actions/links ONLY ────────────────────────────── */
+  --blue-9:         #0091ff;
+  --blue-10:        #369eff;
+  --blue-11:        #52a9ff;
+  --blue-surface-1: #10243e;
+  --blue-surface-2: #102a4c;
+
+  --color-accent:         var(--blue-9);
+  --color-accent-hover:   var(--blue-10);
+  --color-accent-text:    var(--blue-11);
+  --color-accent-surface: var(--blue-surface-1);
+
+  /* ── Status semantic ─────────────────────────────────────────────────────── */
+  --color-success:         #30a46c;
+  --color-success-surface: #0d2b1d;
+  --color-warning:         #f5a623;
+  --color-warning-surface: #2b1d00;
+  --color-danger:          #e5484d;
+  --color-danger-surface:  #2b0d0d;
+
+  /* ── Typography ──────────────────────────────────────────────────────────── */
+  --font-ui:   "Inter", "system-ui", sans-serif;
+  --font-mono: ui-monospace, "Geist Mono", "Source Code Pro", "Menlo", monospace;
+
+  /* Type scale — base 13px dense UI */
+  --text-xs:   0.6875rem;  /* 11px */
+  --text-sm:   0.75rem;    /* 12px */
+  --text-base: 0.8125rem;  /* 13px — dense UI base */
+  --text-md:   0.875rem;   /* 14px */
+  --text-lg:   1rem;       /* 16px */
+  --text-xl:   1.125rem;   /* 18px */
+  --text-2xl:  1.375rem;   /* 22px */
+  --text-3xl:  1.75rem;    /* 28px */
+
+  /* Weights */
+  --weight-regular:  400;
+  --weight-medium:   500;
+  --weight-semibold: 600;
+
+  /* Tracking — negative on headings */
+  --tracking-tight:   -0.01em;
+  --tracking-tighter: -0.02em;
+
+  /* Leading */
+  --leading-dense:  1.3;
+  --leading-normal: 1.5;
+
+  /* ── Spacing — 4px grid ──────────────────────────────────────────────────── */
+  --space-1:  0.25rem;   /* 4px  */
+  --space-2:  0.5rem;    /* 8px  */
+  --space-3:  0.75rem;   /* 12px */
+  --space-4:  1rem;      /* 16px */
+  --space-5:  1.25rem;   /* 20px */
+  --space-6:  1.5rem;    /* 24px */
+  --space-8:  2rem;      /* 32px */
+  --space-10: 2.5rem;    /* 40px */
+  --space-12: 3rem;      /* 48px */
+  --space-16: 4rem;      /* 64px */
+
+  /* ── Border radius ───────────────────────────────────────────────────────── */
+  --radius-sm:   4px;
+  --radius-md:   6px;
+  --radius-lg:   8px;
+  --radius-pill: 9999px;
+
+  /* ── Depth — borders + luminance delta; shadows ONLY on overlays/drawers ─── */
+  --shadow-overlay: 0 8px 32px rgba(0, 0, 0, 0.56), 0 2px 8px rgba(0, 0, 0, 0.32);
+  --shadow-popover: 0 4px 16px rgba(0, 0, 0, 0.48), 0 1px 4px rgba(0, 0, 0, 0.24);
+
+  /* ── Motion — animate ONLY transform/opacity; never "transition: all" ────── */
+  --dur-quick: 100ms;
+  --dur-base:  160ms;
+  --dur-slow:  240ms;
+  --ease:      cubic-bezier(0.2, 0, 0, 1);
+
+  /* ── Layout ──────────────────────────────────────────────────────────────── */
+  --sidebar-width: 220px;
+  --topbar-height: 48px;
+}

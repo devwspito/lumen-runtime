@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
 import { sileo } from 'sileo'
-import { X } from 'lucide-react'
+import { X, AlertTriangle, Users, RefreshCw, Maximize2 } from 'lucide-react'
 
 import { getAgentRoster, getRuntimeStatus, listMcpServers, createAgent, updateAgent, deleteAgent, getDefaultRoster, setDefaultRoster, getAgentStats } from '../api/client'
 import type { AgentRoster, RosterAgent, RosterDepartment, RuntimeStatus, CreateAgentPayload, UpdateAgentPayload, AgentStatsResponse } from '../api/types'
@@ -9,6 +9,11 @@ import type { LumenAgent, LumenRuntimeStatus } from './office-live/engine/office
 import { useConfirmDialog } from '../components/ConfirmDialog'
 import { useT } from '../lib/i18n'
 import type { ChatOutletContext } from '../components/Layout'
+import { AnimatedDrawer, AnimatedPageHeaderText, AnimatePresence, motion, useReducedMotion, SPRING, Stagger, StaggerItem } from '../components/ui/motion'
+import { Badge, StatusDot } from '../components/ui/Badge'
+import { Button } from '../components/ui/Button'
+
+import styles from './OfficeView.module.css'
 
 // ── Lazy-load the canvas so the rAF loop only starts when En-vivo is shown ──
 
@@ -73,6 +78,57 @@ function activeAgentIds(runtimeStatus: RuntimeStatus): Set<string> {
   return ids
 }
 
+// ── Loading skeleton ──────────────────────────────────────────────────────────
+
+function OfficeSkeleton() {
+  return (
+    <div className={styles.skeletonWrap} aria-busy="true" aria-label="Cargando equipo…">
+      {/* Section 1 */}
+      <div className={styles.skeletonSection}>
+        <div className={styles.skeletonSectionHead}>
+          <div className="skeleton skeleton--line" style={{ width: 120 }} aria-hidden />
+          <div className="skeleton skeleton--line-sm" style={{ width: 200 }} aria-hidden />
+        </div>
+        <div className={styles.skeletonGrid}>
+          {Array.from({ length: 3 }).map((_, i) => (
+            <div key={i} className={styles.skeletonCard} style={{ animationDelay: `${i * 0.08}s` }}>
+              <div className={styles.skeletonCardRow}>
+                <div className="skeleton skeleton--avatar" aria-hidden />
+                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <div className="skeleton skeleton--line" style={{ width: '70%' }} aria-hidden />
+                  <div className="skeleton skeleton--line-sm" style={{ width: '45%' }} aria-hidden />
+                </div>
+              </div>
+              <div className="skeleton skeleton--line" style={{ width: '90%' }} aria-hidden />
+              <div className="skeleton skeleton--line-sm" style={{ width: '60%' }} aria-hidden />
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Section 2 */}
+      <div className={styles.skeletonSection}>
+        <div className={styles.skeletonSectionHead}>
+          <div className="skeleton skeleton--line" style={{ width: 90 }} aria-hidden />
+        </div>
+        <div className={styles.skeletonGrid}>
+          {Array.from({ length: 2 }).map((_, i) => (
+            <div key={i} className={styles.skeletonCard} style={{ animationDelay: `${(i + 3) * 0.08}s` }}>
+              <div className={styles.skeletonCardRow}>
+                <div className="skeleton skeleton--avatar" aria-hidden />
+                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <div className="skeleton skeleton--line" style={{ width: '65%' }} aria-hidden />
+                  <div className="skeleton skeleton--line-sm" style={{ width: '40%' }} aria-hidden />
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── Department selector (used by create/edit modal) ───────────────────────────
 
 interface DeptSelectorProps {
@@ -84,14 +140,10 @@ interface DeptSelectorProps {
 
 function DeptSelector({ departments, value, onChange, id }: DeptSelectorProps) {
   const t = useT()
-  // showCustom tracks whether the user explicitly chose "Nuevo departamento…"
-  // We never mirror value back into a separate local state — the parent owns it.
   const [showCustom, setShowCustom] = useState(false)
   const customRef = useRef<HTMLInputElement>(null)
 
   const existingNames = departments.map((d) => d.name)
-
-  // If the current value isn't in the list it must be a custom entry
   const isCustom = value !== '' && !existingNames.includes(value)
   const showInput = showCustom || isCustom
 
@@ -117,11 +169,11 @@ function DeptSelector({ departments, value, onChange, id }: DeptSelectorProps) {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--sp-1)' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-1)' }}>
       {!showInput ? (
         <select
           id={id}
-          className="office-field-input"
+          className={styles.fieldInput}
           value={value}
           onChange={handleSelectChange}
         >
@@ -132,12 +184,12 @@ function DeptSelector({ departments, value, onChange, id }: DeptSelectorProps) {
           <option value="__new__">{t('agents.dept.new')}</option>
         </select>
       ) : (
-        <div style={{ display: 'flex', gap: 'var(--sp-2)' }}>
+        <div className={styles.deptRow}>
           <input
             ref={customRef}
             id={id}
             type="text"
-            className="office-field-input"
+            className={styles.fieldInput}
             value={value}
             onChange={handleCustomChange}
             placeholder={t('agents.dept.new.placeholder')}
@@ -146,12 +198,11 @@ function DeptSelector({ departments, value, onChange, id }: DeptSelectorProps) {
           />
           <button
             type="button"
-            className="office-btn office-btn--ghost"
-            style={{ height: 36, padding: '0 var(--sp-3)', fontSize: 'var(--text-label)' }}
+            className={styles.deptClearBtn}
             onClick={handleClear}
             aria-label={t('agents.dept.clear.aria')}
           >
-            <X size={16} aria-hidden="true" />
+            <X size={14} aria-hidden="true" />
           </button>
         </div>
       )}
@@ -166,7 +217,6 @@ type AgentFormMode = 'create' | 'clone' | 'edit'
 interface AgentFormModalProps {
   departments: RosterDepartment[]
   mode: AgentFormMode
-  /** For clone/edit: the current agent being prefilled or edited */
   editTarget?: RosterAgent
   prefill?: { name: string; description: string; department: string }
   onClose: () => void
@@ -267,43 +317,43 @@ function AgentFormModal({ departments, mode, editTarget, prefill, onClose, onSav
 
   return (
     <div
-      className="office-modal-backdrop"
+      className={styles.modalBackdrop}
       role="dialog"
       aria-modal="true"
       aria-labelledby={titleId}
       onClick={(e) => { if (e.target === e.currentTarget) onClose() }}
     >
-      <div className="office-modal">
-        <div className="office-modal-header">
-          <h2 id={titleId} className="office-modal-title">
+      <div className={styles.modal}>
+        <div className={styles.modalHeader}>
+          <h2 id={titleId} className={styles.modalTitle}>
             {titleByMode[mode]}
           </h2>
           <button
             type="button"
-            className="office-modal-close"
+            className={styles.modalCloseBtn}
             onClick={onClose}
             aria-label={t('agents.form.close')}
           >
-            <X size={16} aria-hidden="true" />
+            <X size={14} aria-hidden="true" />
           </button>
         </div>
 
-        <form onSubmit={handleSubmit} noValidate className="office-modal-form">
+        <form onSubmit={handleSubmit} noValidate className={styles.modalForm}>
           {mode === 'clone' && (
-            <p style={{ fontSize: 'var(--text-label)', color: 'var(--ink3)' }}>
+            <p className={styles.modalCloneHint}>
               {t('agents.form.clone.hint')}
             </p>
           )}
 
-          <div className="office-field">
-            <label htmlFor={nameId} className="office-field-label">{t('agents.form.name.label')}</label>
+          <div className={styles.field}>
+            <label htmlFor={nameId} className={styles.fieldLabel}>{t('agents.form.name.label')}</label>
             <input
               ref={firstInputRef}
               id={nameId}
               type="text"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              className="office-field-input"
+              className={styles.fieldInput}
               required
               aria-required="true"
               aria-describedby={error ? errorId : undefined}
@@ -312,21 +362,21 @@ function AgentFormModal({ departments, mode, editTarget, prefill, onClose, onSav
             />
           </div>
 
-          <div className="office-field">
-            <label htmlFor={descId} className="office-field-label">{t('agents.form.desc.label')}</label>
+          <div className={styles.field}>
+            <label htmlFor={descId} className={styles.fieldLabel}>{t('agents.form.desc.label')}</label>
             <textarea
               id={descId}
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              className="office-field-input office-field-textarea"
+              className={`${styles.fieldInput} ${styles.fieldTextarea}`}
               maxLength={500}
               rows={3}
               placeholder={t('agents.form.desc.placeholder')}
             />
           </div>
 
-          <div className="office-field">
-            <label htmlFor={deptId} className="office-field-label">{t('agents.form.dept.label')}</label>
+          <div className={styles.field}>
+            <label htmlFor={deptId} className={styles.fieldLabel}>{t('agents.form.dept.label')}</label>
             <DeptSelector
               id={deptId}
               departments={departments}
@@ -336,28 +386,31 @@ function AgentFormModal({ departments, mode, editTarget, prefill, onClose, onSav
           </div>
 
           {error && (
-            <p id={errorId} role="alert" className="office-field-error">
+            <p id={errorId} role="alert" className={styles.fieldError}>
+              <AlertTriangle size={13} aria-hidden="true" />
               {error}
             </p>
           )}
 
-          <div className="office-modal-actions">
-            <button
+          <div className={styles.modalActions}>
+            <Button
               type="button"
+              variant="ghost"
+              size="sm"
               onClick={onClose}
-              className="office-btn office-btn--ghost"
               disabled={pending}
             >
               {t('agents.form.cancel')}
-            </button>
-            <button
+            </Button>
+            <Button
               type="submit"
-              className="office-btn office-btn--primary"
-              disabled={pending}
+              variant="primary"
+              size="sm"
+              loading={pending}
               aria-busy={pending}
             >
               {pending ? pendingLabel : submitLabel}
-            </button>
+            </Button>
           </div>
         </form>
       </div>
@@ -371,12 +424,13 @@ interface AgentDrawerProps {
   agent: RosterAgent
   departments: RosterDepartment[]
   isWorking: boolean
+  open: boolean
   onClose: () => void
   onClone: (agent: RosterAgent) => void
   onRefetch: () => void
 }
 
-function AgentDrawer({ agent, departments, isWorking, onClose, onClone, onRefetch }: AgentDrawerProps) {
+function AgentDrawer({ agent, departments, isWorking, open, onClose, onClone, onRefetch }: AgentDrawerProps) {
   const t = useT()
   const navigate = useNavigate()
   const { startNewWithAgent } = useOutletContext<ChatOutletContext>()
@@ -387,12 +441,7 @@ function AgentDrawer({ agent, departments, isWorking, onClose, onClone, onRefetc
   const [showEditModal, setShowEditModal] = useState(false)
   const [confirm, ConfirmDialogNode] = useConfirmDialog()
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
-  }, [onClose])
-
+  // Escape key handled by AnimatedDrawer backdrop
   function handleChat() {
     startNewWithAgent(agent.id, agent.name)
     onClose()
@@ -413,12 +462,10 @@ function AgentDrawer({ agent, departments, isWorking, onClose, onClone, onRefetc
       onRefetch()
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : t('agents.drawer.toast.delete_err')
-      // 403 means the backend protected it (CEO / default agent)
       sileo.error({ title: msg })
     }
   }
 
-  // Strip the "custom:<slug>" namespace the backend uses when displaying the dept label
   const deptLabel = agent.department
     ? agent.department.replace(/^custom:/i, '')
     : ''
@@ -426,127 +473,116 @@ function AgentDrawer({ agent, departments, isWorking, onClose, onClone, onRefetc
   return (
     <>
       {ConfirmDialogNode}
-      <div
-        className="office-drawer-backdrop"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="agent-drawer-title"
-        onClick={(e) => { if (e.target === e.currentTarget) onClose() }}
+      <AnimatedDrawer
+        open={open}
+        onBackdropClick={onClose}
+        label={agent.name}
+        width={380}
       >
-        <div className="office-drawer">
-          <div className="office-drawer-header">
-            <div
-              className="agent-avatar"
-              style={{ background: agent.color ?? 'var(--accent)' }}
-              aria-hidden="true"
-            >
-              {initials}
-            </div>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <h2 id="agent-drawer-title" className="office-drawer-title">{agent.name}</h2>
-              {deptLabel && (
-                <p className="agent-role" style={{ margin: 0 }}>{deptLabel}</p>
-              )}
-            </div>
-            {isDefault && <span className="badge">{t('agents.badge.default')}</span>}
-            {isFactory && (
-              <span
-                className="badge"
-                style={{
-                  background: 'color-mix(in srgb, var(--ok) 15%, transparent)',
-                  color: 'var(--ok)',
-                }}
-              >
-                {t('agents.badge.factory')}
-              </span>
+        {/* Drawer inner — always rendered inside AnimatedDrawer portal */}
+        <div className={styles.drawerHeader}>
+          <div
+            className={styles.avatar}
+            style={{ background: agent.color ?? 'var(--color-accent)' }}
+            aria-hidden="true"
+          >
+            {initials}
+          </div>
+          <div className={styles.drawerTitleBlock}>
+            <h2 id="agent-drawer-title" className={styles.drawerTitle}>{agent.name}</h2>
+            {deptLabel && (
+              <p className={styles.drawerDept}>{deptLabel}</p>
             )}
-            <button type="button" className="office-modal-close" onClick={onClose} aria-label={t('agents.drawer.close')}><X size={16} aria-hidden="true" /></button>
+          </div>
+          <div className={styles.drawerBadges}>
+            {isDefault && (
+              <Badge variant="default">{t('agents.badge.default')}</Badge>
+            )}
+            {isFactory && (
+              <Badge variant="success">{t('agents.badge.factory')}</Badge>
+            )}
+          </div>
+          <button
+            type="button"
+            className={styles.drawerCloseBtn}
+            onClick={onClose}
+            aria-label={t('agents.drawer.close')}
+          >
+            <X size={14} aria-hidden="true" />
+          </button>
+        </div>
+
+        <div className={styles.drawerBody}>
+          {agent.description && (
+            <p className={styles.drawerMission}>
+              {agent.description}
+            </p>
+          )}
+
+          {(isDefault || isFactory) && !isEditable && (
+            <p className={styles.drawerReadonlyNotice}>
+              {isDefault
+                ? t('agents.drawer.readonly.default')
+                : t('agents.drawer.readonly.factory')}
+            </p>
+          )}
+
+          <div className={styles.drawerStatusRow} aria-live="polite">
+            <StatusDot
+              state={isWorking ? 'warning' : 'success'}
+              label={isWorking ? t('agents.status.working') : t('agents.status.online')}
+            />
           </div>
 
-          <div className="office-drawer-body">
-            {agent.description && (
-              <p className="agent-mission" style={{ marginBottom: 'var(--sp-5)' }}>
-                {agent.description}
-              </p>
-            )}
+          <div className={styles.drawerActions}>
+            <Button
+              type="button"
+              variant="primary"
+              onClick={handleChat}
+              title={t('agents.drawer.chat.title')}
+            >
+              {t('agents.drawer.chat')}
+            </Button>
 
-            {/* Non-editable notice for CEO / default agents */}
-            {(isDefault || isFactory) && !isEditable && (
-              <p style={{
-                fontSize: 'var(--text-label)',
-                color: 'var(--ink3)',
-                marginBottom: 'var(--sp-5)',
-                padding: 'var(--sp-3)',
-                background: 'var(--surface2)',
-                borderRadius: 'var(--r-sm)',
-              }}>
-                {isDefault
-                  ? t('agents.drawer.readonly.default')
-                  : t('agents.drawer.readonly.factory')}
-              </p>
-            )}
-
-            <div className="office-drawer-status">
-              <span
-                className="office-status-dot"
-                style={{ background: isWorking ? 'var(--warn)' : 'var(--ok)' }}
-                aria-hidden="true"
-              />
-              <span style={{ fontSize: 'var(--text-label)', color: 'var(--ink3)' }}>
-                {isWorking ? t('agents.status.working') : t('agents.status.online')}
-              </span>
-            </div>
-
-            <div className="office-drawer-actions">
-              <button
+            {(isFactory || isDefault) && (
+              <Button
                 type="button"
-                className="office-btn office-btn--primary"
-                onClick={handleChat}
-                title={t('agents.drawer.chat.title')}
+                variant="ghost"
+                onClick={() => { onClone(agent); onClose() }}
               >
-                {t('agents.drawer.chat')}
-              </button>
+                {t('agents.drawer.clone')}
+              </Button>
+            )}
 
-              {(isFactory || isDefault) && (
-                <button
+            {isEditable && (
+              <>
+                <Button
                   type="button"
-                  className="office-btn office-btn--ghost"
-                  onClick={() => { onClone(agent); onClose() }}
+                  variant="ghost"
+                  onClick={() => { navigate('/programadas'); onClose() }}
                 >
-                  {t('agents.drawer.clone')}
-                </button>
-              )}
-
-              {isEditable && (
-                <>
-                  <button
-                    type="button"
-                    className="office-btn office-btn--ghost"
-                    onClick={() => { navigate('/programadas'); onClose() }}
-                  >
-                    {t('agents.drawer.schedule')}
-                  </button>
-                  <button
-                    type="button"
-                    className="office-btn office-btn--ghost"
-                    onClick={() => setShowEditModal(true)}
-                  >
-                    {t('agents.drawer.edit')}
-                  </button>
-                  <button
-                    type="button"
-                    className="office-btn office-btn--ghost"
-                    style={{ color: 'var(--danger)' }}
-                    onClick={handleDelete}
-                  >
-                    {t('agents.drawer.delete')}
-                  </button>
-                </>
-              )}
-            </div>
+                  {t('agents.drawer.schedule')}
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={() => setShowEditModal(true)}
+                >
+                  {t('agents.drawer.edit')}
+                </Button>
+                <Button
+                  type="button"
+                  variant="danger"
+                  className={styles.drawerActionDanger}
+                  onClick={handleDelete}
+                >
+                  {t('agents.drawer.delete')}
+                </Button>
+              </>
+            )}
           </div>
         </div>
-      </div>
+      </AnimatedDrawer>
 
       {showEditModal && (
         <AgentFormModal
@@ -575,12 +611,21 @@ interface AgentCardProps {
 
 function AgentCard({ agent, isWorking, onClick }: AgentCardProps) {
   const t = useT()
+  const reduced = useReducedMotion()
   const initials = agent.name.charAt(0).toUpperCase()
   const isFactory = agent.source === 'ruflo'
+  const deptLabel = agent.department
+    ? agent.department.replace(/^custom:/i, '')
+    : ''
 
-  return (
+  const cardClasses = [
+    styles.agentCard,
+    isWorking ? styles.agentCardWorking : '',
+  ].filter(Boolean).join(' ')
+
+  const Inner = (
     <article
-      className="agent-card office-agent-card"
+      className={cardClasses}
       role="button"
       tabIndex={0}
       onClick={onClick}
@@ -589,44 +634,49 @@ function AgentCard({ agent, isWorking, onClick }: AgentCardProps) {
         ? t('agents.card.aria').replace('{name}', agent.name)
         : t('agents.card.aria_idle').replace('{name}', agent.name)
       }
-      style={{ cursor: 'pointer' }}
     >
-      <div className="agent-card-header">
+      <div className={styles.cardHeader}>
         <div
-          className="agent-avatar"
-          style={{ background: agent.color ?? 'var(--accent)' }}
+          className={styles.avatar}
+          style={{ background: agent.color ?? 'var(--color-accent)' }}
           aria-hidden="true"
         >
           {initials}
         </div>
-        <div className="agent-meta">
-          <p className="agent-name">{agent.name}</p>
-          {agent.department && <p className="agent-role">{agent.department}</p>}
+        <div className={styles.cardMeta}>
+          <p className={styles.agentName}>{agent.name}</p>
+          {deptLabel && <p className={styles.agentDept}>{deptLabel}</p>}
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--sp-2)', flexShrink: 0 }}>
-          {agent.is_default && <span className="badge">{t('agents.badge.default')}</span>}
-          {isFactory && (
-            <span
-              className="badge"
-              style={{
-                background: 'color-mix(in srgb, var(--ok) 15%, transparent)',
-                color: 'var(--ok)',
-                fontSize: 'var(--text-micro)',
-              }}
-            >
-              {t('agents.badge.factory')}
-            </span>
+        <div className={styles.cardBadges}>
+          {agent.is_default && (
+            <Badge variant="default">{t('agents.badge.default')}</Badge>
           )}
-          <span
-            className="office-status-dot"
-            style={{ background: isWorking ? 'var(--warn)' : 'var(--ok)' }}
-            aria-label={isWorking ? t('agents.status.working') : t('agents.status.online')}
-            role="img"
+          {isFactory && (
+            <Badge variant="success">{t('agents.badge.factory')}</Badge>
+          )}
+          <StatusDot
+            state={isWorking ? 'warning' : 'success'}
+            label={isWorking ? t('agents.status.working') : t('agents.status.online')}
           />
         </div>
       </div>
-      {agent.description && <p className="agent-mission">{agent.description}</p>}
+      {agent.description && (
+        <p className={styles.agentMission}>{agent.description}</p>
+      )}
     </article>
+  )
+
+  if (reduced) return Inner
+
+  return (
+    <motion.div
+      whileHover={{ y: -2 }}
+      whileTap={{ y: 0 }}
+      transition={SPRING}
+      style={{ borderRadius: 'var(--radius-md)' }}
+    >
+      {Inner}
+    </motion.div>
   )
 }
 
@@ -652,43 +702,47 @@ function DepartmentSection({ dept, activeIds, onAgentClick, onCreateClick, secti
   }
 
   return (
-    <section aria-labelledby={headingId} className="office-section">
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 'var(--sp-3)' }}>
-        <h2 id={headingId} className="office-section-title">{dept.name}</h2>
+    <section aria-labelledby={headingId} className={styles.section}>
+      <div className={styles.sectionHead}>
+        <h2 id={headingId} className={styles.sectionTitle}>{dept.name}</h2>
         {dept.kind === 'factory' && (
-          <span style={{ fontSize: 'var(--text-caption)', color: 'var(--ink4)' }}>{t('agents.dept.factory.tag')}</span>
+          <span className={styles.sectionTag}>{t('agents.dept.factory.tag')}</span>
         )}
       </div>
       {descriptionByKind[dept.kind] && (
-        <p className="office-section-desc">{descriptionByKind[dept.kind]}</p>
+        <p className={styles.sectionDesc}>{descriptionByKind[dept.kind]}</p>
       )}
 
-      <ul className="agent-grid" role="list">
-        {dept.agents.map((a) => (
-          <li key={a.id}>
-            <AgentCard
-              agent={a}
-              isWorking={activeIds.has(a.id)}
-              onClick={() => onAgentClick(a)}
-            />
-          </li>
-        ))}
-        {/* Only show the create card in the first custom department section, or
-            as the last item when there are no custom sections yet */}
-        {isCustomDept && sectionIndex === 0 && (
-          <li>
-            <button
-              type="button"
-              className="agent-card office-create-card"
-              onClick={onCreateClick}
-              aria-label={t('agents.card.create.aria')}
-            >
-              <span className="office-create-icon" aria-hidden="true">+</span>
-              <span className="office-create-label">{t('agents.card.create.label')}</span>
-            </button>
-          </li>
-        )}
-      </ul>
+      <Stagger>
+        <ul className={styles.agentGrid} role="list">
+          {dept.agents.map((a) => (
+            <StaggerItem key={a.id} style={{ listStyle: 'none' }}>
+              <li style={{ listStyle: 'none' }}>
+                <AgentCard
+                  agent={a}
+                  isWorking={activeIds.has(a.id)}
+                  onClick={() => onAgentClick(a)}
+                />
+              </li>
+            </StaggerItem>
+          ))}
+          {isCustomDept && sectionIndex === 0 && (
+            <StaggerItem style={{ listStyle: 'none' }}>
+              <li style={{ listStyle: 'none' }}>
+                <button
+                  type="button"
+                  className={styles.createCard}
+                  onClick={onCreateClick}
+                  aria-label={t('agents.card.create.aria')}
+                >
+                  <span className={styles.createIcon} aria-hidden="true">+</span>
+                  <span className={styles.createLabel}>{t('agents.card.create.label')}</span>
+                </button>
+              </li>
+            </StaggerItem>
+          )}
+        </ul>
+      </Stagger>
     </section>
   )
 }
@@ -728,8 +782,7 @@ function TarjetasView({ roster, runtimeStatus, hasRuflo, onRosterRefetch, onAgen
 
   return (
     <>
-      <div className="office-tarjetas">
-        {/* ── CEO (default) departments ── */}
+      <div className={styles.tarjetasBody}>
         {cerebroDepts.map((dept) => (
           <DepartmentSection
             key={dept.id}
@@ -741,7 +794,6 @@ function TarjetasView({ roster, runtimeStatus, hasRuflo, onRosterRefetch, onAgen
           />
         ))}
 
-        {/* ── Custom (user) departments ── */}
         {customDepts.map((dept, i) => (
           <DepartmentSection
             key={dept.id}
@@ -753,23 +805,23 @@ function TarjetasView({ roster, runtimeStatus, hasRuflo, onRosterRefetch, onAgen
           />
         ))}
 
-        {/* ── Empty-state for custom agents when no custom departments exist ── */}
         {!hasCustomDepts && (
-          <section aria-labelledby="section-mis-agentes" className="office-section">
-            <h2 id="section-mis-agentes" className="office-section-title">{t('agents.dept.mine.title')}</h2>
-            <p className="state-label" style={{ padding: 0 }}>{t('agents.dept.mine.empty')}</p>
-            <button
-              type="button"
-              className="office-btn office-btn--ghost"
-              style={{ marginTop: 'var(--sp-4)', alignSelf: 'flex-start' }}
-              onClick={() => setShowCreateModal(true)}
-            >
-              + {t('agents.card.create.label')}
-            </button>
+          <section aria-labelledby="section-mis-agentes" className={styles.section}>
+            <h2 id="section-mis-agentes" className={styles.sectionTitle}>{t('agents.dept.mine.title')}</h2>
+            <div className={styles.mineEmpty}>
+              <p className={styles.mineEmptyText}>{t('agents.dept.mine.empty')}</p>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => setShowCreateModal(true)}
+              >
+                + {t('agents.card.create.label')}
+              </Button>
+            </div>
           </section>
         )}
 
-        {/* ── Factory (Ruflo) departments ── */}
         {factoryDepts.map((dept) => (
           <DepartmentSection
             key={dept.id}
@@ -781,34 +833,22 @@ function TarjetasView({ roster, runtimeStatus, hasRuflo, onRosterRefetch, onAgen
           />
         ))}
 
-        {/* ── System swarm indicator (when detected via MCP but roster doesn't show it) ── */}
         {hasRuflo && factoryDepts.length === 0 && (
-          <section aria-labelledby="section-system-swarm" className="office-section">
-            <h2 id="section-system-swarm" className="office-section-title">{t('agents.dept.swarm.title')}</h2>
-            <p className="office-section-desc">
+          <section aria-labelledby="section-system-swarm" className={styles.section}>
+            <h2 id="section-system-swarm" className={styles.sectionTitle}>{t('agents.dept.swarm.title')}</h2>
+            <p className={styles.swarmDesc}>
               {t('agents.dept.swarm.desc')}
               {runtimeStatus.ruflo_active && (
-                <span
-                  className="office-status-dot"
-                  style={{ background: 'var(--ok)', marginLeft: 8, verticalAlign: 'middle' }}
-                  aria-label={t('agents.dept.swarm.active')}
-                  role="img"
+                <StatusDot
+                  state="success"
+                  label={t('agents.dept.swarm.active')}
                 />
               )}
             </p>
           </section>
         )}
 
-        {/* ── Powered by Ruflo ── */}
-        <p style={{
-          fontSize: 'var(--text-micro)',
-          color: 'var(--ink4)',
-          textAlign: 'center',
-          paddingTop: 'var(--sp-4)',
-          paddingBottom: 'var(--sp-2)',
-        }}>
-          Lumen
-        </p>
+        <p className={styles.attribution}>Lumen</p>
       </div>
 
       {showCreateModal && (
@@ -819,7 +859,6 @@ function TarjetasView({ roster, runtimeStatus, hasRuflo, onRosterRefetch, onAgen
           onSaved={handleAgentSaved}
         />
       )}
-
     </>
   )
 }
@@ -888,7 +927,6 @@ export default function OfficeView() {
   useEffect(() => {
     pollRef.current = setInterval(async () => {
       try {
-        // Fetch both in parallel; each falls back silently on failure.
         const [runtimeStatus, agentStats] = await Promise.all([
           getRuntimeStatus(),
           getAgentStats(),
@@ -908,10 +946,10 @@ export default function OfficeView() {
     if (agent) setSelectedAgent(agent)
   }, [state])
 
-  // Fullscreen for the live floor — many users want the office maximised.
-  const liveRef = useRef<HTMLDivElement>(null)
+  // Fullscreen for the live floor — canvas wrap owns fullscreen, not the entire view.
+  const canvasWrapRef = useRef<HTMLDivElement>(null)
   const toggleFullscreen = useCallback(() => {
-    const el = liveRef.current
+    const el = canvasWrapRef.current
     if (!el) return
     if (document.fullscreenElement) void document.exitFullscreen()
     else void el.requestFullscreen?.()
@@ -933,7 +971,6 @@ export default function OfficeView() {
   }
 
   // Convert roster agents to the engine's LumenAgent shape for the canvas.
-  // Each agent carries its department info so the engine builds one room per department.
   const engineAgents: LumenAgent[] = state.status === 'ready'
     ? state.roster.departments.flatMap((dept) =>
         dept.agents.map((a) => rosterAgentToLumenAgent(a, dept))
@@ -946,6 +983,19 @@ export default function OfficeView() {
     ? state.runtimeStatus
     : { state: 'idle', active_task_count: 0 }
 
+  const isOnline = state.status === 'ready'
+    && (engineRuntimeStatus.state === 'working' || engineRuntimeStatus.active_task_count > 0)
+
+  const activeTasks = state.status === 'ready'
+    ? (engineRuntimeStatus.active_task_count ?? 0)
+    : 0
+
+  // Active agents for the legend (up to 4 shown)
+  const activeIds = state.status === 'ready' ? activeAgentIds(state.runtimeStatus) : new Set<string>()
+  const activeAgentsList = state.status === 'ready'
+    ? state.roster.departments.flatMap(d => d.agents).filter(a => activeIds.has(a.id)).slice(0, 4)
+    : []
+
   const subtitle = state.status === 'ready'
     ? (totalAgentCount === 1
         ? t('agents.subtitle.ready').replace('{count}', String(totalAgentCount))
@@ -954,22 +1004,24 @@ export default function OfficeView() {
     : t('agents.subtitle.loading') + t('agents.subtitle.suffix')
 
   return (
-    <div className="office-view">
-      {/* ── Header with segmented toggle ── */}
+    <div className={styles.officeView}>
+      {/* ── Header ── */}
       <header className="view-header office-view-header">
-        <div className="office-header-row">
-          <div>
-            <h1 className="view-title">{t('view.agentes')}</h1>
-            <p className="view-subtitle">{subtitle}</p>
+        <div className={styles.headerRow}>
+          <div className={styles.headerLeft}>
+            <AnimatedPageHeaderText
+              title={t('view.agentes')}
+              subtitle={state.status !== 'loading' ? subtitle : undefined}
+            />
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--sp-3)' }}>
+          <div className={styles.headerActions}>
             {/* Default roster toggle */}
             <div
-              style={{ display: 'flex', alignItems: 'center', gap: 'var(--sp-2)' }}
+              className={styles.rosterToggleRow}
               title={t('agents.roster.toggle.tooltip')}
             >
-              <span style={{ fontSize: 'var(--text-label)', color: 'var(--ink3)', whiteSpace: 'nowrap' }}>
+              <span className={styles.rosterToggleLabel}>
                 {t('agents.roster.toggle.label')}
               </span>
               <button
@@ -984,21 +1036,21 @@ export default function OfficeView() {
             </div>
 
             {state.status === 'ready' && (
-              <button
+              <Button
                 type="button"
-                className="office-btn office-btn--primary"
-                style={{ fontSize: 'var(--text-label)', padding: '0 var(--sp-4)', height: 36 }}
+                variant="primary"
+                size="sm"
                 onClick={() => setShowCreateFromHeader(true)}
                 aria-label={t('agents.create.aria')}
               >
                 {t('agents.create.btn')}
-              </button>
+              </Button>
             )}
 
-            <div className="office-seg-toggle" role="group" aria-label={t('agents.tab.aria')}>
+            <div className={styles.segToggle} role="group" aria-label={t('agents.tab.aria')}>
               <button
                 type="button"
-                className={`office-seg-btn${tab === 'tarjetas' ? ' office-seg-btn--active' : ''}`}
+                className={`${styles.segBtn}${tab === 'tarjetas' ? ` ${styles.segBtnActive}` : ''}`}
                 onClick={() => setTab('tarjetas')}
                 aria-pressed={tab === 'tarjetas'}
               >
@@ -1006,7 +1058,7 @@ export default function OfficeView() {
               </button>
               <button
                 type="button"
-                className={`office-seg-btn${tab === 'live' ? ' office-seg-btn--active' : ''}`}
+                className={`${styles.segBtn}${tab === 'live' ? ` ${styles.segBtnActive}` : ''}`}
                 onClick={() => setTab('live')}
                 aria-pressed={tab === 'live'}
               >
@@ -1018,82 +1070,182 @@ export default function OfficeView() {
       </header>
 
       {/* ── Body ── */}
-      <div className="office-body">
-        {state.status === 'loading' && (
-          <div className="state-container" aria-live="polite" aria-busy="true">
-            <p className="state-label">{t('agents.loading')}</p>
-          </div>
-        )}
+      <div className={styles.body}>
+        {/* Loading skeleton */}
+        {state.status === 'loading' && <OfficeSkeleton />}
 
+        {/* Error */}
         {state.status === 'error' && (
-          <div className="state-container" role="alert">
-            <p className="state-error">{state.message}</p>
-          </div>
-        )}
-
-        {state.status === 'ready' && totalAgentCount === 0 && (
-          <div className="state-container" style={{ textAlign: 'center' }}>
-            <p className="state-label" style={{ marginBottom: 'var(--sp-4)' }}>
-              {t('agents.empty.text')}
-            </p>
-            <button
+          <div className={styles.errorState} role="alert">
+            <span className={styles.errorIcon} aria-hidden="true">
+              <AlertTriangle size={18} />
+            </span>
+            <p className={styles.errorTitle}>No se pudo cargar el equipo</p>
+            <p className={styles.errorMessage}>{state.message}</p>
+            <Button
               type="button"
-              className="office-btn office-btn--primary"
-              onClick={() => setShowCreateFromHeader(true)}
+              variant="ghost"
+              size="sm"
+              onClick={() => void load()}
             >
-              {t('agents.empty.cta')}
-            </button>
+              <RefreshCw size={13} aria-hidden="true" style={{ marginRight: 6 }} />
+              Reintentar
+            </Button>
           </div>
         )}
 
+        {/* Empty — no agents */}
+        {state.status === 'ready' && totalAgentCount === 0 && (
+          <div className={styles.emptyState}>
+            <div className="ds-empty-state">
+              <span className="ds-empty-state__icon" aria-hidden="true">
+                <Users size={28} />
+              </span>
+              <p className="ds-empty-state__title">{t('agents.empty.text')}</p>
+              <div className="ds-empty-state__action">
+                <Button
+                  type="button"
+                  variant="primary"
+                  onClick={() => setShowCreateFromHeader(true)}
+                >
+                  {t('agents.empty.cta')}
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Main content */}
         {state.status === 'ready' && totalAgentCount > 0 && (
           <>
-            {tab === 'tarjetas' && (
-              <TarjetasView
-                roster={state.roster}
-                runtimeStatus={state.runtimeStatus}
-                hasRuflo={state.hasRuflo}
-                onRosterChange={(roster) =>
-                  dispatch({
-                    type: 'LOADED',
-                    roster,
-                    runtimeStatus: state.runtimeStatus,
-                    hasRuflo: state.hasRuflo,
-                    agentStats: state.agentStats,
-                  })
-                }
-                onRosterRefetch={load}
-                onAgentClick={setSelectedAgent}
-              />
-            )}
-
-            {tab === 'live' && (
-              <div className="office-live-container" ref={liveRef}>
-                <button
-                  type="button"
-                  className="office-fullscreen-btn"
-                  onClick={toggleFullscreen}
-                  aria-label={t('agents.fullscreen')}
-                  title={t('agents.fullscreen')}
-                >⛶</button>
-                <Suspense fallback={
-                  <div className="state-container">
-                    <p className="state-label">{t('agents.map.loading')}</p>
-                  </div>
-                }>
-                  <OfficeCanvas
-                    agents={engineAgents}
-                    runtimeStatus={engineRuntimeStatus}
-                    onAgentClick={handleCanvasAgentClick}
-                    agentStats={state.status === 'ready' ? state.agentStats : undefined}
+            <AnimatePresence mode="wait">
+              {tab === 'tarjetas' && (
+                <motion.div
+                  key="tarjetas"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.14 }}
+                  style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}
+                >
+                  <TarjetasView
+                    roster={state.roster}
+                    runtimeStatus={state.runtimeStatus}
+                    hasRuflo={state.hasRuflo}
+                    onRosterChange={(roster) =>
+                      dispatch({
+                        type: 'LOADED',
+                        roster,
+                        runtimeStatus: state.runtimeStatus,
+                        hasRuflo: state.hasRuflo,
+                        agentStats: state.agentStats,
+                      })
+                    }
+                    onRosterRefetch={load}
+                    onAgentClick={setSelectedAgent}
                   />
-                </Suspense>
-              </div>
-            )}
+                </motion.div>
+              )}
+
+              {tab === 'live' && (
+                <motion.div
+                  key="live"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.14 }}
+                  style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}
+                >
+                  <div className={styles.liveFrame}>
+                    {/* Toolbar */}
+                    <div className={styles.liveToolbar}>
+                      <div className={styles.liveToolbarLeft}>
+                        {/* Live/offline chip */}
+                        <span className={`${styles.liveChip} ${isOnline ? styles.liveChipOnline : styles.liveChipOffline}`}>
+                          <span className={styles.livePulse} aria-hidden="true" />
+                          {isOnline ? 'En vivo' : 'En espera'}
+                        </span>
+
+                        {/* Active task count */}
+                        {activeTasks > 0 && (
+                          <span className={styles.taskBadge} aria-label={`${activeTasks} tarea${activeTasks !== 1 ? 's' : ''} activa${activeTasks !== 1 ? 's' : ''}`}>
+                            <span className={`${styles.num}`}>{activeTasks}</span>
+                            {activeTasks === 1 ? ' tarea' : ' tareas'}
+                          </span>
+                        )}
+
+                        {/* Active agents legend */}
+                        {activeAgentsList.length > 0 && (
+                          <>
+                            <span className={styles.legendSep} aria-hidden="true" />
+                            <div className={styles.legend} aria-label="Agentes activos">
+                              {activeAgentsList.map((a) => (
+                                <span key={a.id} className={styles.legendItem}>
+                                  <span
+                                    className={`${styles.legendDot} ${styles.legendDotActive}`}
+                                    style={{ background: a.color ?? 'var(--color-warning)' }}
+                                    aria-hidden="true"
+                                  />
+                                  <span className="truncate">{a.name}</span>
+                                </span>
+                              ))}
+                            </div>
+                          </>
+                        )}
+
+                        {/* Idle legend */}
+                        {activeAgentsList.length === 0 && totalAgentCount > 0 && (
+                          <span className={styles.legendItem}>
+                            <span className={`${styles.legendDot} ${styles.legendDotIdle}`} aria-hidden="true" />
+                            <span className="text-dim">
+                              <span className={styles.num}>{totalAgentCount}</span>
+                              {totalAgentCount === 1 ? ' agente disponible' : ' agentes disponibles'}
+                            </span>
+                          </span>
+                        )}
+                      </div>
+
+                      <div className={styles.liveToolbarRight}>
+                        <button
+                          type="button"
+                          className={styles.fullscreenBtn}
+                          onClick={toggleFullscreen}
+                          aria-label={t('agents.fullscreen')}
+                          title={t('agents.fullscreen')}
+                        >
+                          <Maximize2 size={13} aria-hidden="true" />
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Canvas */}
+                    <div className={styles.canvasWrap} ref={canvasWrapRef}>
+                      <Suspense fallback={
+                        <div className={styles.canvasFallback} aria-busy="true" aria-label="Cargando plano de oficina…">
+                          <div className={styles.canvasFallbackGrid} aria-hidden="true">
+                            {Array.from({ length: 6 }).map((_, i) => (
+                              <div key={i} className={styles.canvasFallbackCell} />
+                            ))}
+                          </div>
+                          <p className={styles.canvasFallbackText}>Cargando plano de oficina…</p>
+                        </div>
+                      }>
+                        <OfficeCanvas
+                          agents={engineAgents}
+                          runtimeStatus={engineRuntimeStatus}
+                          onAgentClick={handleCanvasAgentClick}
+                          agentStats={state.status === 'ready' ? state.agentStats : undefined}
+                        />
+                      </Suspense>
+                    </div>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
           </>
         )}
 
-        {/* Header-triggered create modal — independent of TarjetasView's own modal */}
+        {/* Header-triggered create modal */}
         {showCreateFromHeader && state.status === 'ready' && (
           <AgentFormModal
             departments={state.roster.departments}
@@ -1108,11 +1260,12 @@ export default function OfficeView() {
       </div>
 
       {/* Agent detail drawer — shared between Tarjetas and Live/Office tabs */}
-      {selectedAgent && state.status === 'ready' && (
+      {state.status === 'ready' && (
         <AgentDrawer
-          agent={selectedAgent}
+          agent={selectedAgent ?? state.roster.departments[0]?.agents[0] ?? ({ id: '', name: '', description: '', source: 'custom', is_default: false, department: '', color: null } as RosterAgent)}
           departments={state.roster.departments}
-          isWorking={activeAgentIds(state.runtimeStatus).has(selectedAgent.id)}
+          isWorking={selectedAgent ? activeAgentIds(state.runtimeStatus).has(selectedAgent.id) : false}
+          open={selectedAgent !== null}
           onClose={() => setSelectedAgent(null)}
           onClone={(agent) => {
             setSelectedAgent(null)

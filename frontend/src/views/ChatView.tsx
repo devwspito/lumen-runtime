@@ -27,11 +27,12 @@ import ContextPanel from '../components/ContextPanel'
 import PendingApprovalsInChat from '../components/PendingApprovalsInChat'
 import { useT } from '../lib/i18n'
 import { toolLabel } from '../lib/toolLabels'
+import styles from './ChatView.module.css'
 
-// ── Static strings (these do not need locale switching — they are Spanish only) ──
+// ── Static strings ─────────────────────────────────────────────────────────
 
 const STRINGS = {
-  welcomeTitle:  'Hola, soy Lumen',
+  welcomeTitle:   'Hola, soy Lumen',
   welcomeSubtitle: 'Tu agente de trabajo personal. Dime en qué puedo ayudarte hoy.',
   suggest1: 'Investiga los mejores CRMs para una startup B2B',
   suggest2: 'Redacta un email de propuesta comercial',
@@ -50,7 +51,7 @@ const SUGGESTIONS = [
   STRINGS.suggest4,
 ]
 
-/** Map raw error messages from the backend/stream to human-readable copy. */
+/** Map raw backend/stream errors to human-readable copy. */
 function humanizeError(msg: string, t: (key: Parameters<ReturnType<typeof useT>>[0]) => string): string {
   if (/connection refused|econnrefused|network/i.test(msg)) return t('chat.err.connection')
   if (/stream_error|stream error/i.test(msg)) return t('chat.err.stream')
@@ -58,7 +59,7 @@ function humanizeError(msg: string, t: (key: Parameters<ReturnType<typeof useT>>
   return t('chat.err.generic')
 }
 
-// ── Welcome screen ────────────────────────────────────────────────────────────
+// ── Welcome screen ─────────────────────────────────────────────────────────
 
 interface WelcomeProps {
   onSuggestion(text: string): void
@@ -66,16 +67,17 @@ interface WelcomeProps {
 
 function Welcome({ onSuggestion }: WelcomeProps) {
   return (
-    <div className="chat-welcome" role="main">
-      <div className="welcome-mark" aria-hidden="true">L</div>
-      <h1 className="welcome-title">{STRINGS.welcomeTitle}</h1>
-      <p className="welcome-subtitle">{STRINGS.welcomeSubtitle}</p>
-      <div className="welcome-suggestions" role="list" aria-label="Sugerencias">
+    <div className={styles.welcome} role="main">
+      <div className={styles.welcomeMark} aria-hidden="true">L</div>
+      <h1 className={styles.welcomeTitle}>{STRINGS.welcomeTitle}</h1>
+      <p className={styles.welcomeSubtitle}>{STRINGS.welcomeSubtitle}</p>
+      <div className={styles.welcomeSuggestions} role="list" aria-label="Sugerencias">
         {SUGGESTIONS.map((s) => (
           <button
             key={s}
-            className="suggestion-pill"
+            className={styles.suggestionPill}
             role="listitem"
+            type="button"
             onClick={() => onSuggestion(s)}
           >
             {s}
@@ -86,7 +88,7 @@ function Welcome({ onSuggestion }: WelcomeProps) {
   )
 }
 
-// ── Delegation step (first-class element for delegate_task / mixture_of_agents) ───
+// ── Delegation step ────────────────────────────────────────────────────────
 
 const DELEGATION_NAMES = new Set(['delegate_task', 'mixture_of_agents'])
 
@@ -106,11 +108,12 @@ function useDelegationActivity(isActive: boolean): { tool: string; agentId: stri
       try {
         const status = await getRuntimeStatus()
         if (!alive) return
-        const entry = (status.activity ?? []).find((a) => a.tool && a.tool !== 'chat_responding' && a.tool !== 'delegate_task')
+        const entry = (status.activity ?? []).find(
+          (a) => a.tool && a.tool !== 'chat_responding' && a.tool !== 'delegate_task',
+        )
         if (entry) {
           setActivity({ tool: entry.tool ?? 'trabajando', agentId: entry.agent_id })
         } else {
-          // Fall back to any activity entry (including "trabajando")
           const fallback = (status.activity ?? [])[0]
           setActivity(fallback ? { tool: fallback.tool ?? 'trabajando', agentId: fallback.agent_id } : null)
         }
@@ -142,25 +145,32 @@ function DelegationStep({ step, isStreaming }: DelegationStepProps) {
 
   return (
     <div
-      className={`delegation-step${isStreaming ? ' delegation-step--active' : ' delegation-step--done'}`}
+      className={[
+        styles.delegationCard,
+        isStreaming ? styles.delegationCardActive : styles.delegationCardDone,
+      ].join(' ')}
       role="status"
       aria-label={isStreaming ? `Delegando a ${specialist}` : `Completado por ${specialist}`}
     >
-      <span className="delegation-step__icon" aria-hidden="true">
-        <GitBranch size={15} />
+      <span className={styles.delegationIcon} aria-hidden="true">
+        <GitBranch size={14} />
       </span>
-      <div className="delegation-step__body">
-        <div className="delegation-step__label">
+      <div className={styles.delegationBody}>
+        <div className={styles.delegationLabel}>
           {isStreaming ? 'Delegando a' : 'Delegado a'}{' '}
-          <span className="delegation-step__specialist">{specialist}</span>
+          <span className={styles.delegationSpecialist}>{specialist}</span>
           {isStreaming ? (
-            <Loader2 size={12} className="spin" aria-hidden="true" />
+            <Loader2 size={11} className="spin" aria-hidden="true" />
           ) : (
-            <CheckCircle2 size={12} style={{ color: 'var(--ok)', flexShrink: 0 }} aria-hidden="true" />
+            <CheckCircle2
+              size={11}
+              style={{ color: 'var(--color-success)', flexShrink: 0 }}
+              aria-hidden="true"
+            />
           )}
         </div>
-        {isStreaming && liveActivity && (toolLabel(liveActivity.tool) !== null) && (
-          <div className="delegation-step__live" aria-live="polite" aria-atomic="true">
+        {isStreaming && liveActivity && toolLabel(liveActivity.tool) !== null && (
+          <div className={styles.delegationLive} aria-live="polite" aria-atomic="true">
             {toolLabel(liveActivity.tool)}
           </div>
         )}
@@ -169,7 +179,7 @@ function DelegationStep({ step, isStreaming }: DelegationStepProps) {
   )
 }
 
-// ── Tool summary block ────────────────────────────────────────────────────────
+// ── Tool summary block ─────────────────────────────────────────────────────
 
 interface ToolSummaryProps {
   steps: ToolStep[]
@@ -179,52 +189,49 @@ interface ToolSummaryProps {
 function ToolSummary({ steps, isStreaming }: ToolSummaryProps) {
   if (steps.length === 0) return null
 
-  // Partition: delegation steps rendered as first-class cards; the rest go in the collapsible
-  const delegations = steps.filter(s => DELEGATION_NAMES.has(s.name))
-  const regular = steps.filter(s => !DELEGATION_NAMES.has(s.name))
+  const delegations = steps.filter((s) => DELEGATION_NAMES.has(s.name))
+  const regular = steps.filter((s) => !DELEGATION_NAMES.has(s.name))
   const count = regular.length
   const last = steps[steps.length - 1]
 
-  // During streaming we always show the last step label as the live indicator.
-  // After stream completes, delegation steps are already expanded above.
   const streamLabel = isStreaming
     ? `${last.label}${last.target ? ` — ${last.target.slice(0, 48)}` : ''}`
     : null
 
   return (
     <>
-      {/* Delegation cards — always visible, never collapsed */}
-      {delegations.map((step, i) => {
-        // A delegation is "in progress" only when it is the most recent step
-        // AND the turn is still streaming — earlier delegation steps are completed.
-        const isLastStep = i === delegations.length - 1
-        return (
-          <DelegationStep key={i} step={step} isStreaming={isStreaming && isLastStep} />
-        )
-      })}
+      {delegations.map((step, i) => (
+        <DelegationStep
+          key={i}
+          step={step}
+          isStreaming={isStreaming && i === delegations.length - 1}
+        />
+      ))}
 
-      {/* Regular tools — collapsed summary (only if any exist) */}
       {(regular.length > 0 || (isStreaming && !DELEGATION_NAMES.has(last.name))) && (
-        <details className="tool-summary-group">
-          <summary className="tool-summary-group__summary">
-            <span className="tool-summary-group__label">
+        <details className={styles.toolGroup}>
+          <summary>
+            <span className={styles.toolGroupLabel}>
               {streamLabel ?? `Usó ${count} herramienta${count !== 1 ? 's' : ''}`}
             </span>
             {!isStreaming && count > 0 && (
-              <span className="tool-summary-group__count" aria-label={`${count} herramientas`}>
+              <span
+                className={styles.toolGroupCount}
+                aria-label={`${count} herramientas`}
+              >
                 {count}
               </span>
             )}
-            <span className="tool-summary-group__chevron" aria-hidden="true">
+            <span className={styles.toolGroupChevron} aria-hidden="true">
               <ChevronIcon />
             </span>
           </summary>
-          <div className="tool-summary-group__body">
+          <div className={styles.toolGroupBody}>
             {regular.map((step, i) => (
-              <div key={i} className="tool-step-item">
-                <span className="tool-step-item__label">{step.label}</span>
+              <div key={i} className={styles.toolStepItem}>
+                <span className={styles.toolStepLabel}>{step.label}</span>
                 {step.target && (
-                  <span className="tool-step-item__target">{step.target}</span>
+                  <span className={styles.toolStepTarget}>{step.target}</span>
                 )}
               </div>
             ))}
@@ -235,7 +242,7 @@ function ToolSummary({ steps, isStreaming }: ToolSummaryProps) {
   )
 }
 
-// ── Thinking block ────────────────────────────────────────────────────────────
+// ── Thinking block ─────────────────────────────────────────────────────────
 
 interface ThinkingBlockProps {
   text: string
@@ -245,41 +252,42 @@ interface ThinkingBlockProps {
 function ThinkingBlock({ text, done }: ThinkingBlockProps) {
   if (!text) return null
   return (
-    <details className="thinking-block">
-      <summary className="thinking-block__summary">
-        <span className="thinking-block__label">
+    <details className={styles.thinkingBlock}>
+      <summary>
+        <span className={styles.thinkingLabel}>
           {done ? 'Proceso de pensamiento' : 'Pensando…'}
         </span>
-        <span className="thinking-block__chevron" aria-hidden="true">
+        <span className={styles.thinkingChevron} aria-hidden="true">
           <ChevronIcon />
         </span>
       </summary>
-      <div className="thinking-block__body">{text}</div>
+      <div className={styles.thinkingBody}>{text}</div>
     </details>
   )
 }
 
-// ── Message bubbles ───────────────────────────────────────────────────────────
+// ── Message bubbles ────────────────────────────────────────────────────────
 
 interface UserMessageProps {
   text: string
   failed?: boolean
+  enterDelay?: number
 }
 
-const UserMessage = memo(function UserMessage({ text, failed }: UserMessageProps) {
+const UserMessage = memo(function UserMessage({ text, failed, enterDelay = 0 }: UserMessageProps) {
   const t = useT()
   return (
     <div
-      className={`message message--user${failed ? ' message--failed' : ''}`}
+      className={[styles.messageRow, styles.messageRowUser].join(' ')}
+      style={{ animationDelay: `${enterDelay}ms` }}
       role="article"
       aria-label="Tu mensaje"
     >
-      <div className="message__bubble">{text}</div>
+      <div className={[styles.userBubble, failed ? styles.userBubbleFailed : ''].join(' ')}>
+        {text}
+      </div>
       {failed && (
-        <p
-          style={{ fontSize: 'var(--text-caption)', color: 'var(--danger)', margin: '4px 0 0' }}
-          role="alert"
-        >
+        <p className={styles.userFailedNote} role="alert">
           {t('chat.err.not_sent')}
         </p>
       )}
@@ -289,54 +297,64 @@ const UserMessage = memo(function UserMessage({ text, failed }: UserMessageProps
 
 interface AssistantMessageProps {
   message: Extract<ChatMessage, { type: 'assistant' }>
+  enterDelay?: number
 }
 
-const AssistantMessage = memo(function AssistantMessage({ message }: AssistantMessageProps) {
+const AssistantMessage = memo(function AssistantMessage({
+  message,
+  enterDelay = 0,
+}: AssistantMessageProps) {
   const { thinkingText, thinkingDone, toolSteps, activityText, renderedHtml, isStreaming } = message
 
-  // Suppress the generic spinner when a delegation card is already showing its own live indicator
   const hasDelegationInFlight =
     isStreaming &&
     toolSteps.length > 0 &&
     DELEGATION_NAMES.has(toolSteps[toolSteps.length - 1]!.name)
 
   return (
-    <div className="message message--agent" role="article" aria-label="Respuesta de Lumen">
-      <ThinkingBlock text={thinkingText} done={thinkingDone} />
-      <ToolSummary steps={toolSteps} isStreaming={isStreaming} />
+    <div
+      className={styles.messageRow}
+      style={{ animationDelay: `${enterDelay}ms` }}
+      role="article"
+      aria-label="Respuesta de Lumen"
+    >
+      <div className={styles.agentOutput}>
+        <ThinkingBlock text={thinkingText} done={thinkingDone} />
+        <ToolSummary steps={toolSteps} isStreaming={isStreaming} />
 
-      {/* Live activity excerpt while streaming */}
-      {isStreaming && activityText && (
-        <div className="agent-activity" aria-live="polite" aria-atomic="false">
-          {lastLine(activityText)}
-        </div>
-      )}
+        {/* Live activity excerpt while streaming */}
+        {isStreaming && activityText && (
+          <div className={styles.agentActivity} aria-live="polite" aria-atomic="false">
+            {lastLine(activityText)}
+          </div>
+        )}
 
-      {/* Final rendered markdown (shown after stream completes) */}
-      {!isStreaming && renderedHtml && (
-        <div
-          className="agent-prose"
-          /* Safe: renderedHtml is produced by DOMPurify.sanitize — see lib/markdown.ts */
-          dangerouslySetInnerHTML={{ __html: renderedHtml }}
-        />
-      )}
+        {/* Final rendered markdown */}
+        {!isStreaming && renderedHtml && (
+          <div
+            className={styles.agentProse}
+            /* Safe: renderedHtml is produced by DOMPurify.sanitize — see lib/markdown.ts */
+            dangerouslySetInnerHTML={{ __html: renderedHtml }}
+          />
+        )}
 
-      {/* Streaming cursor — hidden when a delegation card already shows a live spinner */}
-      {isStreaming && !activityText && !hasDelegationInFlight && (
-        <div className="agent-activity" aria-live="polite">
-          <span className="spin" aria-hidden="true">⟳</span>
-        </div>
-      )}
+        {/* Streaming cursor — hidden when a delegation card already shows a live spinner */}
+        {isStreaming && !activityText && !hasDelegationInFlight && (
+          <div className={styles.agentActivity} aria-live="polite">
+            <span className={styles.streamCursor} aria-hidden="true" />
+          </div>
+        )}
+      </div>
     </div>
   )
 })
 
 function lastLine(text: string): string {
-  const lines = text.split('\n').map(l => l.trim()).filter(Boolean)
+  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean)
   return lines.length ? `· ${lines[lines.length - 1]}` : ''
 }
 
-// ── Status bar ────────────────────────────────────────────────────────────────
+// ── Status bar ─────────────────────────────────────────────────────────────
 
 interface StatusBarProps {
   phase: string
@@ -349,7 +367,7 @@ function StatusBar({ phase, text }: StatusBarProps) {
 
   return (
     <div
-      className={`chat-status${isError ? ' chat-status--error' : ''}`}
+      className={[styles.statusBar, isError ? styles.statusBarError : ''].join(' ')}
       role={isError ? 'alert' : 'status'}
       aria-live={isError ? 'assertive' : 'polite'}
     >
@@ -359,17 +377,13 @@ function StatusBar({ phase, text }: StatusBarProps) {
   )
 }
 
-// ── No-model CTA banner ───────────────────────────────────────────────────────
+// ── No-model CTA banner ────────────────────────────────────────────────────
 
 function NoModelBanner() {
   const navigate = useNavigate()
   const t = useT()
   return (
-    <div
-      className="chat-status chat-status--error"
-      role="alert"
-      style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 'var(--sp-3)' }}
-    >
+    <div className={styles.noModelBanner} role="alert">
       <span>{t('chat.nomodel.text')}</span>
       <button
         type="button"
@@ -382,16 +396,16 @@ function NoModelBanner() {
   )
 }
 
-// ── Model picker ──────────────────────────────────────────────────────────────
+// ── Model picker ───────────────────────────────────────────────────────────
 
 function useActiveProvider() {
   const [provider, setProvider] = useState<Provider | null>(null)
 
   useEffect(() => {
     listProviders()
-      .then(data => {
+      .then((data) => {
         const arr = Array.isArray(data) ? data : []
-        setProvider(arr.find(p => p.is_active) ?? arr[0] ?? null)
+        setProvider(arr.find((p) => p.is_active) ?? arr[0] ?? null)
       })
       .catch(() => setProvider(null))
   }, [])
@@ -405,23 +419,31 @@ function ModelPicker() {
 
   const label = provider
     ? (provider.default_model ?? provider.alias ?? provider.name ?? 'Modelo activo')
-    : 'Sin modelo configurado'
+    : 'Sin modelo'
 
   return (
     <button
-      className="composer-model-picker"
+      className={styles.modelPicker}
       onClick={() => navigate('/proveedores')}
-      title={provider ? `Proveedor: ${provider.alias ?? provider.name}` : 'Configura un modelo en Proveedores'}
+      title={
+        provider
+          ? `Proveedor: ${provider.alias ?? provider.name}`
+          : 'Configura un modelo en Proveedores'
+      }
       type="button"
-      aria-label={provider ? `Modelo activo: ${label}. Ir a Proveedores` : 'Sin modelo. Ir a Proveedores'}
+      aria-label={
+        provider
+          ? `Modelo activo: ${label}. Ir a Proveedores`
+          : 'Sin modelo. Ir a Proveedores'
+      }
     >
-      <span className="composer-model-picker__label">{label}</span>
+      <span className={styles.modelPickerLabel}>{label}</span>
       <ChevronIcon />
     </button>
   )
 }
 
-// ── Attachment chip ───────────────────────────────────────────────────────────
+// ── Attachment chip ────────────────────────────────────────────────────────
 
 interface AttachmentChipProps {
   name: string
@@ -433,65 +455,31 @@ interface AttachmentChipProps {
 function AttachmentChip({ name, uploading, error, onRemove }: AttachmentChipProps) {
   return (
     <div
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: 'var(--sp-2)',
-        background: error
-          ? 'color-mix(in srgb, var(--danger) 12%, transparent)'
-          : 'var(--card2)',
-        border: `1px solid ${error ? 'var(--danger)' : 'var(--line2)'}`,
-        borderRadius: 'var(--r-sm)',
-        padding: '2px var(--sp-2)',
-        fontSize: 'var(--text-caption)',
-        color: error ? 'var(--danger)' : 'var(--ink2)',
-        maxWidth: 200,
-      }}
+      className={[styles.attachChip, error ? styles.attachChipError : ''].join(' ')}
+      title={name}
     >
       {uploading ? (
-        <span className="spin" aria-hidden="true" style={{ fontSize: 10 }}>⟳</span>
+        <Loader2 size={12} className="spin" aria-hidden="true" />
       ) : error ? (
-        <AlertTriangle size={14} aria-hidden="true" />
+        <AlertTriangle size={12} aria-hidden="true" />
       ) : (
-        <FileText size={14} aria-hidden="true" />
+        <FileText size={12} aria-hidden="true" />
       )}
-      <span
-        style={{
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          whiteSpace: 'nowrap',
-          flex: 1,
-          minWidth: 0,
-        }}
-        title={name}
-      >
-        {name}
-      </span>
+      <span className={styles.attachChipName}>{name}</span>
       <button
         type="button"
         onClick={onRemove}
         aria-label={`Quitar adjunto ${name}`}
-        style={{
-          border: 'none',
-          background: 'transparent',
-          color: 'inherit',
-          cursor: 'pointer',
-          padding: 0,
-          lineHeight: 1,
-          display: 'flex',
-          alignItems: 'center',
-          opacity: 0.7,
-          flexShrink: 0,
-        }}
+        className={styles.attachChipRemove}
         disabled={uploading}
       >
-        <X size={14} aria-hidden="true" />
+        <X size={12} aria-hidden="true" />
       </button>
     </div>
   )
 }
 
-// ── Composer ──────────────────────────────────────────────────────────────────
+// ── Composer ───────────────────────────────────────────────────────────────
 
 interface PendingAttachment {
   id: string
@@ -539,7 +527,6 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
 
   async function handleFileSelect(e: ChangeEvent<HTMLInputElement>) {
     const files = Array.from(e.target.files ?? [])
-    // Reset input so the same file can be re-attached after removal
     e.target.value = ''
     if (files.length === 0) return
 
@@ -553,7 +540,6 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
 
     setAttachments((prev) => [...prev, ...newAttachments])
 
-    // Upload each file concurrently
     await Promise.all(
       newAttachments.map(async (att) => {
         try {
@@ -564,7 +550,10 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
             ),
           )
         } catch (err) {
-          const msg = err instanceof ApiError ? err.message : t('chat.err.attach').replace('{name}', att.file.name)
+          const msg =
+            err instanceof ApiError
+              ? err.message
+              : t('chat.err.attach').replace('{name}', att.file.name)
           console.error(`Attachment upload failed for ${att.file.name}: ${msg}`)
           setAttachments((prev) =>
             prev.map((a) =>
@@ -598,21 +587,13 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
   }
 
   const anyUploading = attachments.some((a) => a.uploading)
-  const canSend = !disabled && !anyUploading && (value.trim() !== '' || attachments.some((a) => a.uploadedPath))
+  const canSend =
+    !disabled && !anyUploading && (value.trim() !== '' || attachments.some((a) => a.uploadedPath))
 
   return (
-    <div className="composer-wrap">
-      {/* Attachment chips */}
+    <div className={styles.composerWrap}>
       {attachments.length > 0 && (
-        <div
-          style={{
-            display: 'flex',
-            flexWrap: 'wrap',
-            gap: 'var(--sp-2)',
-            paddingBottom: 'var(--sp-2)',
-          }}
-          aria-label="Archivos adjuntos"
-        >
+        <div className={styles.attachmentsRow} aria-label="Archivos adjuntos">
           {attachments.map((att) => (
             <AttachmentChip
               key={att.id}
@@ -625,10 +606,10 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
         </div>
       )}
 
-      <div className="composer-box">
+      <div className={styles.composerBox}>
         <textarea
           ref={textareaRef}
-          className="composer-textarea"
+          className={styles.composerTextarea}
           placeholder={STRINGS.placeholder}
           aria-label="Escribe un mensaje para Lumen"
           value={value}
@@ -637,8 +618,7 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
           disabled={disabled}
           rows={1}
         />
-        <div className="composer-toolbar">
-          {/* Hidden file input — triggered by the attach button */}
+        <div className={styles.composerToolbar}>
           <input
             ref={fileInputRef}
             type="file"
@@ -651,48 +631,35 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
           />
           <button
             type="button"
+            className={styles.attachBtn}
             onClick={() => fileInputRef.current?.click()}
             disabled={disabled}
             aria-label="Adjuntar archivo (imágenes, PDF, documentos)"
             title="Adjuntar archivo"
-            style={{
-              border: 'none',
-              background: 'transparent',
-              color: 'var(--ink3)',
-              cursor: 'pointer',
-              padding: 'var(--sp-1)',
-              borderRadius: 'var(--r-sm)',
-              fontSize: 16,
-              lineHeight: 1,
-              display: 'flex',
-              alignItems: 'center',
-              transition: 'color 150ms ease',
-            }}
-            onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = 'var(--ink)' }}
-            onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = 'var(--ink3)' }}
           >
             <AttachIcon />
           </button>
 
           <ModelPicker />
-          <div className="composer-toolbar-right">
+
+          <div className={styles.composerToolbarRight}>
             {isStreaming ? (
               <button
-                className="composer-stop"
+                type="button"
+                className={styles.stopBtn}
                 onClick={onStop}
                 aria-label="Detener generación"
-                type="button"
               >
                 {STRINGS.stop}
               </button>
             ) : (
               <button
-                className="composer-send"
+                type="button"
+                className={styles.sendBtn}
                 onClick={handleSend}
                 disabled={!canSend}
                 aria-label="Enviar mensaje (Enter)"
                 aria-busy={anyUploading}
-                type="button"
               >
                 {anyUploading ? 'Subiendo…' : STRINGS.send}
               </button>
@@ -700,24 +667,30 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
           </div>
         </div>
       </div>
-      <p className="composer-footer">{STRINGS.disclaimer}</p>
+      <p className={styles.composerFooter}>{STRINGS.disclaimer}</p>
     </div>
   )
 }
 
-// ── Micro icons ───────────────────────────────────────────────────────────────
+// ── Micro icons ────────────────────────────────────────────────────────────
 
 function ChevronIcon() {
   return (
     <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
-      <path d="M4 3l4 3-4 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      <path
+        d="M4 3l4 3-4 3"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
     </svg>
   )
 }
 
 function AttachIcon() {
   return (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
       <path
         d="M13.5 7.5l-6 6a4 4 0 01-5.657-5.657l6-6a2.5 2.5 0 013.535 3.535L5.5 11.25a1 1 0 01-1.414-1.414L10 4"
         stroke="currentColor"
@@ -731,7 +704,7 @@ function AttachIcon() {
 
 function PanelToggleIcon() {
   return (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
       <rect x="1" y="2" width="14" height="12" rx="2" stroke="currentColor" strokeWidth="1.4" />
       <path d="M10 2v12" stroke="currentColor" strokeWidth="1.4" />
     </svg>
@@ -740,21 +713,33 @@ function PanelToggleIcon() {
 
 function SpinnerIcon() {
   return (
-    <svg className="spin" width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
-      <circle cx="6" cy="6" r="4.5" stroke="currentColor" strokeWidth="1.5" strokeDasharray="14 8" />
+    <svg
+      className="spin"
+      width="12"
+      height="12"
+      viewBox="0 0 12 12"
+      fill="none"
+      aria-hidden="true"
+    >
+      <circle
+        cx="6"
+        cy="6"
+        r="4.5"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeDasharray="14 8"
+      />
     </svg>
   )
 }
 
-// ── ChatView ──────────────────────────────────────────────────────────────────
+// ── ChatView ───────────────────────────────────────────────────────────────
 
 export default function ChatView() {
   const t = useT()
-  // All chat state comes from Layout via outlet context — no duplicate useChat instance.
-  const { convId, agentName, messages, status, sendMessage, stopStream, approvalRefreshTick } = useOutletContext<ChatOutletContext>()
+  const { convId, agentName, messages, status, sendMessage, stopStream, approvalRefreshTick } =
+    useOutletContext<ChatOutletContext>()
   const [composerText, setComposerText] = useState('')
-  // Open by default so the workspace folder (Carpeta de Trabajo) is visible —
-  // the owner didn't even know it existed when it was collapsed.
   const [panelOpen, setPanelOpen] = useState(true)
   const [showNoModel, setShowNoModel] = useState(false)
   const [noProvider, setNoProvider] = useState(false)
@@ -762,35 +747,38 @@ export default function ChatView() {
   const userScrolledRef = useRef(false)
   const pinRef = useRef(true)
 
-  // Proactively surface the "connect a model" alert on entering the chat (the
-  // onboarding wizard is gone — the chat itself is the first screen). The owner
-  // sees it immediately, without having to send a message that fails first.
+  // Proactively surface "connect a model" alert
   useEffect(() => {
     let alive = true
     listProviders()
-      .then(data => {
+      .then((data) => {
         const arr = Array.isArray(data) ? data : []
         if (alive) setNoProvider(arr.length === 0)
       })
-      .catch(() => { /* transient list error — don't nag; 409 path still covers it */ })
-    return () => { alive = false }
+      .catch(() => {
+        /* transient — 409 path still covers it */
+      })
+    return () => {
+      alive = false
+    }
   }, [])
 
   const isStreaming = status.phase === 'streaming' || status.phase === 'sending'
   const showWelcome = messages.length === 0
 
-  // Detect no-model 409 error and show the actionable CTA instead of the dead bar
+  // Detect no-model 409
   useEffect(() => {
     if (status.phase === 'error') {
       const msg = (status as { phase: 'error'; message: string }).message ?? ''
-      const isNoModel = msg.includes('409') || /sin modelo|no model|no provider|no.*provider/i.test(msg)
+      const isNoModel =
+        msg.includes('409') || /sin modelo|no model|no provider|no.*provider/i.test(msg)
       setShowNoModel(isNoModel)
     } else {
       setShowNoModel(false)
     }
   }, [status])
 
-  // Scroll pinning — matches vanilla scrollToBottom logic
+  // Scroll pinning
   useEffect(() => {
     const el = bodyRef.current
     if (!el) return
@@ -811,40 +799,52 @@ export default function ChatView() {
     }
   })
 
-  const handleSend = useCallback((text: string) => {
-    userScrolledRef.current = false
-    pinRef.current = true
-    setComposerText('')
-    setShowNoModel(false)
-    void sendMessage(text)
-  }, [sendMessage])
+  const handleSend = useCallback(
+    (text: string) => {
+      userScrolledRef.current = false
+      pinRef.current = true
+      setComposerText('')
+      setShowNoModel(false)
+      void sendMessage(text)
+    },
+    [sendMessage],
+  )
 
-  const handleSuggestion = useCallback((text: string) => {
-    handleSend(text)
-  }, [handleSend])
+  const handleSuggestion = useCallback(
+    (text: string) => {
+      handleSend(text)
+    },
+    [handleSend],
+  )
 
-  const statusText = status.phase === 'streaming' ? status.statusText
-    : status.phase === 'sending' ? 'Enviando…'
-    : status.phase === 'error' && !showNoModel
-      ? humanizeError((status as { phase: 'error'; message: string }).message ?? '', t)
-    : undefined
+  const statusText =
+    status.phase === 'streaming'
+      ? status.statusText
+      : status.phase === 'sending'
+        ? 'Enviando…'
+        : status.phase === 'error' && !showNoModel
+          ? humanizeError(
+              (status as { phase: 'error'; message: string }).message ?? '',
+              t,
+            )
+          : undefined
 
   return (
     <>
-      {/* Outer shell: chat column + optional context panel */}
-      <div className="chat-shell">
-        <div className="chat-view">
+      <div className={styles.chatShell}>
+        <div className={styles.chatView}>
           {/* Topbar */}
-          <div className="chat-topbar">
-            <span className="chat-topbar-title">
+          <div className={styles.topbar}>
+            <span className={styles.topbarTitle}>
               {agentName
                 ? `Hablando con ${agentName}`
-                : showWelcome ? 'Nueva conversación' : 'Chat'
-              }
+                : showWelcome
+                  ? 'Nueva conversación'
+                  : 'Chat'}
             </span>
             <button
-              className="chat-topbar-panel-btn"
-              onClick={() => setPanelOpen(v => !v)}
+              className={styles.topbarPanelBtn}
+              onClick={() => setPanelOpen((v) => !v)}
               aria-pressed={panelOpen}
               aria-label={panelOpen ? 'Cerrar panel de contexto' : 'Mostrar panel de contexto'}
               type="button"
@@ -856,7 +856,7 @@ export default function ChatView() {
 
           {/* Messages */}
           <div
-            className="chat-body"
+            className={styles.chatBody}
             ref={bodyRef}
             aria-live="polite"
             aria-label="Mensajes del chat"
@@ -864,30 +864,35 @@ export default function ChatView() {
             {showWelcome ? (
               <Welcome onSuggestion={handleSuggestion} />
             ) : (
-              messages.map((msg) =>
+              messages.map((msg, idx) =>
                 msg.type === 'user' ? (
-                  <UserMessage key={msg.id} text={msg.text} />
+                  <UserMessage
+                    key={msg.id}
+                    text={msg.text}
+                    enterDelay={Math.min(idx * 30, 180)}
+                  />
                 ) : (
-                  <AssistantMessage key={msg.id} message={msg} />
+                  <AssistantMessage
+                    key={msg.id}
+                    message={msg}
+                    enterDelay={Math.min(idx * 30, 180)}
+                  />
                 ),
               )
             )}
-            {/* Approval cards inline — visible where the user is looking */}
+            {/* Approval cards inline */}
             <PendingApprovalsInChat
               currentThreadId={convId}
               refreshTick={approvalRefreshTick}
             />
           </div>
 
-          {/* No-model CTA replaces the dead error bar — shown proactively when no
-              provider is connected, or reactively on a 409 at send time. */}
           {showNoModel || noProvider ? (
             <NoModelBanner />
           ) : (
             <StatusBar phase={status.phase} text={statusText} />
           )}
 
-          {/* Composer — disabled during both sending and streaming phases to prevent double-submit */}
           <Composer
             disabled={status.phase === 'sending' || status.phase === 'streaming'}
             isStreaming={isStreaming}
@@ -898,10 +903,7 @@ export default function ChatView() {
           />
         </div>
 
-        {/* Context panel — mounts only when open; keeps data fresh on each open */}
-        {panelOpen && (
-          <ContextPanel onClose={() => setPanelOpen(false)} />
-        )}
+        {panelOpen && <ContextPanel onClose={() => setPanelOpen(false)} />}
       </div>
     </>
   )

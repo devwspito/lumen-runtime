@@ -1202,6 +1202,8 @@ def create_app() -> FastAPI:
                 "base_url": p.base_url,
                 "is_active": p.is_active,
                 "enabled": p.enabled,
+                # Surfaces the cloud-managed badge + drives the read-only UI gating.
+                "managed_by": getattr(p, "managed_by", None),
             }
             for p in providers
         ]

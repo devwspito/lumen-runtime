@@ -26,6 +26,7 @@ import {
   motion,
   TWEEN,
 } from '../components/ui/motion'
+import styles from './ArchivosView.module.css'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -49,21 +50,23 @@ function formatDate(iso: string | undefined): string {
   return d.toLocaleDateString('es', { day: 'numeric', month: 'short' })
 }
 
-function fileIconForKind(kind: string | undefined, isDirFallback: boolean) {
+type FileKind = string | undefined
+
+function fileIconForKind(kind: FileKind, isDirFallback: boolean) {
   if (isDirFallback || kind === 'directory') return <Folder size={16} />
   switch (kind) {
-    case 'code': return <FileCode size={16} />
-    case 'image': return <FileImage size={16} />
-    case 'spreadsheet': return <File size={16} />
-    case 'text': case 'markdown': return <FileText size={16} />
-    default: return <File size={16} />
+    case 'code':     return <FileCode size={16} />
+    case 'image':    return <FileImage size={16} />
+    case 'text':
+    case 'markdown': return <FileText size={16} />
+    default:         return <File size={16} />
   }
 }
 
-function iconColorClass(kind: string | undefined, isDir: boolean): string {
-  if (isDir || kind === 'directory') return 'arch-entry__icon--folder'
-  if (kind === 'code') return 'arch-entry__icon--code'
-  if (kind === 'image') return 'arch-entry__icon--image'
+function iconColorClass(kind: FileKind, isDir: boolean): string {
+  if (isDir || kind === 'directory') return styles.entryIconFolder
+  if (kind === 'code')               return styles.entryIconCode
+  if (kind === 'image')              return styles.entryIconImage
   return ''
 }
 
@@ -76,6 +79,46 @@ type BrowseState =
   | { status: 'success'; entries: WorkspaceFile[]; path: string }
   | { status: 'error'; message: string }
 
+// ── Skeleton — mirrors the final list layout so there is no layout shift ──────
+
+function ListSkeleton() {
+  // Name widths cycle to avoid a uniform-row look
+  const widths = ['62%', '44%', '55%', '38%', '68%', '50%']
+  return (
+    <div
+      className={styles.skeletonList}
+      aria-busy="true"
+      aria-label="Cargando archivos…"
+      role="status"
+    >
+      {widths.map((w, i) => (
+        <div
+          key={i}
+          className={styles.skeletonRow}
+          style={{ animationDelay: `${i * 60}ms` }}
+        >
+          <span
+            className={`skeleton ${styles.skeletonIcon}`}
+            style={{ animationDelay: `${i * 60}ms` }}
+          />
+          <span
+            className={`skeleton ${styles.skeletonName}`}
+            style={{ width: w, animationDelay: `${i * 60 + 20}ms` }}
+          />
+          <span
+            className={`skeleton ${styles.skeletonSize}`}
+            style={{ animationDelay: `${i * 60 + 30}ms` }}
+          />
+          <span
+            className={`skeleton ${styles.skeletonDate}`}
+            style={{ animationDelay: `${i * 60 + 40}ms` }}
+          />
+        </div>
+      ))}
+    </div>
+  )
+}
+
 // ── Breadcrumb ────────────────────────────────────────────────────────────────
 
 interface BreadcrumbProps {
@@ -87,12 +130,13 @@ function Breadcrumb({ path, onNavigate }: BreadcrumbProps) {
   const segments = path ? path.split('/').filter(Boolean) : []
 
   return (
-    <nav className="arch-breadcrumb" aria-label="Ruta de navegación">
-      <span className="arch-breadcrumb__segment">
+    <nav className={styles.breadcrumb} aria-label="Ruta de navegación">
+      <span className={styles.breadcrumbSegment}>
         <button
           type="button"
-          className={`arch-breadcrumb__btn${segments.length === 0 ? ' arch-breadcrumb__btn--current' : ''}`}
+          className={`${styles.breadcrumbBtn}${segments.length === 0 ? ` ${styles.breadcrumbCurrent}` : ''}`}
           onClick={() => onNavigate('')}
+          aria-current={segments.length === 0 ? 'page' : undefined}
         >
           Workspace
         </button>
@@ -101,12 +145,17 @@ function Breadcrumb({ path, onNavigate }: BreadcrumbProps) {
         const segPath = segments.slice(0, i + 1).join('/')
         const isCurrent = i === segments.length - 1
         return (
-          <span key={segPath} className="arch-breadcrumb__segment">
-            <ChevronRight size={12} className="arch-breadcrumb__sep" aria-hidden="true" />
+          <span key={segPath} className={styles.breadcrumbSegment}>
+            <ChevronRight
+              size={11}
+              className={styles.breadcrumbSep}
+              aria-hidden="true"
+            />
             <button
               type="button"
-              className={`arch-breadcrumb__btn${isCurrent ? ' arch-breadcrumb__btn--current' : ''}`}
+              className={`${styles.breadcrumbBtn}${isCurrent ? ` ${styles.breadcrumbCurrent}` : ''}`}
               onClick={() => !isCurrent && onNavigate(segPath)}
+              aria-current={isCurrent ? 'page' : undefined}
             >
               {seg}
             </button>
@@ -117,7 +166,7 @@ function Breadcrumb({ path, onNavigate }: BreadcrumbProps) {
   )
 }
 
-// ── File/Folder entry in list view ────────────────────────────────────────────
+// ── File/Folder entry — list view ─────────────────────────────────────────────
 
 interface EntryProps {
   entry: WorkspaceFile
@@ -129,42 +178,50 @@ function ListEntry({ entry, onClick }: EntryProps) {
   const colorClass = iconColorClass(entry.kind, isDir)
   return (
     <HoverRow
-      className="arch-entry"
+      className={styles.entry}
       role="button"
       tabIndex={0}
       onClick={onClick}
-      onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick() } }}
+      onKeyDown={e => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick() }
+      }}
       aria-label={`${isDir ? 'Carpeta' : 'Archivo'}: ${entry.name}`}
     >
-      <span className={`arch-entry__icon ${colorClass}`} aria-hidden="true">
+      <span className={`${styles.entryIcon} ${colorClass}`} aria-hidden="true">
         {fileIconForKind(entry.kind, isDir)}
       </span>
-      <span className="arch-entry__name">{entry.name}</span>
-      <span className="arch-entry__size">{isDir ? '—' : formatBytes(entry.size)}</span>
-      <span className="arch-entry__date">{formatDate(entry.modified)}</span>
+      <span className={`${styles.entryName}${isDir ? ` ${styles.entryNameDir}` : ''}`}>
+        {entry.name}
+      </span>
+      <span className={styles.entrySize}>{isDir ? '—' : formatBytes(entry.size)}</span>
+      <span className={styles.entryDate}>{formatDate(entry.modified)}</span>
     </HoverRow>
   )
 }
+
+// ── File/Folder entry — grid view ─────────────────────────────────────────────
 
 function GridEntry({ entry, onClick }: EntryProps) {
   const isDir = Boolean(entry.is_dir || entry.kind === 'directory')
   const colorClass = iconColorClass(entry.kind, isDir)
   return (
     <HoverRow
-      className="arch-grid-entry"
+      className={styles.gridEntry}
       role="button"
       tabIndex={0}
       onClick={onClick}
-      onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick() } }}
+      onKeyDown={e => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick() }
+      }}
       aria-label={`${isDir ? 'Carpeta' : 'Archivo'}: ${entry.name}`}
     >
-      <span className={`arch-entry__icon ${colorClass}`} aria-hidden="true" style={{ fontSize: 32 }}>
+      <span className={`${styles.entryIcon} ${colorClass}`} aria-hidden="true" style={{ width: 'auto', height: 'auto' }}>
         {isDir
           ? <Folder size={36} />
           : fileIconForKind(entry.kind, false)
         }
       </span>
-      <span className="arch-grid-entry__name">{entry.name}</span>
+      <span className={styles.gridEntryName}>{entry.name}</span>
     </HoverRow>
   )
 }
@@ -198,22 +255,24 @@ function FileDrawer({ file, onClose }: FileDrawerProps) {
   return (
     <Drawer open={file !== null} title={file?.name ?? ''} onClose={onClose}>
       {file && (
-        <div className="arch-file-meta">
-          <div className="arch-file-meta__row">
-            <span className="arch-file-meta__label">Tamaño</span>
-            <span className="arch-file-meta__value">{formatBytes(file.size)}</span>
-          </div>
-          <div className="arch-file-meta__row">
-            <span className="arch-file-meta__label">Tipo</span>
-            <span className="arch-file-meta__value">{file.kind ?? 'archivo'}</span>
-          </div>
-          <div className="arch-file-meta__row">
-            <span className="arch-file-meta__label">Modificado</span>
-            <span className="arch-file-meta__value">{formatDate(file.modified)}</span>
-          </div>
-          <div className="arch-file-meta__row">
-            <span className="arch-file-meta__label">Ruta</span>
-            <span className="arch-file-meta__value">{file.path}</span>
+        <div className={styles.fileMeta}>
+          <div className={styles.fileMetaRows}>
+            <div className={styles.fileMetaRow}>
+              <span className={styles.fileMetaLabel}>Tamaño</span>
+              <span className={styles.fileMetaValue}>{formatBytes(file.size)}</span>
+            </div>
+            <div className={styles.fileMetaRow}>
+              <span className={styles.fileMetaLabel}>Tipo</span>
+              <span className={styles.fileMetaValue}>{file.kind ?? 'archivo'}</span>
+            </div>
+            <div className={styles.fileMetaRow}>
+              <span className={styles.fileMetaLabel}>Modificado</span>
+              <span className={styles.fileMetaValue}>{formatDate(file.modified)}</span>
+            </div>
+            <div className={styles.fileMetaRow}>
+              <span className={styles.fileMetaLabel}>Ruta</span>
+              <span className={styles.fileMetaValue}>{file.path}</span>
+            </div>
           </div>
 
           <a
@@ -222,25 +281,40 @@ function FileDrawer({ file, onClose }: FileDrawerProps) {
             target="_blank"
             rel="noopener noreferrer"
             className="cv-btn cv-btn--primary cv-btn--sm"
-            style={{ alignSelf: 'flex-start', marginTop: 'var(--sp-2)' }}
+            style={{ alignSelf: 'flex-start' }}
           >
-            <Download size={14} aria-hidden="true" />
-            Descargar
+            <Download size={13} aria-hidden="true" />
+            Descargar archivo
           </a>
 
           {previewLoading && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--sp-2)', color: 'var(--ink4)', marginTop: 'var(--sp-3)' }}>
-              <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} />
-              <span style={{ fontSize: 'var(--text-label)' }}>Cargando vista previa…</span>
+            <div className={styles.previewLoading}>
+              <Loader2 size={13} className="spin" aria-hidden="true" />
+              <span>Cargando vista previa…</span>
             </div>
           )}
 
           {preview !== null && !previewLoading && (
-            <pre className="arch-file-preview" aria-label="Vista previa del archivo">{preview}</pre>
+            <pre className={styles.preview} aria-label="Vista previa del contenido">
+              {preview}
+            </pre>
           )}
         </div>
       )}
     </Drawer>
+  )
+}
+
+// ── List header row ───────────────────────────────────────────────────────────
+
+function ListColumnHeader() {
+  return (
+    <div className={styles.listHeader} aria-hidden="true">
+      <span style={{ width: 20, flexShrink: 0 }} />
+      <span className={styles.listHeaderName}>Nombre</span>
+      <span className={styles.listHeaderSize}>Tamaño</span>
+      <span className={styles.listHeaderDate}>Modificado</span>
+    </div>
   )
 }
 
@@ -289,9 +363,10 @@ export default function ArchivosView() {
     }
   }
 
-  // Stable key for the entry list that changes on navigation so AnimatePresence
-  // triggers a cross-fade when the user enters a different folder.
+  // Stable key for the entry list so AnimatePresence triggers a cross-fade
+  // when the user enters a different folder.
   const listKey = browseState.status === 'success' ? browseState.path : '__loading__'
+  const entryCount = browseState.status === 'success' ? browseState.entries.length : 0
 
   return (
     <>
@@ -303,61 +378,58 @@ export default function ArchivosView() {
             variant="ghost"
             size="sm"
             onClick={() => load(currentPath)}
-            aria-label="Actualizar"
+            aria-label="Actualizar lista de archivos"
             loading={browseState.status === 'loading'}
           >
-            <RefreshCw size={14} aria-hidden="true" />
+            <RefreshCw size={13} aria-hidden="true" />
             Actualizar
           </Button>
         }
       />
 
       <div className="view-body cv-view-body">
-        <div className="arch-toolbar">
+        {/* Toolbar: breadcrumb + view toggle */}
+        <div className={styles.toolbar}>
           <Breadcrumb path={currentPath} onNavigate={navigate} />
-          <div className="arch-view-toggle" aria-label="Modo de vista">
+
+          <div
+            className={styles.viewToggle}
+            role="group"
+            aria-label="Modo de vista"
+          >
             <button
               type="button"
-              className={`arch-view-toggle__btn${viewMode === 'list' ? ' is-active' : ''}`}
+              className={`${styles.viewToggleBtn}${viewMode === 'list' ? ` ${styles.viewToggleBtnActive}` : ''}`}
               onClick={() => setViewMode('list')}
               aria-label="Vista de lista"
               aria-pressed={viewMode === 'list'}
             >
-              <List size={14} aria-hidden="true" />
+              <List size={13} aria-hidden="true" />
             </button>
             <button
               type="button"
-              className={`arch-view-toggle__btn${viewMode === 'grid' ? ' is-active' : ''}`}
+              className={`${styles.viewToggleBtn}${viewMode === 'grid' ? ` ${styles.viewToggleBtnActive}` : ''}`}
               onClick={() => setViewMode('grid')}
               aria-label="Vista de cuadrícula"
               aria-pressed={viewMode === 'grid'}
             >
-              <LayoutGrid size={14} aria-hidden="true" />
+              <LayoutGrid size={13} aria-hidden="true" />
             </button>
           </div>
         </div>
 
-        {browseState.status === 'loading' && (
-          <div
-            style={{ display: 'flex', flexDirection: 'column', gap: 2 }}
-            aria-busy="true"
-            aria-label="Cargando archivos…"
-          >
-            {[...Array(5)].map((_, i) => (
-              <div key={i} className="cv-skeleton" style={{ height: 40 }} />
-            ))}
-          </div>
-        )}
+        {/* Loading — skeleton rows mirroring the list layout */}
+        {browseState.status === 'loading' && <ListSkeleton />}
 
+        {/* Error with inline retry */}
         {browseState.status === 'error' && (
           <FadeIn>
-            <div role="alert">
-              <p className="state-error">{browseState.message}</p>
+            <div role="alert" className={styles.errorState}>
+              <p className={styles.errorMessage}>{browseState.message}</p>
               <Button
                 variant="secondary"
                 size="sm"
                 onClick={() => load(currentPath)}
-                style={{ marginTop: 8 }}
               >
                 Reintentar
               </Button>
@@ -365,7 +437,7 @@ export default function ArchivosView() {
           </FadeIn>
         )}
 
-        {/* AnimatePresence key on listKey creates a cross-fade when navigating folders */}
+        {/* AnimatePresence key on listKey cross-fades when navigating folders */}
         <AnimatePresence mode="wait">
           {browseState.status === 'success' && (
             <motion.div
@@ -375,50 +447,58 @@ export default function ArchivosView() {
               exit={{ opacity: 0 }}
               transition={TWEEN}
             >
-              {browseState.entries.length === 0 && (
+              {browseState.entries.length === 0 ? (
                 <EmptyState
                   icon={<Folder size={40} />}
                   title="Esta carpeta está vacía"
-                  description="Los archivos que cree el agente aparecerán aquí."
+                  description="Los archivos que cree el agente aparecerán aquí automáticamente."
                 />
-              )}
+              ) : (
+                <>
+                  {/* Accessible count badge below toolbar */}
+                  <p className={styles.countLabel}>
+                    {entryCount} elemento{entryCount === 1 ? '' : 's'}
+                  </p>
 
-              {browseState.entries.length > 0 && (
-                viewMode === 'list' ? (
-                  <ul
-                    className="arch-list"
-                    role="list"
-                    aria-label={`${browseState.entries.length} elemento${browseState.entries.length === 1 ? '' : 's'}`}
-                  >
-                    <AnimatePresence initial={false}>
-                      {browseState.entries.map(entry => (
-                        <AnimatedListItem key={entry.path}>
-                          <ListEntry
-                            entry={entry}
-                            onClick={() => handleEntryClick(entry)}
-                          />
-                        </AnimatedListItem>
-                      ))}
-                    </AnimatePresence>
-                  </ul>
-                ) : (
-                  <ul
-                    className="arch-grid"
-                    role="list"
-                    aria-label={`${browseState.entries.length} elemento${browseState.entries.length === 1 ? '' : 's'}`}
-                  >
-                    <AnimatePresence initial={false}>
-                      {browseState.entries.map(entry => (
-                        <AnimatedListItem key={entry.path}>
-                          <GridEntry
-                            entry={entry}
-                            onClick={() => handleEntryClick(entry)}
-                          />
-                        </AnimatedListItem>
-                      ))}
-                    </AnimatePresence>
-                  </ul>
-                )
+                  {viewMode === 'list' ? (
+                    <>
+                      <ListColumnHeader />
+                      <ul
+                        className={styles.list}
+                        role="list"
+                        aria-label={`${entryCount} elemento${entryCount === 1 ? '' : 's'}`}
+                      >
+                        <AnimatePresence initial={false}>
+                          {browseState.entries.map(entry => (
+                            <AnimatedListItem key={entry.path}>
+                              <ListEntry
+                                entry={entry}
+                                onClick={() => handleEntryClick(entry)}
+                              />
+                            </AnimatedListItem>
+                          ))}
+                        </AnimatePresence>
+                      </ul>
+                    </>
+                  ) : (
+                    <ul
+                      className={styles.grid}
+                      role="list"
+                      aria-label={`${entryCount} elemento${entryCount === 1 ? '' : 's'}`}
+                    >
+                      <AnimatePresence initial={false}>
+                        {browseState.entries.map(entry => (
+                          <AnimatedListItem key={entry.path}>
+                            <GridEntry
+                              entry={entry}
+                              onClick={() => handleEntryClick(entry)}
+                            />
+                          </AnimatedListItem>
+                        ))}
+                      </AnimatePresence>
+                    </ul>
+                  )}
+                </>
               )}
             </motion.div>
           )}

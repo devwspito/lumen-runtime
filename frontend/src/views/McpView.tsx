@@ -1,16 +1,16 @@
 import { useEffect, useReducer, useRef, useState } from 'react'
 import { sileo } from 'sileo'
-import { X, Terminal, Search, Wrench } from 'lucide-react'
+import { X, Terminal, Search, Wrench, ExternalLink } from 'lucide-react'
 import { useT } from '../lib/i18n'
 import { listMcpServers, addMcpServer, removeMcpServer, searchMcpRegistry, scanInstall, recordSecurityDecision, ApiError } from '../api/client'
 import type { McpServer, McpRegistryEntry, InstallScanResponse } from '../api/types'
 import { useConfirmDialog } from '../components/ConfirmDialog'
-import Badge from '../components/Badge'
 import InstallScanModal from '../components/InstallScanModal'
 import type { MfaFactors } from '../components/MfaModal'
 import { PageHeader } from '../components/ui/PageHeader'
 import { EmptyState } from '../components/ui/EmptyState'
 import { Button } from '../components/ui/Button'
+import { Badge as DsBadge, StatusDot } from '../components/ui/Badge'
 import {
   AnimatePresence,
   AnimatedListItem,
@@ -24,6 +24,7 @@ import {
   SPRING,
   TWEEN_FAST,
 } from '../components/ui/motion'
+import styles from './McpView.module.css'
 
 // Curated catalog — mirrors mcp.js MCP_CATALOG (npx-only verified servers).
 const MCP_CATALOG: McpRegistryEntry[] = [
@@ -291,32 +292,71 @@ export default function McpView() {
       />
 
       <div className="view-body cv-view-body">
-        <Stagger style={{ display: 'flex', flexDirection: 'column', gap: 'var(--sp-8)' }}>
+        <Stagger style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
 
           {/* ── Active servers ──────────────────────────────────────────────── */}
           <StaggerItem>
             <section className="cv-section" aria-label="Herramientas activas">
-              <h2 className="cv-section-label">Activas</h2>
+              <h2 className={styles.sectionLabel}>Activas</h2>
+
               {state.status === 'loading' && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }} aria-busy="true">
-                  {[...Array(2)].map((_, i) => <div key={i} className="cv-skeleton" style={{ height: 48 }} />)}
+                <div
+                  style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}
+                  aria-busy="true"
+                  aria-label="Cargando herramientas…"
+                >
+                  {[...Array(2)].map((_, i) => (
+                    <div key={i} className={styles.skeletonRow}>
+                      <div
+                        className="skeleton skeleton--avatar"
+                        style={{ borderRadius: 'var(--radius-sm)', animationDelay: `${i * 80}ms` }}
+                      />
+                      <div className={styles.skeletonRowLines}>
+                        <div
+                          className="skeleton skeleton--line"
+                          style={{ width: '40%', animationDelay: `${i * 80 + 30}ms` }}
+                        />
+                        <div
+                          className="skeleton skeleton--line-sm"
+                          style={{ width: '65%', animationDelay: `${i * 80 + 60}ms` }}
+                        />
+                      </div>
+                    </div>
+                  ))}
                 </div>
               )}
+
               {state.status === 'error' && (
                 <FadeIn>
-                  <div role="alert">
-                    <p className="state-error">{state.message}</p>
-                    <Button variant="secondary" size="sm" onClick={load} style={{ marginTop: 8 }}>Reintentar</Button>
+                  <div role="alert" className={styles.errorBlock}>
+                    <p className={styles.errorMessage}>{state.message}</p>
+                    <div>
+                      <Button variant="secondary" size="sm" onClick={load}>
+                        Reintentar
+                      </Button>
+                    </div>
                   </div>
                 </FadeIn>
               )}
+
               {state.status === 'success' && (
                 state.servers.length === 0
                   ? (
                     <EmptyState
-                      icon={<Wrench size={36} />}
+                      icon={<Wrench size={32} />}
                       title="Sin herramientas conectadas"
-                      description="Añade una del catálogo sugerido o busca en el registro."
+                      description="Añade una del catálogo sugerido o busca en el registro para ampliar las capacidades del agente."
+                      action={
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          onClick={() => {
+                            document.getElementById('mcp-registry-input')?.focus()
+                          }}
+                        >
+                          Buscar herramientas
+                        </Button>
+                      }
                     />
                   )
                   : (
@@ -356,7 +396,7 @@ export default function McpView() {
           {/* ── Suggested catalog ───────────────────────────────────────────── */}
           <StaggerItem>
             <section className="cv-section" aria-label="Herramientas sugeridas">
-              <h2 className="cv-section-label">Sugeridas</h2>
+              <h2 className={styles.sectionLabel}>Sugeridas</h2>
               <ul className="cv-list" role="list">
                 <AnimatePresence initial={false}>
                   {MCP_CATALOG.map(entry => (
@@ -376,20 +416,23 @@ export default function McpView() {
           {/* ── Official registry search ─────────────────────────────────── */}
           <StaggerItem>
             <section className="cv-section" aria-label="Buscar más herramientas">
-              <h2 className="cv-section-label">Buscar más herramientas</h2>
-              <div className="cv-search-row">
-                <label className="sr-only" htmlFor="mcp-registry-input">Buscar herramientas externas</label>
-                <div style={{ position: 'relative', flex: 1 }}>
-                  <Search size={14} aria-hidden="true" style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--ink4)', pointerEvents: 'none' }} />
+              <h2 className={styles.sectionLabel}>Buscar más herramientas</h2>
+              <div className={styles.searchBar}>
+                <label className="sr-only" htmlFor="mcp-registry-input">
+                  Buscar herramientas externas
+                </label>
+                <div className={styles.searchInputWrap}>
+                  <span className={styles.searchIcon} aria-hidden="true">
+                    <Search size={13} />
+                  </span>
                   <input
                     id="mcp-registry-input"
                     ref={regInputRef}
-                    className="cv-input"
+                    className={styles.searchInput}
                     type="search"
                     placeholder="github, slack, postgres…"
                     autoComplete="off"
                     onKeyDown={e => { if (e.key === 'Enter') searchRegistry() }}
-                    style={{ paddingLeft: 30 }}
                   />
                 </div>
                 <Button
@@ -401,17 +444,25 @@ export default function McpView() {
                   Buscar
                 </Button>
               </div>
-              <p className="cv-hint">Conectado al registro oficial de herramientas externas</p>
+              <p className={styles.searchHint}>
+                Conectado al registro oficial de herramientas externas
+              </p>
+
               {registryState.status === 'error' && (
-                <div role="alert">
-                  <p className="state-error">{registryState.message}</p>
-                  <Button variant="secondary" size="sm" onClick={searchRegistry} style={{ marginTop: 8 }}>
-                    Reintentar
-                  </Button>
-                </div>
+                <FadeIn>
+                  <div role="alert" className={styles.errorBlock}>
+                    <p className={styles.errorMessage}>{registryState.message}</p>
+                    <div>
+                      <Button variant="secondary" size="sm" onClick={searchRegistry}>
+                        Reintentar
+                      </Button>
+                    </div>
+                  </div>
+                </FadeIn>
               )}
+
               {registryState.status === 'success' && registryState.results.length > 0 && (
-                <ul className="cv-list" role="list">
+                <ul className="cv-list" role="list" style={{ marginTop: 'var(--space-3)' }}>
                   <AnimatePresence initial={false}>
                     {registryState.results.map((entry, i) => (
                       <AnimatedListItem key={`${entry.server_id ?? entry.id ?? entry.name ?? i}`}>
@@ -425,9 +476,10 @@ export default function McpView() {
                   </AnimatePresence>
                 </ul>
               )}
+
               {registryState.status === 'success' && registryState.results.length === 0 && (
                 <EmptyState
-                  icon={<Search size={32} />}
+                  icon={<Search size={28} />}
                   title="Sin resultados"
                   description="Prueba con otro término de búsqueda."
                 />
@@ -438,8 +490,11 @@ export default function McpView() {
           {/* ── Manual add ──────────────────────────────────────────────────── */}
           <StaggerItem>
             <section className="cv-section" aria-label="Añadir manualmente">
-              <h2 className="cv-section-label">Añadir manualmente</h2>
-              <AddMcpForm onAdded={() => { show('Herramienta añadida — tus agentes ya pueden usarla', 'ok'); load() }} onToast={show} />
+              <h2 className={styles.sectionLabel}>Añadir manualmente</h2>
+              <AddMcpForm
+                onAdded={() => { show('Herramienta añadida — tus agentes ya pueden usarla', 'ok'); load() }}
+                onToast={show}
+              />
             </section>
           </StaggerItem>
 
@@ -461,52 +516,59 @@ function McpServerRow({ server, onRemove }: McpServerRowProps) {
   const argv = Array.isArray(server.argv) ? server.argv.join(' ') : (server.argv ?? '')
   const healthy = String(server.health ?? '').toLowerCase() === 'healthy'
   const hasHealth = server.health != null && server.health !== ''
-  const tools = server.tool_count != null ? `${server.tool_count} herramienta${server.tool_count === 1 ? '' : 's'}` : ''
+  const toolCount = server.tool_count
+  const toolLabel = toolCount != null
+    ? `${toolCount} herramienta${toolCount === 1 ? '' : 's'}`
+    : ''
 
   return (
-    <HoverRow className="mcp-row">
-      <span style={{ color: 'var(--ink4)', flexShrink: 0, display: 'flex' }} aria-hidden="true">
-        <Terminal size={15} />
+    <HoverRow className={styles.serverRow}>
+      <span className={styles.serverIcon} aria-hidden="true">
+        <Terminal size={14} />
       </span>
-      <div className="mcp-row__info">
-        <div className="mcp-row__name">
+
+      <div className={styles.serverInfo}>
+        <div className={styles.serverName}>
           {server.label ?? server.server_id ?? 'Herramienta externa'}
+
           {hasHealth && (
-            <Badge variant={healthy ? 'ok' : 'danger'}>
-              {tools || String(server.health)}
-            </Badge>
+            <StatusDot
+              state={healthy ? 'success' : 'danger'}
+              label={toolLabel || String(server.health)}
+            />
           )}
-          {!hasHealth && tools && <Badge variant="neutral">{tools}</Badge>}
+          {!hasHealth && toolLabel && (
+            <span className={styles.toolCount}>{toolLabel}</span>
+          )}
         </div>
+
         {argv && (
           <button
             type="button"
-            className="mcp-row__cmd"
-            style={{
-              cursor: 'pointer', background: 'none', border: 'none', padding: '2px 0',
-              display: 'inline-flex', alignItems: 'center', gap: 4, color: 'var(--ink4)',
-              fontFamily: 'inherit',
-            }}
+            className={styles.serverCmdToggle}
             onClick={() => setShowCmd(v => !v)}
             aria-expanded={showCmd}
+            aria-label={showCmd ? 'Ocultar detalles técnicos' : 'Ver detalles técnicos'}
           >
-            <AnimatedChevron open={showCmd} size={11} />
-            <span style={{ fontSize: 'var(--text-caption)' }}>Detalles técnicos</span>
+            <AnimatedChevron open={showCmd} size={10} />
+            <span>Detalles técnicos</span>
           </button>
         )}
+
         <AnimatedExpanderContent open={showCmd && Boolean(argv)}>
-          <div className="mcp-row__cmd" style={{ marginTop: 2, paddingLeft: 16, userSelect: 'all' }}>
-            {argv}
-          </div>
+          <code className={styles.serverCmdText}>{argv}</code>
         </AnimatedExpanderContent>
       </div>
-      <button
-        className="cv-btn cv-btn--ghost cv-btn--sm cv-btn--danger"
-        onClick={onRemove}
-        aria-label={`Eliminar ${server.label ?? 'herramienta externa'}`}
-      >
-        <X size={14} aria-hidden="true" />
-      </button>
+
+      <div className={styles.serverActions}>
+        <button
+          className="cv-btn cv-btn--ghost cv-btn--sm cv-btn--danger"
+          onClick={onRemove}
+          aria-label={`Eliminar ${server.label ?? 'herramienta externa'}`}
+        >
+          <X size={13} aria-hidden="true" />
+        </button>
+      </div>
     </HoverRow>
   )
 }
@@ -558,52 +620,62 @@ function CatalogCard({ entry, installedIds, onInstall }: CatalogCardProps) {
 
   return (
     <motion.div
-      className="mcp-row"
-      style={{ flexDirection: 'column', alignItems: 'stretch', gap: 'var(--sp-2)' }}
-      whileHover={{ y: -2 }}
+      className={styles.catalogCard}
+      whileHover={{ y: -1 }}
       transition={SPRING}
       layout
     >
       {/* Main row */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--sp-3)' }}>
-        <span style={{ color: 'var(--ink4)', flexShrink: 0, display: 'flex' }} aria-hidden="true">
-          <Terminal size={15} />
+      <div className={styles.catalogCardMain}>
+        <span className={styles.catalogCardIcon} aria-hidden="true">
+          <Terminal size={14} />
         </span>
-        <div className="mcp-row__info">
-          <div className="mcp-row__name">
+
+        <div className={styles.catalogCardInfo}>
+          <div className={styles.catalogCardName}>
             {entry.label ?? entry.name ?? id}
-            {entry.tag && <Badge variant="neutral">{entry.tag}</Badge>}
-            {needsEnv && <Badge variant="warn">Requiere clave API</Badge>}
+            {entry.tag && (
+              <DsBadge variant="default">{entry.tag}</DsBadge>
+            )}
+            {needsEnv && (
+              <DsBadge variant="warning">Requiere clave API</DsBadge>
+            )}
+            {already && (
+              <DsBadge variant="success">Añadida</DsBadge>
+            )}
           </div>
+
           {entry.description && (
-            <div className="mcp-row__cmd" style={{ color: 'var(--ink3)', fontFamily: 'var(--font-ui)' }}>
-              {entry.description}
-            </div>
+            <p className={styles.catalogCardDesc}>{entry.description}</p>
           )}
+
           {unsupported && (
-            <div className="mcp-row__cmd" style={{ color: 'var(--warn)' }}>
+            <p className={styles.catalogCardWarn}>
               {entry.unsupported_reason ?? (
                 runner === ''
                   ? 'Solo remoto — sin paquete stdio npm/pypi.'
                   : `Solo se admiten herramientas npx/uvx (esta usa ${runner}).`
               )}
-            </div>
+            </p>
           )}
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--sp-2)', flexShrink: 0 }}>
+
+        <div className={styles.catalogCardActions}>
           {repo && (
             <a
               href={repo}
               target="_blank"
               rel="noopener noreferrer"
-              className="cv-link cv-btn--sm"
+              className={styles.docsLink}
+              aria-label={`Documentación de ${entry.label ?? entry.name ?? id} (se abre en nueva pestaña)`}
             >
+              <ExternalLink size={11} aria-hidden="true" style={{ marginRight: 4 }} />
               Docs
             </a>
           )}
           {!showEnvForm && (
             <Button
-              variant="secondary"
+              variant={already ? 'ghost' : 'secondary'}
               size="sm"
               disabled={already || unsupported}
               loading={installing}
@@ -617,15 +689,15 @@ function CatalogCard({ entry, installedIds, onInstall }: CatalogCardProps) {
 
       {/* Inline key-entry form */}
       <AnimatedExpanderContent open={showEnvForm}>
-        <div className="cv-form-stack" style={{ paddingLeft: 27 }}>
+        <div className={styles.envForm}>
           {envSchema.map(field => (
-            <div key={field.key}>
-              <label className="cv-label" htmlFor={`mcp-env-${id}-${field.key}`}>
+            <div key={field.key} className={styles.envField}>
+              <label className={styles.envLabel} htmlFor={`mcp-env-${id}-${field.key}`}>
                 {field.label}{field.required ? ' *' : ''}
               </label>
               <input
                 id={`mcp-env-${id}-${field.key}`}
-                className="cv-input"
+                className={styles.envInput}
                 type={field.secret ? 'password' : 'text'}
                 autoComplete="off"
                 value={envValues[field.key] ?? ''}
@@ -633,7 +705,7 @@ function CatalogCard({ entry, installedIds, onInstall }: CatalogCardProps) {
               />
             </div>
           ))}
-          <div className="cv-form-actions">
+          <div className={styles.envActions}>
             <Button variant="primary" size="sm" type="button" onClick={handleEnvSubmit}>
               Añadir
             </Button>
@@ -669,7 +741,10 @@ function AddMcpForm({ onAdded, onToast }: AddMcpFormProps) {
   async function handleAdd() {
     const label = labelRef.current?.value.trim() ?? ''
     const argvRaw = argvRef.current?.value.trim() ?? ''
-    if (!label || !argvRaw) { onToast('Nombre y comando de arranque son obligatorios', 'warn'); return }
+    if (!label || !argvRaw) {
+      onToast('Nombre y comando de arranque son obligatorios', 'warn')
+      return
+    }
 
     const argv = argvRaw.split(/\s+/).filter(Boolean)
     const envRaw = envRef.current?.value.trim() ?? ''
@@ -703,42 +778,65 @@ function AddMcpForm({ onAdded, onToast }: AddMcpFormProps) {
   }
 
   return (
-    <motion.div className="cv-form-card" whileHover={{ y: -1 }} transition={TWEEN_FAST} layout>
-      <h3 className="cv-form-title">Añadir herramienta externa</h3>
-      <label className="cv-label" htmlFor="mcp-label">Nombre</label>
-      <input
-        id="mcp-label"
-        ref={labelRef}
-        className="cv-input"
-        type="text"
-        placeholder="Replicate, Brave…"
-        autoComplete="off"
-      />
-      <label className="cv-label" htmlFor="mcp-argv">Comando de arranque</label>
-      <input
-        id="mcp-argv"
-        ref={argvRef}
-        className="cv-input"
-        type="text"
-        placeholder="npx -y @modelcontextprotocol/server-brave-search"
-        autoComplete="off"
-      />
-      <label className="cv-label" htmlFor="mcp-env">{t('mcp.env.label')}</label>
-      <textarea
-        id="mcp-env"
-        ref={envRef}
-        className="cv-textarea"
-        rows={3}
-        placeholder="BRAVE_API_KEY=br-xxx"
-      />
-      <div className="cv-form-actions">
-        <button
-          className="cv-btn cv-btn--primary cv-btn--sm"
+    <motion.div
+      className={styles.addForm}
+      whileHover={{ y: -1 }}
+      transition={TWEEN_FAST}
+      layout
+    >
+      <h3 className={styles.addFormTitle}>Añadir herramienta externa</h3>
+
+      <div className={styles.addFormField}>
+        <label className={styles.addFormLabel} htmlFor="mcp-label">
+          Nombre
+        </label>
+        <input
+          id="mcp-label"
+          ref={labelRef}
+          className={styles.addFormInput}
+          type="text"
+          placeholder="Replicate, Brave…"
+          autoComplete="off"
+        />
+      </div>
+
+      <div className={styles.addFormField}>
+        <label className={styles.addFormLabel} htmlFor="mcp-argv">
+          Comando de arranque
+        </label>
+        <input
+          id="mcp-argv"
+          ref={argvRef}
+          className={`${styles.addFormInput} ${styles.addFormInputMono}`}
+          type="text"
+          placeholder="npx -y @modelcontextprotocol/server-brave-search"
+          autoComplete="off"
+        />
+      </div>
+
+      <div className={styles.addFormField}>
+        <label className={styles.addFormLabel} htmlFor="mcp-env">
+          {t('mcp.env.label')}
+        </label>
+        <textarea
+          id="mcp-env"
+          ref={envRef}
+          className={styles.addFormTextarea}
+          rows={3}
+          placeholder="BRAVE_API_KEY=br-xxx"
+        />
+      </div>
+
+      <div className={styles.addFormActions}>
+        <Button
+          variant="primary"
+          size="sm"
           onClick={handleAdd}
+          loading={adding}
           disabled={adding}
         >
-          {adding ? 'Añadiendo…' : 'Añadir'}
-        </button>
+          Añadir
+        </Button>
       </div>
     </motion.div>
   )

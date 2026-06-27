@@ -46,12 +46,17 @@ CREATE TABLE IF NOT EXISTS providers (
   api_key_ciphertext BLOB,
   connectivity       TEXT NOT NULL DEFAULT 'unknown',
   last_checked_at    TEXT,
-  created_at         TEXT NOT NULL
+  created_at         TEXT NOT NULL,
+  managed_by         TEXT
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS providers_one_active
   ON providers (is_active) WHERE is_active = 1;
 """
+
+# Idempotent migration: adds managed_by to existing DBs created before the
+# Enterprise gating column existed (mirrors sqlite_agent_registry pattern).
+_MIGRATION_MANAGED_BY = "ALTER TABLE providers ADD COLUMN managed_by TEXT"
 
 
 class SQLiteProviderRepository:
@@ -64,6 +69,14 @@ class SQLiteProviderRepository:
         with self._connect() as conn:
             conn.executescript("PRAGMA journal_mode=WAL;")
             conn.executescript(_SCHEMA)
+            self._migrate_managed_by(conn)
+
+    @staticmethod
+    def _migrate_managed_by(conn: sqlite3.Connection) -> None:
+        """Add managed_by (nullable) to pre-existing DBs without it (idempotent)."""
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(providers)")}
+        if "managed_by" not in cols:
+            conn.execute(_MIGRATION_MANAGED_BY)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path, isolation_level=None)
@@ -93,8 +106,8 @@ class SQLiteProviderRepository:
                 INSERT INTO providers (
                   provider_id, alias, kind, base_url, default_model,
                   enabled, is_active, api_key_ciphertext, connectivity,
-                  last_checked_at, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  last_checked_at, created_at, managed_by
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(provider.provider_id),
@@ -110,6 +123,7 @@ class SQLiteProviderRepository:
                     if provider.last_checked_at
                     else None,
                     provider.created_at.isoformat(),
+                    provider.managed_by,
                 ),
             )
         return provider
@@ -138,7 +152,8 @@ class SQLiteProviderRepository:
                 """
                 UPDATE providers SET
                     alias = ?, kind = ?, base_url = ?, default_model = ?,
-                    enabled = ?, connectivity = ?, last_checked_at = ?
+                    enabled = ?, connectivity = ?, last_checked_at = ?,
+                    managed_by = ?
                 WHERE provider_id = ?
                 """,
                 (
@@ -151,6 +166,7 @@ class SQLiteProviderRepository:
                     provider.last_checked_at.isoformat()
                     if provider.last_checked_at
                     else None,
+                    provider.managed_by,
                     str(provider.provider_id),
                 ),
             )
@@ -255,4 +271,5 @@ class SQLiteProviderRepository:
                 else None
             ),
             created_at=datetime.fromisoformat(row["created_at"]),
+            managed_by=row["managed_by"] if "managed_by" in row.keys() else None,
         )

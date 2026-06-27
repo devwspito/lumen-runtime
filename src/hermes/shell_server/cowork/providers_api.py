@@ -30,6 +30,39 @@ from hermes.tasks.control_plane.domain.ports import AgentUnavailable
 logger = logging.getLogger("hermes.shell_server.cowork.providers_api")
 
 
+async def _reject_if_cloud_managed(
+    proxy, *, provider_id: str | None = None, alias: str | None = None
+) -> None:
+    """Gating: a cloud-managed provider is owned by the org's policy — the local
+    operator may not edit/delete/overwrite it ("el empleado no lo toca").
+
+    Enforced HERE because this REST layer is the operator's only entry point; the
+    config-sync applier mutates managed_by="cloud" rows via D-Bus directly (never
+    through REST), so it is unaffected and stays the sole owner of these rows.
+    Fail-open on a daemon lookup error: the mutator call right after will surface
+    the 503 itself, and the next sync reconciles regardless.
+    """
+    try:
+        providers = await proxy.call_list("list_providers")
+    except AgentUnavailable:
+        return
+    for p in providers:
+        if p.get("managed_by") != "cloud":
+            continue
+        if provider_id is not None and p.get("provider_id") == provider_id:
+            raise HTTPException(
+                status_code=403,
+                detail="Este proveedor lo gestiona la política de tu organización "
+                "y no puede modificarse desde aquí.",
+            )
+        if alias is not None and p.get("alias") == alias:
+            raise HTTPException(
+                status_code=403,
+                detail="Ya existe un proveedor con ese alias gestionado por tu "
+                "organización.",
+            )
+
+
 def _mirror_provider_to_local_repo(request: Request, body) -> None:
     """Best-effort: persist the provider (incl. key) into shell-server's local
     SQLiteProviderRepository so the shell can make its own LLM calls. The daemon
@@ -154,6 +187,7 @@ def create_providers_router() -> APIRouter:
         import json  # noqa: PLC0415
 
         proxy = request.app.state.dbus_proxy
+        await _reject_if_cloud_managed(proxy, alias=body.alias)
         draft = {
             "kind": body.kind,
             "alias": body.alias,
@@ -200,8 +234,9 @@ def create_providers_router() -> APIRouter:
 
     @router.delete("/{provider_id}", status_code=204)
     async def delete_provider(request: Request, provider_id: str) -> None:
-        """Delete a configured provider."""
+        """Delete a configured provider (rejected for cloud-managed rows)."""
         proxy = request.app.state.dbus_proxy
+        await _reject_if_cloud_managed(proxy, provider_id=provider_id)
         try:
             await proxy.call_bool("delete_provider", provider_id)
         except AgentUnavailable as exc:
