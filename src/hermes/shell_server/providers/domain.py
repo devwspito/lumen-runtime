@@ -132,6 +132,10 @@ class Provider:
     last_checked_at: datetime | None = None
     available_models: tuple[ProviderModel, ...] = field(default_factory=tuple)
     created_at: datetime = field(default_factory=lambda: datetime.now(tz=UTC))
+    # "cloud" → the Enterprise config-sync applier owns this provider; the local
+    # operator may not edit/delete it (gating). None → locally-owned (CE / BYO).
+    # Mirrors the agents managed_by pattern (agents/domain/agent.py).
+    managed_by: str | None = None
 
 
 def _assert_safe_base_url(base_url: str | None) -> None:

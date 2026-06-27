@@ -237,6 +237,42 @@ class TestEgressDomainValidation:
 # ---------------------------------------------------------------------------
 
 
+class TestProviderReconcile:
+    @pytest.mark.asyncio
+    async def test_provider_draft_stamps_managed_by_cloud(self) -> None:
+        import json  # noqa: PLC0415
+
+        proxy = FakeDbusProxy()
+        payload = _empty_payload(
+            providers=[{"alias": "openai", "kind": "openai", "default_model": "gpt-4"}]
+        )
+        await PolicyApplier(proxy).apply(payload, current_agents=[])
+        add_calls = [(v, args) for v, args in proxy.calls if v == "add_provider"]
+        assert len(add_calls) == 1
+        draft = json.loads(add_calls[0][1][0])
+        assert draft["managed_by"] == "cloud"
+
+    @pytest.mark.asyncio
+    async def test_deletes_cloud_managed_provider_absent_from_bundle(self) -> None:
+        proxy = FakeDbusProxy()
+        proxy._existing_providers = [
+            {"provider_id": "stale", "alias": "old-vllm", "managed_by": "cloud"}
+        ]
+        payload = _empty_payload(providers=[])
+        await PolicyApplier(proxy).apply(payload, current_agents=[])
+        assert "delete_provider" in proxy.called_verbs()
+
+    @pytest.mark.asyncio
+    async def test_does_not_delete_local_provider(self) -> None:
+        proxy = FakeDbusProxy()
+        proxy._existing_providers = [
+            {"provider_id": "mine", "alias": "my-ollama", "managed_by": None}
+        ]
+        payload = _empty_payload(providers=[])
+        await PolicyApplier(proxy).apply(payload, current_agents=[])
+        assert "delete_provider" not in proxy.called_verbs()
+
+
 class TestAgentReconcile:
     @pytest.mark.asyncio
     async def test_creates_new_cloud_agent(self) -> None:

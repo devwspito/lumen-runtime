@@ -657,6 +657,7 @@ class DbusRuntimeServiceWiring:
             "connectivity": p.connectivity.value,
             "last_checked_at": p.last_checked_at.isoformat() if p.last_checked_at else None,
             "created_at": p.created_at.isoformat() if getattr(p, "created_at", None) else "",
+            "managed_by": getattr(p, "managed_by", None),
         }
 
     def list_providers(self) -> list[dict]:
@@ -702,6 +703,9 @@ class DbusRuntimeServiceWiring:
             base_url=d.get("base_url") or None,
             has_api_key=api_key is not None,
         )
+        # Ownership: the config-sync applier stamps managed_by="cloud" so the row
+        # is gated against local edits/deletes (REST layer) + reconcilable.
+        provider.managed_by = d.get("managed_by") or None
         saved = self._provider_repo.add(provider=provider, api_key=api_key)
         if d.get("set_active"):
             self._provider_repo.set_active(provider_id=saved.provider_id)
@@ -724,6 +728,8 @@ class DbusRuntimeServiceWiring:
             current.base_url = d["base_url"]
         if d.get("enabled") is not None:
             current.enabled = bool(d["enabled"])
+        if d.get("managed_by") is not None:
+            current.managed_by = d["managed_by"]
         self._provider_repo.update(provider=current, api_key=d.get("api_key") or None)
         return self._provider_to_dict(self._provider_repo.get(provider_id=pid))
 

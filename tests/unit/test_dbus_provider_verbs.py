@@ -88,6 +88,23 @@ def test_add_provider_executes_and_persists(tmp_path: Path) -> None:
     assert listed[0]["provider_id"] == saved["provider_id"]
 
 
+def test_managed_by_cloud_persists_and_roundtrips(tmp_path: Path) -> None:
+    """The applier stamps managed_by='cloud'; it must persist + surface in list."""
+    wiring = _make_wiring(tmp_path)
+    cloud = wiring.add_provider(
+        draft_json=_draft(alias="cloud-vllm", managed_by="cloud"),
+        sender_uid=_OPERATOR_UID,
+    )
+    local = wiring.add_provider(
+        draft_json=_draft(alias="my-ollama"), sender_uid=_OPERATOR_UID
+    )
+    assert cloud["managed_by"] == "cloud"
+    assert local["managed_by"] is None
+    by_alias = {p["alias"]: p for p in wiring.list_providers()}
+    assert by_alias["cloud-vllm"]["managed_by"] == "cloud"
+    assert by_alias["my-ollama"]["managed_by"] is None
+
+
 def test_add_with_set_active_activates(tmp_path: Path) -> None:
     wiring = _make_wiring(tmp_path)
     saved = wiring.add_provider(draft_json=_draft(set_active=True), sender_uid=_OPERATOR_UID)

@@ -51,6 +51,13 @@ _ALL_VIEWS: list[str] = [
     "coste",
 ]
 
+# NOTE: `tablero` is intentionally NOT in _ALL_VIEWS above. It is an always-on
+# pure-UI dashboard with no /api/v1 feature surface (useFeatures forces it on),
+# so it is not a governable native view. Do NOT "fix" this by adding tablero to
+# _ALL_VIEWS — the cloud console mirrors _ALL_VIEWS as its authorable vocabulary
+# and treats chat+tablero as always-on (see lumen-control-enterprise Agents.tsx
+# ALWAYS_ON_VIEWS + tests/test_view_vocabulary_mirror).
+
 # Minimum view set for an associate instance before Fase 4 cloud policies arrive.
 _ASSOCIATE_DEFAULT_VIEWS: list[str] = ["chat", "coste", "tablero"]
 
