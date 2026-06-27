@@ -24,28 +24,42 @@ const UsageView = lazy(() => import('./views/UsageView'))
 // Code-split DashboardView: shares Recharts with UsageView; not needed on other routes.
 const DashboardView = lazy(() => import('./views/DashboardView'))
 
-function OfficeFallback() {
+/** Shared route-boundary skeleton: stacked lines that mirror a view header. */
+function RouteFallback({ label }: { label: string }) {
   return (
-    <div className="state-container" aria-busy="true">
-      <p className="state-label">Cargando Office…</p>
+    <div
+      className="view-body"
+      aria-busy="true"
+      aria-label={label}
+      style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}
+    >
+      {/* Header area skeleton */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)', paddingBottom: 'var(--space-4)' }}>
+        <div className="skeleton skeleton--line" style={{ width: '40%' }} />
+        <div className="skeleton skeleton--line-sm" style={{ width: '60%' }} />
+      </div>
+      {/* Content skeleton cards */}
+      {Array.from({ length: 4 }, (_, i) => (
+        <div
+          key={i}
+          className="skeleton skeleton--card"
+          style={{ animationDelay: `${i * 60}ms` }}
+        />
+      ))}
     </div>
   )
+}
+
+function OfficeFallback() {
+  return <RouteFallback label="Cargando Office…" />
 }
 
 function UsageFallback() {
-  return (
-    <div className="state-container" aria-busy="true">
-      <p className="state-label">Cargando Coste…</p>
-    </div>
-  )
+  return <RouteFallback label="Cargando Coste…" />
 }
 
 function DashboardFallback() {
-  return (
-    <div className="state-container" aria-busy="true">
-      <p className="state-label">Cargando Tablero…</p>
-    </div>
-  )
+  return <RouteFallback label="Cargando Tablero…" />
 }
 
 /**

@@ -147,6 +147,8 @@ export interface Provider {
   base_url?: string
   is_active?: boolean
   supports_oauth?: boolean
+  /** "cloud" → set by the org's Enterprise policy; read-only for the operator. */
+  managed_by?: string | null
 }
 
 // ── Skills ────────────────────────────────────────────────────────────────────

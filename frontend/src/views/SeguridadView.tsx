@@ -9,7 +9,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { sileo } from 'sileo'
-import { Save } from 'lucide-react'
+import { Save, CheckCircle, ShieldCheck } from 'lucide-react'
 import { useT } from '../lib/i18n'
 import {
   listPendingApprovals,
@@ -47,10 +47,12 @@ import {
   Stagger,
   StaggerItem,
   HoverRow,
+  FadeIn,
   motion,
   SPRING,
   TWEEN,
 } from '../components/ui/motion'
+import s from './SeguridadView.module.css'
 
 // ── Approvals section ─────────────────────────────────────────────────────────
 
@@ -85,13 +87,21 @@ function ApprovalsSection({ mfaDisabled }: { mfaDisabled: boolean }) {
 
   return (
     <section className="cv-section">
-      <div className="cv-section-label">{t('seg.approvals.label')}</div>
+      <div className={s.sectionLabel}>
+        <span>{t('seg.approvals.label')}</span>
+        {!loading && approvals.length > 0 && (
+          <span className={s.sectionLabelCount}>{approvals.length}</span>
+        )}
+      </div>
       {loading ? (
-        <div className="cv-skeleton" aria-busy="true" aria-label="Cargando…" />
+        <ApprovalsSkeletonBlock />
       ) : approvals.length === 0 ? (
-        <div className="cv-empty">{t('seg.approvals.empty')}</div>
+        <div className={s.approvalsEmptyRow} role="status">
+          <CheckCircle size={15} aria-hidden="true" />
+          {t('seg.approvals.empty')}
+        </div>
       ) : (
-        <div className="cv-list">
+        <ul className="cv-list" aria-label="Aprobaciones pendientes">
           <AnimatePresence initial={false}>
             {approvals.map(a => (
               <AnimatedListItem key={a.proposal_id}>
@@ -103,16 +113,28 @@ function ApprovalsSection({ mfaDisabled }: { mfaDisabled: boolean }) {
               </AnimatedListItem>
             ))}
           </AnimatePresence>
-        </div>
+        </ul>
       )}
     </section>
   )
 }
 
+function ApprovalsSkeletonBlock() {
+  return (
+    <div aria-busy="true" aria-label="Cargando aprobaciones…" className="cv-list">
+      {[0, 1].map(i => (
+        <div
+          key={i}
+          className="skeleton skeleton--card"
+          style={{ animationDelay: `${i * 80}ms`, borderRadius: 'var(--radius-md)' }}
+        />
+      ))}
+    </div>
+  )
+}
+
 // ── Governance section ────────────────────────────────────────────────────────
 
-// PRESETS are defined as a function so they can use the translator.
-// The tuple is [id, label] — descriptions come from t() in the component.
 const PRESET_IDS: Array<[string, string]> = [
   ['equilibrado', 'Equilibrado'],
   ['permisivo',   'Permisivo'],
@@ -130,7 +152,6 @@ const PRESET_IDS: Array<[string, string]> = [
 function presetPreviewEnabled(entry: PolicyCatalogEntry, preset: string): boolean {
   if (preset === 'permisivo') return true
   if (preset === 'bloqueado') return false
-  // equilibrado: disabled only for most_delicate
   return entry.delicacy !== 'most_delicate'
 }
 
@@ -174,11 +195,11 @@ function DelicacyBadge({ level, size = 'normal' }: { level: DelicacyLevel; size?
   const t = useT()
   if (level === 'normal') return null
   const label = level === 'most_delicate' ? t('seg.badge.approval') : t('seg.badge.attention')
-  const color = level === 'most_delicate' ? 'var(--danger)' : 'var(--warn)'
+  const variantClass = level === 'most_delicate' ? s['delicacyBadge--danger'] : s['delicacyBadge--warn']
+  const sizeClass = size === 'sm' ? s['delicacyBadge--sm'] : ''
   return (
     <span
-      className={`seg-pol-badge ${size === 'sm' ? 'seg-pol-badge--sm' : ''}`}
-      style={{ color, background: `${color}22` }}
+      className={`${s.delicacyBadge} ${variantClass} ${sizeClass}`}
       aria-label={label}
     >
       {label}
@@ -196,6 +217,8 @@ interface ToggleSwitchProps {
 }
 
 function ToggleSwitch({ id, checked, onChange, disabled, indeterminate, 'aria-label': ariaLabel }: ToggleSwitchProps) {
+  const onClass = checked && !indeterminate ? s['toggleSwitch--on'] : ''
+  const mixedClass = indeterminate ? s['toggleSwitch--mixed'] : ''
   return (
     <button
       id={id}
@@ -204,7 +227,7 @@ function ToggleSwitch({ id, checked, onChange, disabled, indeterminate, 'aria-la
       aria-checked={indeterminate ? 'mixed' : checked}
       aria-label={ariaLabel}
       disabled={disabled}
-      className={`seg-pol-switch ${checked && !indeterminate ? 'seg-pol-switch--on' : ''} ${indeterminate ? 'seg-pol-switch--mixed' : ''}`}
+      className={`${s.toggleSwitch} ${onClass} ${mixedClass}`}
       onClick={() => onChange(!checked)}
     />
   )
@@ -215,7 +238,6 @@ function ToggleSwitch({ id, checked, onChange, disabled, indeterminate, 'aria-la
 interface CategoryGroupProps {
   category: string
   entries: PolicyCatalogEntry[]
-  /** Overrides for local pending changes (tool name → enabled). */
   pendingChanges: Record<string, boolean>
   busy: boolean
   onToggleTool: (name: string, enabled: boolean) => void
@@ -232,7 +254,6 @@ function CategoryGroup({
 }: CategoryGroupProps) {
   const [expanded, setExpanded] = useState(false)
 
-  // Merge committed state with local pending changes
   const effectiveEntries = entries.map(e =>
     e.name in pendingChanges ? { ...e, enabled: pendingChanges[e.name] } : e,
   )
@@ -245,10 +266,9 @@ function CategoryGroup({
   const bodyId = `cat-body-${category}`
 
   return (
-    <div className="seg-pol-group">
-      {/* Entire header row is clickable to toggle expand/collapse */}
+    <div className={s.groupCard}>
       <HoverRow
-        className="seg-pol-group__header seg-pol-group__header--clickable"
+        className={s.groupHeader}
         role="button"
         tabIndex={0}
         aria-expanded={expanded}
@@ -256,14 +276,15 @@ function CategoryGroup({
         onClick={() => setExpanded(v => !v)}
         onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded(v => !v) } }}
       >
-        <AnimatedChevron open={expanded} size={13} />
+        <AnimatedChevron open={expanded} size={12} />
 
-        <span className="seg-pol-group__name">{categoryLabel(category)}</span>
-        <span className="seg-pol-group__count" aria-label={`${entries.length} herramientas`}>{entries.length}</span>
+        <span className={s.groupName}>{categoryLabel(category)}</span>
+        <span className={s.groupCount} aria-label={`${entries.length} herramientas`}>
+          {entries.length}
+        </span>
 
         <DelicacyBadge level={delicacy} />
 
-        {/* Stop propagation so the toggle switch doesn't also expand/collapse */}
         <div
           onClick={e => e.stopPropagation()}
           onKeyDown={e => e.stopPropagation()}
@@ -285,11 +306,10 @@ function CategoryGroup({
         </div>
       </HoverRow>
 
-      {/* AnimatedExpanderContent replaces the conditional render — smooth height transition */}
       <AnimatedExpanderContent open={expanded}>
         <ul
           id={bodyId}
-          className="seg-pol-tool-list"
+          className={s.toolList}
           aria-label={`Herramientas de ${categoryLabel(category)}`}
         >
           {effectiveEntries.map(entry => (
@@ -322,7 +342,7 @@ function ToolRow({ entry, busy, onToggle }: ToolRowProps) {
 
   return (
     <motion.li
-      className={`seg-pol-tool-row ${notVisible ? 'seg-pol-tool-row--muted' : ''}`}
+      className={`${s.toolRow} ${notVisible ? s['toolRow--muted'] : ''}`}
       whileHover={{ x: 2 }}
       transition={SPRING}
     >
@@ -333,17 +353,17 @@ function ToolRow({ entry, busy, onToggle }: ToolRowProps) {
         checked={entry.enabled}
         disabled={busy}
         onChange={e => onToggle(entry.name, e.target.checked)}
-        className="seg-pol-tool-check"
+        className={s.toolCheck}
         aria-label={`${entry.label}: ${entry.enabled ? 'activo' : 'inactivo'}`}
       />
-      <label htmlFor={checkId} className="seg-pol-tool-label">
+      <label htmlFor={checkId} className={s.toolLabel}>
         {entry.label}
       </label>
       <DelicacyBadge level={entry.delicacy} size="sm" />
       {notVisible && (
         <span
           id={tipId}
-          className="seg-pol-tool-native"
+          className={s.toolNativeChip}
           title={t('seg.tool.native.tip')}
           aria-label={t('seg.tool.native.label')}
         >
@@ -370,13 +390,8 @@ function GovernanceSection() {
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
 
-  // Preset preview: which preset is pending save (not yet applied)
   const [pendingPreset, setPendingPreset] = useState<string | null>(null)
-
-  // MFA modal state: what action is waiting for factors
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null)
-
-  // Local tool overrides accumulate until "Guardar cambios" is clicked
   const [toolPending, setToolPending] = useState<Record<string, boolean>>({})
   const hasPendingTools = Object.keys(toolPending).length > 0
 
@@ -387,7 +402,6 @@ function GovernanceSection() {
     setMfa(m)
     setPol(p)
     setLoading(false)
-    // Clear any local pending state on reload so we don't show stale overrides
     setToolPending({})
   }, [])
 
@@ -395,9 +409,6 @@ function GovernanceSection() {
 
   const { capabilityGroups, defenseGroups } = useMemo(() => {
     const rawCatalog = pol?.catalog ?? []
-    // When a preset is pending (user clicked a preset button but hasn't saved yet),
-    // project the catalog's `enabled` fields through the preset preview so the accordion
-    // shows what will happen after save — not the stale committed state.
     const previewPreset = pendingPreset && pendingPreset !== pol?.preset ? pendingPreset : null
     const catalog = previewPreset
       ? rawCatalog.map(e => ({ ...e, enabled: presetPreviewEnabled(e, previewPreset) }))
@@ -426,10 +437,8 @@ function GovernanceSection() {
     return Object.keys(pol?.tools ?? {}).sort()
   }, [pol?.catalog, pol?.tools])
 
-  // Persist a batch of tool changes directly (no MFA modal needed).
   async function persistBatchDirect(changes: Record<string, boolean>) {
     setBusy(true)
-    // Optimistic local update
     setPol(prev => {
       if (!prev) return prev
       const updatedTools = { ...prev.tools, ...changes }
@@ -451,7 +460,6 @@ function GovernanceSection() {
     }
   }
 
-  // Handle MFA sign callback from the modal
   async function handleSign(factors: MfaFactors) {
     if (!pendingAction) return
     setBusy(true)
@@ -464,7 +472,6 @@ function GovernanceSection() {
         await load()
 
       } else if (pendingAction.kind === 'batch') {
-        // Optimistic: apply locally first
         setPol(prev => {
           if (!prev) return prev
           const updatedTools = { ...prev.tools, ...pendingAction.changes }
@@ -480,7 +487,6 @@ function GovernanceSection() {
           setPendingAction(null)
           await load()
         } catch (err) {
-          // Revert optimistic update
           await load()
           sileo.error({ title: t('seg.save.err').replace('{err}', err instanceof Error ? err.message : String(err)) })
           return
@@ -504,12 +510,9 @@ function GovernanceSection() {
     }
   }
 
-  // ── Handler wrappers ─────────────────────────────────────────────────────────
-
   function requestPresetSave() {
     if (!pendingPreset) return
     if (mfaDisabled) {
-      // No verification required: persist directly without opening the modal
       setBusy(true)
       void setPolicyPreset(pendingPreset, '')
         .then(() => {
@@ -526,12 +529,10 @@ function GovernanceSection() {
     }
   }
 
-  // Individual tool toggle: update local pending only (no immediate API call)
   function requestToolToggle(tool: string, enabled: boolean) {
     setToolPending(prev => ({ ...prev, [tool]: enabled }))
   }
 
-  // Category toggle: batch-update all tools in the category locally
   function requestSectionToggle(_category: string, enabled: boolean, entries: PolicyCatalogEntry[]) {
     const updates: Record<string, boolean> = {}
     for (const entry of entries) {
@@ -544,9 +545,6 @@ function GovernanceSection() {
     }
   }
 
-  // Commit the batch of pending tool changes.
-  // MFA enabled → open one MfaModal which calls handleSign on confirm.
-  // MFA disabled → persist directly, no modal.
   function handleSaveToolChanges() {
     if (!hasPendingTools) return
     if (mfaDisabled) {
@@ -558,7 +556,6 @@ function GovernanceSection() {
 
   function requestMfaDangersToggle(checked: boolean) {
     if (mfaDisabled) {
-      // MFA not enrolled/disabled: persist directly without a verification modal
       setBusy(true)
       void setMfaOnDangers(checked, '')
         .then(() => {
@@ -570,29 +567,27 @@ function GovernanceSection() {
         })
         .finally(() => setBusy(false))
     } else {
-      // Open the MFA modal regardless of direction — backend requires TOTP to change this policy
       setPendingAction({ kind: 'mfa_dangers', enabled: checked })
     }
   }
 
-  // Legacy tool toggle (flat tools map, no catalog)
   function requestLegacyToolToggle(toolName: string, enabled: boolean) {
     setToolPending(prev => ({ ...prev, [toolName]: enabled }))
   }
 
-  if (loading) return <div className="cv-skeleton" aria-busy="true" aria-label="Cargando gobernanza…" />
+  if (loading) {
+    return <GovernanceSkeletonBlock />
+  }
   if (!mfa || !pol) return null
 
   const hasCatalog = (pol.catalog?.length ?? 0) > 0
   const currentPreset = pendingPreset ?? pol.preset
   const hasPendingPreset = pendingPreset !== null && pendingPreset !== pol.preset
 
-  // When batch modal is open, use the already-captured changes snapshot
   const batchChanges = pendingAction?.kind === 'batch' ? pendingAction.changes : toolPending
 
   return (
     <>
-      {/* ── Verification Modal — kept outside Stagger so it renders above all sections */}
       {pendingAction && (
         <MfaModal
           title={
@@ -607,7 +602,6 @@ function GovernanceSection() {
           onSign={handleSign}
           onCancel={() => {
             setPendingAction(null)
-            // Restore toolPending from batch snapshot so user can adjust before retrying
             if (pendingAction?.kind === 'batch') {
               setToolPending(batchChanges)
             }
@@ -615,35 +609,34 @@ function GovernanceSection() {
         />
       )}
 
-      {/* ── Two-step verification enrollment ── */}
+      {/* ── Two-step verification ── */}
       <section className="cv-section">
-        <div className="cv-section-label">{t('seg.mfa.label')}</div>
-        <div className="seg-card">
-          <p className="seg-card__intro">
+        <div className={s.sectionLabel}>{t('seg.mfa.label')}</div>
+        <div className={s.sectionCard}>
+          <p className={s['sectionCard__intro']}>
             {mfa.enrolled
               ? t('seg.mfa.enrolled')
               : t('seg.mfa.not_enrolled')}
           </p>
-
           {!mfa.enrolled && <MfaEnroll onEnrolled={load} />}
         </div>
       </section>
 
       {/* ── Permissions ── */}
       <section className="cv-section">
-        <div className="cv-section-label">{t('seg.policies.label')}</div>
-        <div className="seg-card">
-          <p className="seg-card__intro">
+        <div className={s.sectionLabel}>{t('seg.policies.label')}</div>
+        <div className={s.sectionCard}>
+          <p className={s['sectionCard__intro']}>
             {t('seg.policies.intro')}
           </p>
 
-          {/* Verification on sensitive actions toggle */}
-          <div className="seg-pol-danger-row">
-            <div className="seg-pol-danger-row__info">
-              <span className="seg-pol-danger-row__label">
+          {/* Verification on sensitive actions */}
+          <div className={s.settingsRow}>
+            <div className={s.settingsRowInfo}>
+              <span className={s.settingsRowLabel}>
                 {t('seg.policies.dangers.label')}
               </span>
-              <span className="seg-pol-danger-row__hint">
+              <span className={s.settingsRowHint}>
                 {mfaDisabled
                   ? t('seg.policies.dangers.off')
                   : t('seg.policies.dangers.on')}
@@ -658,10 +651,10 @@ function GovernanceSection() {
             />
           </div>
 
-          {/* Preset quick-access: preview + save */}
+          {/* Preset quick-access */}
           <div>
-            <div className="seg-pol-sub-label">Preset rápido</div>
-            <div className="seg-presets">
+            <div className={s.subLabel}>Preset rápido</div>
+            <div className={s.presetsStrip}>
               {PRESET_IDS.map(([id, label]) => {
                 const desc = t(
                   id === 'equilibrado' ? 'seg.preset.equilibrado.desc'
@@ -684,18 +677,18 @@ function GovernanceSection() {
               })}
             </div>
 
-            {/* Animated preset-save bar — slides in when a preset is pending */}
+            {/* Animated preset-save banner */}
             <AnimatePresence initial={false}>
               {hasPendingPreset && (
                 <motion.div
-                  className="seg-pol-preset-save-row"
+                  className={s.presetSaveBanner}
                   aria-live="polite"
                   initial={{ opacity: 0, y: -6 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: -6 }}
                   transition={TWEEN}
                 >
-                  <span className="seg-pol-preset-hint">
+                  <span className={s.presetSaveBannerText}>
                     {t('seg.policies.preset.hint').replace('{preset}', pendingPreset ?? '')}
                   </span>
                   <button
@@ -719,11 +712,11 @@ function GovernanceSection() {
             </AnimatePresence>
           </div>
 
-          {/* Capability accordion groups — staggered entrance */}
+          {/* Capability accordion groups */}
           {hasCatalog && capabilityGroups.size > 0 && (
             <div>
-              <div className="seg-pol-sub-label">Capacidades del agente</div>
-              <Stagger className="seg-pol-catalog">
+              <div className={s.subLabel}>Capacidades del agente</div>
+              <Stagger className={s.catalog}>
                 {[...capabilityGroups.entries()].map(([cat, entries]) => (
                   <StaggerItem key={cat}>
                     <CategoryGroup
@@ -738,18 +731,18 @@ function GovernanceSection() {
                 ))}
               </Stagger>
 
-              {/* Animated "Guardar cambios" bar — slides in when tools are pending */}
+              {/* Animated changes pending banner */}
               <AnimatePresence initial={false}>
                 {hasPendingTools && (
                   <motion.div
-                    className="seg-pol-preset-save-row"
+                    className={s.changesBanner}
                     aria-live="polite"
                     initial={{ opacity: 0, y: -6 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: -6 }}
                     transition={TWEEN}
                   >
-                    <span className="seg-pol-preset-hint">
+                    <span className={s.changesBannerText}>
                       {Object.keys(toolPending).length} cambio{Object.keys(toolPending).length !== 1 ? 's' : ''} pendiente{Object.keys(toolPending).length !== 1 ? 's' : ''}.
                     </span>
                     <button
@@ -757,9 +750,9 @@ function GovernanceSection() {
                       className="cv-btn cv-btn--primary cv-btn--sm"
                       onClick={handleSaveToolChanges}
                       disabled={busy}
-                      style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--sp-1)' }}
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--space-1)' }}
                     >
-                      <Save size={14} aria-hidden="true" />
+                      <Save size={13} aria-hidden="true" />
                       Guardar cambios
                     </button>
                     <button
@@ -778,12 +771,12 @@ function GovernanceSection() {
 
           {/* Defense tools accordion groups */}
           {hasCatalog && defenseGroups.size > 0 && (
-            <div style={{ marginTop: 12 }}>
-              <div className="seg-pol-sub-label">Defensas del sistema</div>
-              <p className="seg-card__intro" style={{ marginTop: 0, marginBottom: 8 }}>
+            <div className={s.defenseSectionWrap}>
+              <div className={s.subLabel}>Defensas del sistema</div>
+              <p className={s.defenseNote}>
                 Estas herramientas protegen el sistema. No son capacidades del agente — no las invoca directamente.
               </p>
-              <Stagger className="seg-pol-catalog">
+              <Stagger className={s.catalog}>
                 {[...defenseGroups.entries()].map(([cat, entries]) => (
                   <StaggerItem key={cat}>
                     <CategoryGroup
@@ -800,16 +793,16 @@ function GovernanceSection() {
             </div>
           )}
 
-          {/* Legacy flat list — shown only when catalog is absent */}
+          {/* Legacy flat list */}
           {!hasCatalog && legacyToolNames.length > 0 && (
             <>
-              <details className="seg-details" style={{ marginTop: 12 }}>
+              <details className={s.legacyDetails}>
                 <summary>Comandos uno a uno ({legacyToolNames.length})</summary>
-                <div className="seg-tool-list">
+                <div className={s.legacyToolList}>
                   {legacyToolNames.map(name => {
                     const effective = name in toolPending ? toolPending[name] : (pol.tools?.[name] ?? false)
                     return (
-                      <label key={name} className="seg-tool-row">
+                      <label key={name} className={s.legacyToolRow}>
                         <input
                           type="checkbox"
                           checked={effective}
@@ -823,18 +816,17 @@ function GovernanceSection() {
                 </div>
               </details>
 
-              {/* Animated "Guardar cambios" bar for legacy flat list */}
               <AnimatePresence initial={false}>
                 {hasPendingTools && (
                   <motion.div
-                    className="seg-pol-preset-save-row"
+                    className={s.changesBanner}
                     aria-live="polite"
                     initial={{ opacity: 0, y: -6 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: -6 }}
                     transition={TWEEN}
                   >
-                    <span className="seg-pol-preset-hint">
+                    <span className={s.changesBannerText}>
                       {Object.keys(toolPending).length} cambio{Object.keys(toolPending).length !== 1 ? 's' : ''} pendiente{Object.keys(toolPending).length !== 1 ? 's' : ''}.
                     </span>
                     <button
@@ -842,9 +834,9 @@ function GovernanceSection() {
                       className="cv-btn cv-btn--primary cv-btn--sm"
                       onClick={handleSaveToolChanges}
                       disabled={busy}
-                      style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--sp-1)' }}
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--space-1)' }}
                     >
-                      <Save size={14} aria-hidden="true" />
+                      <Save size={13} aria-hidden="true" />
                       Guardar cambios
                     </button>
                     <button
@@ -866,9 +858,27 @@ function GovernanceSection() {
   )
 }
 
-// ── Egress section ────────────────────────────────────────────────────────────
+function GovernanceSkeletonBlock() {
+  return (
+    <div aria-busy="true" aria-label="Cargando gobernanza…" className="cv-section" style={{ gap: 'var(--space-6)' }}>
+      {/* MFA section skeleton */}
+      <div className="cv-section">
+        <div className="skeleton skeleton--line-sm" style={{ width: '80px', marginBottom: 'var(--space-3)' }} />
+        <div className="skeleton skeleton--card" />
+      </div>
+      {/* Policies section skeleton */}
+      <div className="cv-section">
+        <div className="skeleton skeleton--line-sm" style={{ width: '100px', marginBottom: 'var(--space-3)' }} />
+        <div className="skeleton skeleton--card" />
+        <div className="skeleton skeleton--block" style={{ animationDelay: '60ms' }} />
+        <div className="skeleton skeleton--block" style={{ animationDelay: '120ms' }} />
+        <div className="skeleton skeleton--block" style={{ animationDelay: '180ms' }} />
+      </div>
+    </div>
+  )
+}
 
-// ── Mode toggle pill ──────────────────────────────────────────────────────────
+// ── Egress section ────────────────────────────────────────────────────────────
 
 interface EgressModeToggleProps {
   mode: EgressMode
@@ -879,10 +889,10 @@ interface EgressModeToggleProps {
 function EgressModeToggle({ mode, busy, onRequest }: EgressModeToggleProps) {
   const t = useT()
   return (
-    <div className="seg-egress-mode-toggle" role="group" aria-label={t('seg.network.mode.label')}>
+    <div className={s.egressModeToggle} role="group" aria-label={t('seg.network.mode.label')}>
       <button
         type="button"
-        className={`seg-egress-mode-toggle__btn ${mode === 'allow' ? 'seg-egress-mode-toggle__btn--active' : ''}`}
+        className={`${s.egressModeBtn} ${mode === 'allow' ? s['egressModeBtn--active'] : ''}`}
         aria-pressed={mode === 'allow'}
         disabled={busy || mode === 'allow'}
         onClick={() => onRequest('allow')}
@@ -891,7 +901,7 @@ function EgressModeToggle({ mode, busy, onRequest }: EgressModeToggleProps) {
       </button>
       <button
         type="button"
-        className={`seg-egress-mode-toggle__btn ${mode === 'deny' ? 'seg-egress-mode-toggle__btn--active seg-egress-mode-toggle__btn--deny' : ''}`}
+        className={`${s.egressModeBtn} ${mode === 'deny' ? s['egressModeBtn--denyActive'] : ''}`}
         aria-pressed={mode === 'deny'}
         disabled={busy || mode === 'deny'}
         onClick={() => onRequest('deny')}
@@ -901,8 +911,6 @@ function EgressModeToggle({ mode, busy, onRequest }: EgressModeToggleProps) {
     </div>
   )
 }
-
-// ── Allow-mode panel (manual block-list) ──────────────────────────────────────
 
 interface AllowModeProps {
   denyList: string[]
@@ -930,22 +938,22 @@ function AllowModePanel({ denyList, blocklistCount, onAdd, onRemove }: AllowMode
       exit={{ opacity: 0, y: -6 }}
       transition={TWEEN}
     >
-      <p className="seg-card__intro">
+      <p className={s['sectionCard__intro']}>
         {t('seg.network.allow.intro')}
       </p>
 
       {blocklistCount != null && blocklistCount > 0 && (
-        <div className="seg-egress-system-badge" aria-label={`${blocklistCount} sitios maliciosos bloqueados por el sistema`}>
-          <span className="seg-egress-system-badge__dot" aria-hidden="true" />
-          {blocklistCount} sitios maliciosos bloqueados por el sistema
+        <div className={s.blocklistBadge} aria-label={`${blocklistCount} sitios maliciosos bloqueados por el sistema`} style={{ marginTop: 'var(--space-2)' }}>
+          <span className={s.blocklistBadgeDot} aria-hidden="true" />
+          <span className="num">{blocklistCount}</span> sitios maliciosos bloqueados por el sistema
         </div>
       )}
 
-      <div className="seg-pol-sub-label" style={{ marginTop: 'var(--sp-3)' }}>
+      <div className={s.subLabel} style={{ marginTop: 'var(--space-4)' }}>
         Sitios bloqueados manualmente
       </div>
 
-      <div className="cv-form-inline" style={{ marginBottom: 'var(--sp-2)' }}>
+      <div className={s.domainInputRow} style={{ marginBottom: 'var(--space-2)' }}>
         <input
           id="egress-block-input"
           className="cv-input"
@@ -974,8 +982,8 @@ function AllowModePanel({ denyList, blocklistCount, onAdd, onRemove }: AllowMode
         <ul className="cv-list" aria-label="Dominios bloqueados manualmente">
           <AnimatePresence initial={false}>
             {denyList.map(d => (
-              <AnimatedListItem key={d} className="seg-egress-row">
-                <code className="seg-egress-row__domain">{d}</code>
+              <AnimatedListItem key={d} className={s.egressDomainRow}>
+                <code className={s.egressDomainCode}>{d}</code>
                 <button
                   className="cv-btn cv-btn--ghost cv-btn--sm"
                   onClick={() => { void onRemove(d) }}
@@ -992,8 +1000,6 @@ function AllowModePanel({ denyList, blocklistCount, onAdd, onRemove }: AllowMode
     </motion.div>
   )
 }
-
-// ── Deny-mode panel (allow-list) ──────────────────────────────────────────────
 
 interface DenyModeProps {
   allowList: string[]
@@ -1020,11 +1026,11 @@ function DenyModePanel({ allowList, onGrant, onRevoke }: DenyModeProps) {
       exit={{ opacity: 0, y: -6 }}
       transition={TWEEN}
     >
-      <p className="seg-card__intro">
+      <p className={s['sectionCard__intro']}>
         {t('seg.network.deny.intro')}
       </p>
 
-      <div className="cv-form-inline" style={{ marginBottom: 'var(--sp-2)' }}>
+      <div className={s.domainInputRow} style={{ marginBottom: 'var(--space-2)' }}>
         <input
           id="egress-grant-input"
           className="cv-input"
@@ -1053,8 +1059,8 @@ function DenyModePanel({ allowList, onGrant, onRevoke }: DenyModeProps) {
         <ul className="cv-list" aria-label="Dominios autorizados">
           <AnimatePresence initial={false}>
             {allowList.map(d => (
-              <AnimatedListItem key={d} className="seg-egress-row">
-                <code className="seg-egress-row__domain">{d}</code>
+              <AnimatedListItem key={d} className={s.egressDomainRow}>
+                <code className={s.egressDomainCode}>{d}</code>
                 <button
                   className="cv-btn cv-btn--ghost cv-btn--sm"
                   onClick={() => { void onRevoke(d) }}
@@ -1072,14 +1078,11 @@ function DenyModePanel({ allowList, onGrant, onRevoke }: DenyModeProps) {
   )
 }
 
-// ── EgressSection ─────────────────────────────────────────────────────────────
-
 function EgressSection() {
   const t = useT()
   const [state, setState] = useState<EgressModeResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
-  // Verification modal: holds the requested next mode while waiting for TOTP
   const [pendingMode, setPendingMode] = useState<EgressMode | null>(null)
 
   const load = useCallback(async () => {
@@ -1090,8 +1093,6 @@ function EgressSection() {
 
   useEffect(() => { void load() }, [load])
 
-  // ── Mode change (requires MFA) ──────────────────────────────────────────────
-
   function requestModeChange(next: EgressMode) {
     setPendingMode(next)
   }
@@ -1099,7 +1100,6 @@ function EgressSection() {
   async function handleModeSign(factors: MfaFactors) {
     if (!pendingMode || !state) return
     const prev = state
-    // Optimistic update
     setState(s => s ? { ...s, mode: pendingMode } : s)
     setPendingMode(null)
     setBusy(true)
@@ -1112,15 +1112,12 @@ function EgressSection() {
       })
       await load()
     } catch (err) {
-      // Revert
       setState(prev)
       sileo.error({ title: t('seg.save.err').replace('{err}', err instanceof Error ? err.message : String(err)) })
     } finally {
       setBusy(false)
     }
   }
-
-  // ── Allow-list (DENY mode) ─────────────────────────────────────────────────
 
   async function handleGrant(domain: string) {
     if (!state) return
@@ -1149,8 +1146,6 @@ function EgressSection() {
       sileo.error({ title: `No se pudo revocar: ${err instanceof Error ? err.message : err}` })
     }
   }
-
-  // ── Block-list (ALLOW mode) ────────────────────────────────────────────────
 
   async function handleBlock(domain: string) {
     if (!state) return
@@ -1182,9 +1177,8 @@ function EgressSection() {
 
   return (
     <section className="cv-section">
-      <div className="cv-section-label">{t('seg.network.label')}</div>
+      <div className={s.sectionLabel}>{t('seg.network.label')}</div>
 
-      {/* Verification modal for mode change — rendered outside the card so it layers above */}
       {pendingMode && (
         <MfaModal
           title={pendingMode === 'allow' ? t('seg.allow_mode.ok') : t('seg.deny_mode.ok')}
@@ -1193,16 +1187,18 @@ function EgressSection() {
         />
       )}
 
-      <div className="seg-card">
+      <div className={s.sectionCard}>
         {loading ? (
-          <div className="cv-skeleton" aria-busy="true" aria-label="Cargando…" />
+          <div aria-busy="true" aria-label="Cargando…" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
+            <div className="skeleton skeleton--block" />
+            <div className="skeleton skeleton--line" style={{ width: '60%', animationDelay: '60ms' }} />
+          </div>
         ) : state != null ? (
           <>
-            {/* Mode toggle */}
-            <div className="seg-egress-mode-row">
-              <div className="seg-egress-mode-row__info">
-                <span className="seg-egress-mode-row__label">{t('seg.network.mode.label')}</span>
-                <span className="seg-egress-mode-row__hint">
+            <div className={s.settingsRow}>
+              <div className={s.settingsRowInfo}>
+                <span className={s.settingsRowLabel}>{t('seg.network.mode.label')}</span>
+                <span className={s.settingsRowHint}>
                   {t('seg.network.mode.hint')}
                 </span>
               </div>
@@ -1213,7 +1209,6 @@ function EgressSection() {
               />
             </div>
 
-            {/* Panel content transitions between ALLOW and DENY */}
             <AnimatePresence mode="wait" initial={false}>
               {state.mode === 'allow' ? (
                 <AllowModePanel
@@ -1239,22 +1234,29 @@ function EgressSection() {
   )
 }
 
-// ── Severity badge ────────────────────────────────────────────────────────────
+// ── Severity badge (token-driven) ─────────────────────────────────────────────
 
 function SeverityBadge({ severity }: { severity: string }) {
-  const map: Record<string, [string, string]> = {
-    critical: ['#FF453A', 'CRÍTICO'],
-    high:     ['#FF8C00', 'ALTO'],
-    medium:   ['#F5B945', 'MEDIO'],
-    low:      ['#34D399', 'BAJO'],
-    info:     ['#9A9AA2', 'INFO'],
+  const sev = severity.toLowerCase()
+  const classMap: Record<string, string> = {
+    critical: s['severityBadge--critical'],
+    high:     s['severityBadge--high'],
+    medium:   s['severityBadge--medium'],
+    low:      s['severityBadge--low'],
+    info:     s['severityBadge--info'],
   }
-  const [color, label] = map[severity.toLowerCase()] ?? ['#9A9AA2', severity.toUpperCase()]
+  const labelMap: Record<string, string> = {
+    critical: 'CRÍTICO',
+    high:     'ALTO',
+    medium:   'MEDIO',
+    low:      'BAJO',
+    info:     'INFO',
+  }
+  const variantClass = classMap[sev] ?? s['severityBadge--info']
+  const label = labelMap[sev] ?? severity.toUpperCase()
+
   return (
-    <span
-      className="seg-severity-badge"
-      style={{ color, background: `${color}22` }}
-    >
+    <span className={`${s.severityBadge} ${variantClass}`}>
       {label}
     </span>
   )
@@ -1302,18 +1304,18 @@ function ScanRow({ scan }: { scan: SecurityScan }) {
   }
 
   return (
-    <HoverRow className="seg-scan-row">
-      <div className="seg-scan-row__left">
-        <div className="seg-scan-row__name">{name}</div>
-        {target && <div className="seg-scan-row__target">{target}</div>}
+    <HoverRow className={s.scanRow}>
+      <div className={s.scanRowLeft}>
+        <div className={s.scanRowName}>{name}</div>
+        {target && <div className={s.scanRowTarget}>{target}</div>}
       </div>
-      <div className="seg-scan-row__right">
+      <div className={s.scanRowRight}>
         {scan.severity && <SeverityBadge severity={scan.severity} />}
         {scan.score != null && (
-          <span className="seg-score">{scan.score}</span>
+          <span className={s.scoreChip}>{scan.score}</span>
         )}
         {allowed && (
-          <span className="seg-severity-badge" style={{ color: '#34D399', background: '#34D39922' }}>
+          <span className={`${s.severityBadge} ${s['severityBadge--allowed']}`}>
             {t('seg.scan.allowed')}
           </span>
         )}
@@ -1354,20 +1356,48 @@ function SecurityCenterSection() {
   }, [])
 
   if (loading) {
-    return <div className="cv-skeleton" aria-busy="true" aria-label="Cargando…" />
+    return (
+      <section className="cv-section">
+        <div className={s.sectionLabel} aria-hidden="true">
+          <span style={{ visibility: 'hidden' }}>placeholder</span>
+        </div>
+        <div aria-busy="true" aria-label="Cargando escaneos…" className="cv-list">
+          {[0, 1, 2].map(i => (
+            <div
+              key={i}
+              className="skeleton skeleton--block"
+              style={{ animationDelay: `${i * 60}ms`, borderRadius: 'var(--radius-md)' }}
+            />
+          ))}
+        </div>
+      </section>
+    )
   }
 
   return (
     <section className="cv-section">
-      <div className="cv-section-label">{t('seg.scans.label')}</div>
+      <div className={s.sectionLabel}>
+        <span>{t('seg.scans.label')}</span>
+        {scans && scans.length > 0 && (
+          <span className={s.sectionLabelCount}>{scans.length}</span>
+        )}
+      </div>
       {!scans || scans.length === 0 ? (
-        <p className="cv-empty">{t('seg.scans.empty')}</p>
+        <FadeIn>
+          <div className={s.sectionEmpty} role="status">
+            <ShieldCheck size={28} className={s.sectionEmptyIcon} aria-hidden="true" />
+            <p className={s.sectionEmptyTitle}>{t('seg.scans.empty')}</p>
+            <p className={s.sectionEmptyDesc}>
+              No se han registrado escaneos de seguridad. Los análisis aparecen aquí cuando el agente intenta instalar software o ejecutar acciones sensibles.
+            </p>
+          </div>
+        </FadeIn>
       ) : (
         <div className="cv-list">
           <AnimatePresence initial={false}>
-            {scans.map((s, i) => (
-              <AnimatedListItem key={s.scan_id ?? s.id ?? i}>
-                <ScanRow scan={s} />
+            {scans.map((scan, i) => (
+              <AnimatedListItem key={scan.scan_id ?? scan.id ?? i}>
+                <ScanRow scan={scan} />
               </AnimatedListItem>
             ))}
           </AnimatePresence>
@@ -1388,7 +1418,7 @@ export default function SeguridadView() {
 
   return (
     <div className="cv-view-body">
-      <div className="view-header" style={{ padding: 0, border: 'none' }}>
+      <div className={s.viewHeader}>
         <h1 className="view-title">Seguridad y gobernanza</h1>
         <p className="view-subtitle">
           Aprobaciones, políticas del agente y escaneos de seguridad.

@@ -1,9 +1,10 @@
 import type { ReactNode } from 'react'
 import { AnimatedPageHeaderText } from './motion'
 
-interface PageHeaderProps {
+export interface PageHeaderProps {
   title: string
   subtitle?: string
+  /** Trailing controls rendered flush right. */
   actions?: ReactNode
 }
 
@@ -13,7 +14,7 @@ export function PageHeader({ title, subtitle, actions }: PageHeaderProps) {
       <div className="ds-page-header__left">
         <AnimatedPageHeaderText title={title} subtitle={subtitle} />
       </div>
-      {actions && <div className="ds-page-header__actions">{actions}</div>}
+      {actions ? <div className="ds-page-header__actions">{actions}</div> : null}
     </header>
   )
 }

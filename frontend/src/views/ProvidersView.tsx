@@ -1,6 +1,6 @@
 import { useEffect, useReducer, useRef, useState } from 'react'
 import { sileo } from 'sileo'
-import { X, Cpu, Cloud, Server, Globe } from 'lucide-react'
+import { AlertCircle, Cloud, Cpu, Globe, Server } from 'lucide-react'
 import {
   listProviders, listNativeProviders, addProvider, setActiveProvider,
   testProvider, deleteProvider, startProviderOAuth, getProviderOAuthStatus,
@@ -24,14 +24,28 @@ import {
   SPRING,
   TWEEN_FAST,
 } from '../components/ui/motion'
+import css from './ProvidersView.module.css'
 
-// Mirrors vanilla providers.js: badge colours per kind/auth-type
+// ── Kind colours — semantic, not decorative ───────────────────────────────────
+// Each colour maps to its named brand/palette value; never a pure blue/accent.
+
 const KIND_COLORS: Record<string, string> = {
-  anthropic: '#D97706', openai: '#10A37F', openai_compatible: '#10A37F',
-  google: '#4285F4', gemini: '#4285F4', azure: '#0078D4', mistral: '#FF7000',
-  groq: '#F55036', ollama: '#6B7280', nous: '#7C3AED', cohere: '#39594D',
-  vllm: '#7C3AED', oauth: '#8B5CF6', 'api key': '#6B7280', subscription: '#8B5CF6',
-  modelo: '#6B7280',
+  anthropic:         '#D97706',
+  openai:            '#10A37F',
+  openai_compatible: '#10A37F',
+  google:            '#4285F4',
+  gemini:            '#4285F4',
+  azure:             '#0078D4',
+  mistral:           '#FF7000',
+  groq:              '#F55036',
+  ollama:            '#6B7280',
+  nous:              '#7C3AED',
+  cohere:            '#39594D',
+  vllm:              '#7C3AED',
+  oauth:             '#8B5CF6',
+  'api key':         '#6B7280',
+  subscription:      '#8B5CF6',
+  modelo:            '#6B7280',
 }
 
 const OAUTH_IDS = new Set(['nous', 'openai-codex', 'xai-oauth'])
@@ -55,20 +69,8 @@ function providerName(p: Provider): string {
   return p.alias ?? p.name ?? p.provider_id ?? ''
 }
 
-function ProviderChip({ provider }: { provider: Provider }) {
-  const kind = String(provider.kind ?? provider.category ?? '').toLowerCase()
-  const isLocal = kind === 'ollama' || kind === 'vllm' || kind === 'openai_compatible'
-  const isCloud = kind === 'anthropic' || kind === 'openai' || kind === 'google' ||
-    kind === 'gemini' || kind === 'azure' || kind === 'mistral' || kind === 'groq'
-  const IconEl = isLocal ? Server : isCloud ? Cloud : Globe
-  return (
-    <span className="ds-icon-chip ds-icon-chip--neutral" aria-hidden="true">
-      <IconEl size={14} />
-    </span>
-  )
-}
+// ── Discriminated state ───────────────────────────────────────────────────────
 
-// Discriminated state to make impossible combinations unreachable
 type State =
   | { status: 'loading' }
   | { status: 'error'; message: string }
@@ -93,18 +95,51 @@ function show(message: string, kind: 'ok' | 'warn' | 'error' = 'ok') {
   else sileo.warning({ title: message })
 }
 
-// Skeleton loading rows with shimmer
+// ── Provider kind icon ────────────────────────────────────────────────────────
+
+function ProviderTypeChip({ provider }: { provider: Provider }) {
+  const kind = String(provider.kind ?? provider.category ?? '').toLowerCase()
+  const isLocal = kind === 'ollama' || kind === 'vllm' || kind === 'openai_compatible'
+  const isCloud = kind === 'anthropic' || kind === 'openai' || kind === 'google' ||
+    kind === 'gemini' || kind === 'azure' || kind === 'mistral' || kind === 'groq'
+  const Icon = isLocal ? Server : isCloud ? Cloud : Globe
+
+  return (
+    <span className={css.typeChip} aria-hidden="true">
+      <Icon size={13} />
+    </span>
+  )
+}
+
+// ── Skeleton — mirrors the final row layout exactly ───────────────────────────
+
 function SkeletonRows({ count }: { count: number }) {
   return (
-    <Stagger style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+    <Stagger style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
       {[...Array(count)].map((_, i) => (
         <StaggerItem key={i}>
-          <div className="cv-skeleton" style={{ height: 52 }} />
+          <div
+            className={css.skeletonRow}
+            role="presentation"
+            aria-hidden="true"
+          >
+            <div className={`skeleton ${css.skeletonIcon}`} />
+            <div className={css.skeletonContent}>
+              <div className="skeleton skeleton--line" style={{ width: '38%' }} />
+              <div className="skeleton skeleton--line-sm" style={{ width: '22%' }} />
+            </div>
+            <div className={css.skeletonActions}>
+              <div className="skeleton skeleton--chip" />
+              <div className="skeleton skeleton--chip" />
+            </div>
+          </div>
         </StaggerItem>
       ))}
     </Stagger>
   )
 }
+
+// ── Main view ─────────────────────────────────────────────────────────────────
 
 export default function ProvidersView() {
   const [state, dispatch] = useReducer(reducer, { status: 'loading' })
@@ -139,92 +174,112 @@ export default function ProvidersView() {
       {ConfirmDialogNode}
       <PageHeader
         title="Proveedores"
-        subtitle="Conecta modelos de IA. Activa el que Lumen usará por defecto."
+        subtitle="Conecta modelos de lenguaje. Activa el que Lumen usará por defecto."
       />
 
-      <div className="view-body cv-view-body">
+      <div className={`view-body ${css.body}`}>
         {state.status === 'loading' && (
-          <SkeletonRows count={3} />
+          <section className={css.section} aria-label="Cargando proveedores">
+            <div className={css.sectionLabel} aria-hidden="true">Configurados</div>
+            <SkeletonRows count={3} />
+          </section>
         )}
 
         {state.status === 'error' && (
           <FadeIn>
-            <div className="state-container" role="alert">
-              <p className="state-error">{state.message}</p>
-              <Button variant="secondary" onClick={load}>Reintentar</Button>
+            <div className={css.errorBox} role="alert">
+              <AlertCircle size={16} style={{ color: 'var(--color-danger)', flexShrink: 0, marginTop: 1 }} aria-hidden="true" />
+              <span className={css.errorText}>{state.message}</span>
+              <Button variant="secondary" size="sm" onClick={load}>
+                Reintentar
+              </Button>
             </div>
           </FadeIn>
         )}
 
         {state.status === 'success' && (
-          <Stagger style={{ display: 'flex', flexDirection: 'column', gap: 'var(--sp-8)' }}>
+          <Stagger style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
+
+            {/* ── Configured providers ── */}
             <StaggerItem>
-              <section className="cv-section" aria-label="Proveedores configurados">
-                <h2 className="cv-section-label">Configurados</h2>
-                {state.configured.length === 0
-                  ? (
-                    <EmptyState
-                      icon={<Cpu size={36} />}
-                      title="Sin proveedores configurados"
-                      description="Añade uno del catálogo para empezar a chatear."
-                    />
-                  )
-                  : (
-                    <ul className="cv-list" role="list">
-                      <AnimatePresence initial={false}>
-                        {state.configured.map(p => (
+              <section className={css.section} aria-label="Proveedores configurados">
+                <h2 className={css.sectionLabel}>Configurados</h2>
+                {state.configured.length === 0 ? (
+                  <EmptyState
+                    icon={<Cpu size={32} />}
+                    title="Sin proveedores configurados"
+                    description="Añade uno del catálogo para empezar a usar el chat."
+                    action={
+                      <Button variant="primary" size="sm" onClick={() => {
+                        document.getElementById('pv-catalogue')?.scrollIntoView({ behavior: 'smooth' })
+                      }}>
+                        Ver catálogo
+                      </Button>
+                    }
+                  />
+                ) : (
+                  <ul className={css.list} role="list">
+                    <AnimatePresence initial={false}>
+                      {state.configured.map(p => (
+                        <AnimatedListItem key={p.provider_id}>
+                          <ProviderRow
+                            provider={p}
+                            isConfigured
+                            onRefresh={load}
+                            onToast={show}
+                            onConfirm={confirm}
+                          />
+                        </AnimatedListItem>
+                      ))}
+                    </AnimatePresence>
+                  </ul>
+                )}
+              </section>
+            </StaggerItem>
+
+            {/* ── Custom / local model ── */}
+            <StaggerItem>
+              <section className={css.section} aria-label="Modelo propio o local">
+                <h2 className={css.sectionLabel}>Modelo propio / local</h2>
+                <CustomProviderCard onAdded={load} onToast={show} />
+              </section>
+            </StaggerItem>
+
+            {/* ── Native Hermes catalogue ── */}
+            <StaggerItem>
+              <section
+                id="pv-catalogue"
+                className={css.section}
+                aria-label="Catálogo nativo Hermes"
+              >
+                <h2 className={css.sectionLabel}>Catálogo nativo Hermes</h2>
+                {state.native.length === 0 ? (
+                  <p className={css.catalogueEmpty}>
+                    Catálogo no disponible en esta versión.
+                  </p>
+                ) : (
+                  <ul className={css.list} role="list">
+                    <AnimatePresence initial={false}>
+                      {state.native
+                        .filter(p => !configuredIds.has(p.provider_id))
+                        .map(p => (
                           <AnimatedListItem key={p.provider_id}>
                             <ProviderRow
                               provider={p}
-                              isConfigured
+                              isConfigured={false}
                               onRefresh={load}
                               onToast={show}
                               onConfirm={confirm}
                             />
                           </AnimatedListItem>
-                        ))}
-                      </AnimatePresence>
-                    </ul>
-                  )
-                }
+                        ))
+                      }
+                    </AnimatePresence>
+                  </ul>
+                )}
               </section>
             </StaggerItem>
 
-            <StaggerItem>
-              <section className="cv-section" aria-label="Modelo propio o local">
-                <h2 className="cv-section-label">Modelo propio / local</h2>
-                <CustomProviderCard onAdded={load} onToast={show} />
-              </section>
-            </StaggerItem>
-
-            <StaggerItem>
-              <section className="cv-section" aria-label="Catálogo nativo Hermes">
-                <h2 className="cv-section-label">Catálogo nativo Hermes</h2>
-                {state.native.length === 0
-                  ? <p className="cv-empty">Catálogo no disponible en esta versión.</p>
-                  : (
-                    <ul className="cv-list" role="list">
-                      <AnimatePresence initial={false}>
-                        {state.native
-                          .filter(p => !configuredIds.has(p.provider_id))
-                          .map(p => (
-                            <AnimatedListItem key={p.provider_id}>
-                              <ProviderRow
-                                provider={p}
-                                isConfigured={false}
-                                onRefresh={load}
-                                onToast={show}
-                                onConfirm={confirm}
-                              />
-                            </AnimatedListItem>
-                          ))
-                        }
-                      </AnimatePresence>
-                    </ul>
-                  )
-                }
-              </section>
-            </StaggerItem>
           </Stagger>
         )}
       </div>
@@ -253,10 +308,17 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
   const [addingKey, setAddingKey] = useState(false)
   const [addConnFailed, setAddConnFailed] = useState(false)
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
   const label = badgeLabel(provider)
-  const color = KIND_COLORS[label.toLowerCase()] ?? '#6B7280'
+  const kindColor = KIND_COLORS[label.toLowerCase()] ?? 'var(--color-text-dim)'
   const name = providerName(provider)
   const id = provider.provider_id ?? ''
+
+  // Cloud-managed providers are owned by the org's Enterprise policy.
+  // The REST layer enforces this; we reflect it here: no delete/re-key allowed.
+  const isCloudManaged = provider.managed_by === 'cloud'
+
+  const isActive = isConfigured && provider.is_active
 
   async function handleActivate() {
     try {
@@ -279,7 +341,6 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
   }
 
   async function handleDelete() {
-    const isActive = isConfigured && provider.is_active
     const ok = await onConfirm({
       title: `¿Eliminar ${name}?`,
       description: isActive
@@ -404,114 +465,143 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
     if (pollRef.current) clearTimeout(pollRef.current)
   }, [])
 
+  const rowClass = [css.row, isActive ? css.rowActive : ''].filter(Boolean).join(' ')
+
   return (
     <motion.div
-      className={`provider-row${isConfigured && provider.is_active ? ' provider-row--active' : ''}`}
+      className={rowClass}
       whileHover={reduced ? undefined : { y: -2 }}
       transition={SPRING}
       layout
     >
-      <ProviderChip provider={provider} />
-      <div className="provider-row__left">
-        <div className="provider-row__name">{name}</div>
-        <div className="provider-row__meta">
+      <ProviderTypeChip provider={provider} />
+
+      <div className={css.rowLeft}>
+        <span className={css.rowName}>{name}</span>
+        <div className={css.rowMeta}>
+          {/* Per-kind colour pill — CSS custom property set inline */}
           <span
-            className="provider-badge"
-            style={{ background: `${color}22`, color }}
+            className={css.kindBadge}
+            style={{ '--kind-color': kindColor } as React.CSSProperties}
           >
             {label}
           </span>
+
           {provider.default_model && (
-            <span className="provider-row__model">{provider.default_model}</span>
+            <span className={css.modelString} title={provider.default_model}>
+              {provider.default_model}
+            </span>
           )}
-          {isConfigured && provider.is_active && (
+
+          {isActive && (
             <Badge variant="ok">Activo</Badge>
           )}
+
+          {isCloudManaged && (
+            <Badge variant="neutral">Gestionado por tu organización</Badge>
+          )}
+
           {addConnFailed && (
-            <Badge variant="danger"><span role="alert">Conexión fallida — revisa la clave</span></Badge>
+            <Badge variant="danger">
+              <span role="alert">Conexión fallida — revisa la clave</span>
+            </Badge>
           )}
         </div>
       </div>
-      <div className="provider-row__actions">
+
+      <div className={css.rowActions}>
         {isConfigured ? (
           <>
-            {!provider.is_active && (
-              <button className="cv-btn cv-btn--secondary cv-btn--sm" onClick={handleActivate}>
+            {!provider.is_active && !isCloudManaged && (
+              <Button variant="secondary" size="sm" onClick={handleActivate}>
                 Activar
-              </button>
+              </Button>
             )}
-            <button
-              className="cv-btn cv-btn--ghost cv-btn--sm"
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={handleTest}
               disabled={testing}
+              loading={testing}
             >
               {testing ? 'Probando…' : 'Probar'}
-            </button>
-            <button
-              className="cv-btn cv-btn--ghost cv-btn--sm cv-btn--danger"
-              onClick={handleDelete}
-              aria-label={`Eliminar proveedor ${name}`}
-            >
-              <X size={14} aria-hidden="true" />
-            </button>
+            </Button>
+            {!isCloudManaged && (
+              <Button
+                variant="danger"
+                size="sm"
+                onClick={handleDelete}
+                aria-label={`Eliminar proveedor ${name}`}
+              >
+                Eliminar
+              </Button>
+            )}
           </>
         ) : isOAuthProvider(provider) ? (
-          <button
-            className="cv-btn cv-btn--secondary cv-btn--sm"
+          <Button
+            variant="secondary"
+            size="sm"
             onClick={handleOAuth}
             disabled={oauthPending}
+            loading={oauthPending}
           >
             {oauthPending ? 'Conectando…' : 'Conectar'}
-          </button>
+          </Button>
         ) : !showKeyForm ? (
-          <button
-            className="cv-btn cv-btn--secondary cv-btn--sm"
+          <Button
+            variant="secondary"
+            size="sm"
             onClick={() => { setShowKeyForm(true); setAddConnFailed(false) }}
           >
             {addConnFailed ? 'Reintentar clave' : 'Añadir'}
-          </button>
+          </Button>
         ) : null}
       </div>
 
       {/* Animated inline API-key form */}
       <AnimatedExpanderContent open={!isConfigured && !isOAuthProvider(provider) && showKeyForm}>
-        <div className="cv-form-inline" style={{ marginTop: 'var(--sp-3)', flexWrap: 'wrap', gap: 'var(--sp-2)' }}>
-          <label className="sr-only" htmlFor={`pv-key-${id}`}>Clave API para {name}</label>
+        <div className={css.keyForm}>
+          <label className="sr-only" htmlFor={`pv-key-${id}`}>
+            Clave API para {name}
+          </label>
           <input
             id={`pv-key-${id}`}
-            className="cv-input"
+            className={css.keyInput}
             type="password"
             autoComplete="new-password"
             placeholder={`Clave API para ${name}`}
             value={apiKeyInput}
             onChange={e => setApiKeyInput(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') void handleAddConfirm() }}
-            style={{ flex: 1, minWidth: 180 }}
           />
-          <motion.button
-            className="cv-btn cv-btn--primary cv-btn--sm"
-            onClick={handleAddConfirm}
-            disabled={addingKey}
-            type="button"
-            whileTap={reduced ? undefined : { scale: 0.97 }}
-            transition={TWEEN_FAST}
+          <motion.div
+            style={{ display: 'contents' }}
+            initial={false}
           >
-            {addingKey ? 'Guardando…' : 'Guardar'}
-          </motion.button>
-          <button
-            className="cv-btn cv-btn--ghost cv-btn--sm"
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={handleAddConfirm}
+              disabled={addingKey}
+              loading={addingKey}
+            >
+              {addingKey ? 'Guardando…' : 'Guardar'}
+            </Button>
+          </motion.div>
+          <Button
+            variant="ghost"
+            size="sm"
             onClick={() => { setShowKeyForm(false); setApiKeyInput('') }}
-            type="button"
           >
             Cancelar
-          </button>
+          </Button>
         </div>
       </AnimatedExpanderContent>
     </motion.div>
   )
 }
 
-// ── Custom provider card (OpenAI-compatible) ──────────────────────────────────
+// ── Custom provider card (OpenAI-compatible local/remote model) ───────────────
 
 interface CustomProviderCardProps {
   onAdded: () => void
@@ -560,7 +650,7 @@ function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
         if (urlRef.current) urlRef.current.value = ''
         if (modelRef.current) modelRef.current.value = ''
         if (keyRef.current) keyRef.current.value = ''
-        onToast('Modelo propio añadido y activado — pruébalo en el chat', 'ok')
+        onToast('Modelo añadido y activado — pruébalo en el chat', 'ok')
         onAdded()
       } else {
         setConnFailed(true)
@@ -572,82 +662,114 @@ function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
   }
 
   return (
-    <motion.div className="cv-teach-card" layout>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--sp-3)' }}>
-        <p className="cv-teach-intro" style={{ margin: 0 }}>
+    <motion.div className={css.customCard} layout>
+      <div className={css.customCardHeader}>
+        <p className={css.customCardIntro}>
           Conecta cualquier servidor compatible: vLLM, LM Studio, Ollama o uno propio.
         </p>
         {!open && (
-          <Button variant="secondary" size="sm" onClick={() => setOpen(true)} style={{ alignSelf: 'flex-start', flexShrink: 0 }}>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => setOpen(true)}
+            style={{ alignSelf: 'flex-start', flexShrink: 0 }}
+          >
             Añadir modelo propio
           </Button>
         )}
       </div>
 
       <AnimatedExpanderContent open={open}>
-        <div className="cv-form-stack" style={{ paddingTop: 'var(--sp-3)' }}>
-          <label className="cv-label" htmlFor="pv-c-alias">Nombre</label>
-          <input
-            id="pv-c-alias"
-            ref={aliasRef}
-            className="cv-input"
-            type="text"
-            placeholder='Nombre (p. ej. "Qwen local")'
-            autoComplete="off"
-          />
-          <label className="cv-label" htmlFor="pv-c-url">URL base del servidor</label>
-          <input
-            id="pv-c-url"
-            ref={urlRef}
-            className="cv-input"
-            type="text"
-            placeholder="URL base (p. ej. https://tu-servidor/v1)"
-            autoComplete="off"
-          />
-          <label className="cv-label" htmlFor="pv-c-model">Modelo</label>
-          <input
-            id="pv-c-model"
-            ref={modelRef}
-            className="cv-input"
-            type="text"
-            placeholder="Modelo (p. ej. qwen3.6-35b-a3b)"
-            autoComplete="off"
-          />
-          <label className="cv-label" htmlFor="pv-c-key">Clave API</label>
-          <input
-            id="pv-c-key"
-            ref={keyRef}
-            className="cv-input"
-            type="password"
-            placeholder="Clave API (si tu servidor la requiere)"
-            autoComplete="new-password"
-          />
-          <p className="cv-hint">La URL base debe terminar en /v1. La clave API solo si tu servidor la pide.</p>
+        <div className={css.formStack}>
+          <div className={css.formField}>
+            <label className={css.formLabel} htmlFor="pv-c-alias">Nombre</label>
+            <input
+              id="pv-c-alias"
+              ref={aliasRef}
+              className={css.formInput}
+              type="text"
+              placeholder='Nombre del modelo (p. ej. "Qwen local")'
+              autoComplete="off"
+            />
+          </div>
+
+          <div className={css.formField}>
+            <label className={css.formLabel} htmlFor="pv-c-url">URL base del servidor</label>
+            <input
+              id="pv-c-url"
+              ref={urlRef}
+              className={css.formInput}
+              type="text"
+              placeholder="https://tu-servidor/v1"
+              autoComplete="off"
+            />
+          </div>
+
+          <div className={css.formField}>
+            <label className={css.formLabel} htmlFor="pv-c-model">Identificador del modelo</label>
+            <input
+              id="pv-c-model"
+              ref={modelRef}
+              className={css.formInput}
+              type="text"
+              placeholder="qwen3.6-35b-a3b"
+              autoComplete="off"
+            />
+          </div>
+
+          <div className={css.formField}>
+            <label className={css.formLabel} htmlFor="pv-c-key">
+              Clave API{' '}
+              <span style={{ fontWeight: 400, color: 'var(--color-text-dim)' }}>(opcional)</span>
+            </label>
+            <input
+              id="pv-c-key"
+              ref={keyRef}
+              className={css.formInput}
+              type="password"
+              placeholder="Solo si tu servidor la requiere"
+              autoComplete="new-password"
+            />
+          </div>
+
+          <p className={css.formHint}>
+            La URL base debe terminar en <code style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-xs)' }}>/v1</code>.
+            La clave API solo si tu servidor la pide.
+          </p>
+
           {connFailed && (
-            <motion.p
-              className="office-field-error"
+            <motion.div
+              className={css.connError}
               role="alert"
-              style={{ color: '#EF4444', fontWeight: 500 }}
               initial={reduced ? false : { opacity: 0, y: -4 }}
               animate={{ opacity: 1, y: 0 }}
+              transition={TWEEN_FAST}
             >
-              Conexión fallida — el modelo se guardó pero no está activo. Corrige la URL o la clave y vuelve a guardar.
-            </motion.p>
+              <AlertCircle size={14} style={{ flexShrink: 0, marginTop: 1 }} aria-hidden="true" />
+              <span>
+                Conexión fallida — el modelo se guardó pero no está activo.
+                Corrige la URL o la clave y vuelve a guardar.
+              </span>
+            </motion.div>
           )}
-          <div className="cv-form-actions">
-            <button
-              className="cv-btn cv-btn--primary cv-btn--sm"
+
+          <div className={css.formActions}>
+            <Button
+              variant="primary"
+              size="sm"
               onClick={handleSave}
               disabled={saving}
+              loading={saving}
             >
-              {saving ? 'Guardando…' : (connFailed ? 'Reintentar conexión' : 'Guardar y activar')}
-            </button>
-            <button
-              className="cv-btn cv-btn--ghost cv-btn--sm"
-              onClick={() => setOpen(false)}
+              {saving ? 'Guardando…' : connFailed ? 'Reintentar conexión' : 'Guardar y activar'}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => { setOpen(false); setConnFailed(false) }}
             >
               Cancelar
-            </button>
+            </Button>
           </div>
         </div>
       </AnimatedExpanderContent>

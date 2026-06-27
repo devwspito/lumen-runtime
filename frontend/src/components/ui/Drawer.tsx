@@ -1,31 +1,30 @@
 import { useEffect, useRef, type ReactNode } from 'react'
 import { X } from 'lucide-react'
 import { AnimatedDrawer } from './motion'
+import { Button } from './Button'
 
-interface DrawerProps {
+export interface DrawerProps {
   open: boolean
   title: string
   onClose: () => void
   children: ReactNode
+  /** Rendered in a sticky footer row, right-aligned. */
+  footer?: ReactNode
   width?: number
 }
 
 /**
  * Slide-in side panel from the right.
- * Handles: Escape key, click-outside, focus trap, reduced-motion.
- * Animation is driven by AnimatePresence + spring physics via AnimatedDrawer.
+ * Handles: Escape key, click-outside, focus trap, body scroll lock,
+ * and reduced-motion (via AnimatedDrawer).
  */
-export function Drawer({ open, title, onClose, children, width = 400 }: DrawerProps) {
+export function Drawer({ open, title, onClose, children, footer, width = 400 }: DrawerProps) {
   const closeButtonRef = useRef<HTMLButtonElement>(null)
 
-  // Focus the close button when the drawer opens
   useEffect(() => {
-    if (open) {
-      requestAnimationFrame(() => closeButtonRef.current?.focus())
-    }
+    if (open) requestAnimationFrame(() => closeButtonRef.current?.focus())
   }, [open])
 
-  // Escape key to close
   useEffect(() => {
     if (!open) return
     function handleKeyDown(e: KeyboardEvent) {
@@ -35,10 +34,15 @@ export function Drawer({ open, title, onClose, children, width = 400 }: DrawerPr
     return () => document.removeEventListener('keydown', handleKeyDown)
   }, [open, onClose])
 
+  // Body scroll lock
+  useEffect(() => {
+    document.body.style.overflow = open ? 'hidden' : ''
+    return () => { document.body.style.overflow = '' }
+  }, [open])
+
   // Focus trap
   useEffect(() => {
     if (!open) return
-
     function handleTab(e: KeyboardEvent) {
       if (e.key !== 'Tab') return
       const el = document.querySelector('[data-drawer-panel]') as HTMLElement | null
@@ -54,31 +58,36 @@ export function Drawer({ open, title, onClose, children, width = 400 }: DrawerPr
         if (document.activeElement === last) { e.preventDefault(); first?.focus() }
       }
     }
-
     document.addEventListener('keydown', handleTab)
     return () => document.removeEventListener('keydown', handleTab)
   }, [open])
 
   return (
     <AnimatedDrawer open={open} onBackdropClick={onClose} width={width} label={title}>
-      <div data-drawer-panel>
+      <div data-drawer-panel className="office-drawer-panel">
         <div className="office-drawer-header">
           <div style={{ flex: 1 }}>
             <div className="office-drawer-title">{title}</div>
           </div>
-          <button
+          <Button
             ref={closeButtonRef}
-            className="office-modal-close"
+            variant="ghost"
+            size="sm"
             onClick={onClose}
             aria-label="Cerrar panel"
             type="button"
           >
-            <X size={14} aria-hidden="true" />
-          </button>
+            <X size={14} aria-hidden />
+          </Button>
         </div>
         <div className="office-drawer-body">
           {children}
         </div>
+        {footer ? (
+          <footer className="office-drawer-footer">
+            {footer}
+          </footer>
+        ) : null}
       </div>
     </AnimatedDrawer>
   )

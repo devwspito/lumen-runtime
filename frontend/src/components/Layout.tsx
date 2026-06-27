@@ -260,8 +260,11 @@ function RecentsSection({ activeConvId, loadConversation }: RecentsSectionProps)
         {Array.from({ length: PREVIEW_COUNT }, (_, i) => (
           <div
             key={i}
-            className="recent-item"
-            style={{ animation: `shimmer 1.4s ${i * 80}ms infinite linear` }}
+            className="skeleton skeleton--block"
+            style={{
+              margin: '2px var(--space-2)',
+              animationDelay: `${i * 80}ms`,
+            }}
             aria-hidden="true"
           />
         ))}
@@ -310,8 +313,7 @@ function RecentsSection({ activeConvId, loadConversation }: RecentsSectionProps)
         {overflow > 0 && (
           <li>
             <button
-              className="recent-item"
-              style={{ color: 'var(--accent)', fontWeight: 500 }}
+              className="recent-item text-accent"
               onClick={() => setExpanded(v => !v)}
               type="button"
               aria-expanded={expanded}
@@ -424,18 +426,17 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
           <div className="sidebar-nav">
             <div className="sidebar-section-label">Navegación</div>
             {featuresLoading ? (
-              // Skeleton nav items: same height as real nav links, shimmer animation.
-              // We show a fixed count (5) to avoid layout shift once items appear.
+              // Mirror the real nav: fixed count = no layout shift on load.
               <ul role="list" aria-busy="true" aria-label="Cargando navegación">
                 {Array.from({ length: 5 }, (_, i) => (
                   <li key={i}>
                     <div
-                      className="nav-link"
+                      className="skeleton skeleton--block"
                       style={{
-                        animation: `shimmer 1.4s ${i * 80}ms infinite linear`,
-                        background: 'var(--surface2)',
-                        borderRadius: 'var(--r-sm)',
-                        opacity: 0.5,
+                        margin: '1px 0',
+                        animationDelay: `${i * 60}ms`,
+                        borderRadius: 'var(--radius-md)',
+                        opacity: 0.55,
                         pointerEvents: 'none',
                       }}
                       aria-hidden="true"
@@ -458,22 +459,9 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
                       {label}
                       {to === '/seguridad' && pendingCount > 0 && (
                         <span
+                          className="badge-count"
                           role="status"
                           aria-label={`${pendingCount} aprobaciones pendientes`}
-                          style={{
-                            marginLeft: 'auto',
-                            background: 'var(--color-danger, #dc2626)',
-                            color: '#fff',
-                            borderRadius: '999px',
-                            minWidth: '18px',
-                            height: '18px',
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            fontSize: '11px',
-                            fontWeight: 700,
-                            padding: '0 5px',
-                          }}
                         >
                           {pendingCount}
                         </span>
@@ -513,7 +501,7 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
         </div>
       </nav>
 
-      <main className="main-content" id="main-content" tabIndex={-1}>
+      <main className="main-content page-enter" id="main-content" tabIndex={-1}>
         {/* Pass the shared chat state down to ChatView via outlet context */}
         <Outlet context={{
           convId: chat.convId,
