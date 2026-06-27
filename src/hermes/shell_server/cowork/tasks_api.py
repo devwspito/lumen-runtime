@@ -74,9 +74,9 @@ def create_tasks_router() -> APIRouter:
         """
         proxy = request.app.state.dbus_proxy
         try:
-            result = await proxy.call_dict("GetScheduledTask", trigger_id)
+            result = await proxy.call_dict("get_scheduled_task", trigger_id)
         except AgentUnavailable as exc:
-            _raise_503(exc, "GetScheduledTask")
+            _raise_503(exc, "get_scheduled_task")
         if not result:
             raise HTTPException(
                 status_code=404,

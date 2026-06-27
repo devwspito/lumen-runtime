@@ -6,13 +6,14 @@
  *   GET /api/v1/workspace/download?path=<relpath>  →  binary download
  */
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { sileo } from 'sileo'
 import {
   Folder, FileText, FileCode, FileImage, File,
   LayoutGrid, List, RefreshCw, Download, ChevronRight,
-  Loader2,
+  Loader2, Upload,
 } from 'lucide-react'
-import { listWorkspaceFiles, workspaceDownloadUrl } from '../api/client'
+import { listWorkspaceFiles, workspaceDownloadUrl, uploadWorkspaceFile } from '../api/client'
 import type { WorkspaceFile } from '../api/types'
 import { Drawer } from '../components/ui/Drawer'
 import { EmptyState } from '../components/ui/EmptyState'
@@ -325,6 +326,8 @@ export default function ArchivosView() {
   const [viewMode, setViewMode] = useState<'list' | 'grid'>('list')
   const [browseState, setBrowseState] = useState<BrowseState>({ status: 'loading' })
   const [selectedFile, setSelectedFile] = useState<WorkspaceFile | null>(null)
+  const [uploading, setUploading] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const load = useCallback(async (path: string) => {
     setBrowseState({ status: 'loading' })
@@ -355,6 +358,27 @@ export default function ArchivosView() {
     setSelectedFile(null)
   }
 
+  async function handleUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const picked = e.target.files
+    if (!picked || picked.length === 0) return
+    setUploading(true)
+    let ok = 0
+    for (const f of Array.from(picked)) {
+      try { await uploadWorkspaceFile(f); ok += 1 }
+      catch (err) {
+        sileo.error({ title: `No se pudo subir «${f.name}»`, description: err instanceof Error ? err.message : undefined })
+      }
+    }
+    setUploading(false)
+    e.target.value = '' // reset so the same file can be re-selected
+    if (ok > 0) {
+      sileo.success({ title: ok === 1 ? 'Archivo subido' : `${ok} archivos subidos` })
+      // Uploads land at the workspace root — go there so the file is visible.
+      navigate('')
+      void load('')
+    }
+  }
+
   function handleEntryClick(entry: WorkspaceFile) {
     if (entry.is_dir || entry.kind === 'directory') {
       navigate(entry.path)
@@ -374,16 +398,36 @@ export default function ArchivosView() {
         title="Archivos"
         subtitle="Espacio de trabajo del agente."
         actions={
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => load(currentPath)}
-            aria-label="Actualizar lista de archivos"
-            loading={browseState.status === 'loading'}
-          >
-            <RefreshCw size={13} aria-hidden="true" />
-            Actualizar
-          </Button>
+          <>
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              hidden
+              onChange={handleUpload}
+              aria-hidden="true"
+            />
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => fileInputRef.current?.click()}
+              aria-label="Subir archivos al espacio de trabajo"
+              loading={uploading}
+            >
+              <Upload size={13} aria-hidden="true" />
+              Subir
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => load(currentPath)}
+              aria-label="Actualizar lista de archivos"
+              loading={browseState.status === 'loading'}
+            >
+              <RefreshCw size={13} aria-hidden="true" />
+              Actualizar
+            </Button>
+          </>
         }
       />
 
@@ -451,7 +495,7 @@ export default function ArchivosView() {
                 <EmptyState
                   icon={<Folder size={40} />}
                   title="Esta carpeta está vacía"
-                  description="Los archivos que cree el agente aparecerán aquí automáticamente."
+                  description="Los archivos que cree el agente aparecen aquí. También puedes subir los tuyos con el botón Subir."
                 />
               ) : (
                 <>

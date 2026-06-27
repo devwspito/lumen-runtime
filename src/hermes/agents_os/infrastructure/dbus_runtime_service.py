@@ -1178,7 +1178,11 @@ class DbusRuntimeServiceWiring:
         mgr: dict[str, int] = {}
         try:
             if self._mcp_manager is not None:
-                mgr = self._mcp_manager.snapshot()
+                snap = self._mcp_manager.snapshot()
+                # Defensive: a manager that returns None/non-dict would make
+                # mgr.get()/`in mgr` below break the WHOLE list → UI shows "no
+                # MCP servers" while servers exist (the silent-empty bug class).
+                mgr = snap if isinstance(snap, dict) else {}
         except Exception as exc:  # noqa: BLE001
             logger.warning("hermes.dbus.list_mcp_servers snapshot failed: %s", exc)
 
