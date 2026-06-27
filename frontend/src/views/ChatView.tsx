@@ -56,6 +56,10 @@ function humanizeError(msg: string, t: (key: Parameters<ReturnType<typeof useT>>
   if (/connection refused|econnrefused|network/i.test(msg)) return t('chat.err.connection')
   if (/stream_error|stream error/i.test(msg)) return t('chat.err.stream')
   if (/timeout|timed out/i.test(msg)) return t('chat.err.timeout')
+  // Provider/model endpoint failures (502/503/504, bad gateway, upstream, auth):
+  // point the owner at the model config instead of a vague "algo salió mal".
+  if (/\b50[234]\b|bad gateway|gateway timeout|upstream|provider|unauthorized|api key|api call failed/i.test(msg))
+    return t('chat.err.provider')
   return t('chat.err.generic')
 }
 

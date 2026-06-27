@@ -142,8 +142,10 @@ function truncate(s: string, n: number) {
   return s.length > n ? s.slice(0, n) + '…' : s
 }
 
-function fileDownloadUrl(name: string) {
-  return `/api/v1/workspace/file/${encodeURIComponent(name)}`
+function fileDownloadUrl(path: string) {
+  // Use the full-path download endpoint (the legacy /workspace/file/{name} only
+  // served root-level files → 404 for anything in a subdirectory).
+  return `/api/v1/workspace/download?path=${encodeURIComponent(path)}`
 }
 
 // ── Sub-section renderers ─────────────────────────────────────────────────────
@@ -173,7 +175,7 @@ function FilesList({ files, loading }: FilesListProps) {
       {files.map(f => (
         <li key={f.name} className="ctx-file-row">
           <a
-            href={fileDownloadUrl(f.name)}
+            href={fileDownloadUrl(f.path)}
             download={f.name}
             title={`Descargar ${f.name}`}
             aria-label={`Descargar ${f.name}`}

@@ -88,6 +88,16 @@ export default function IntegrationsView() {
     }
   }, [])
 
+  // Refetch when the user returns to this tab (e.g. after completing the OAuth
+  // flow in the popup/new tab). A fixed 3s delay almost always fired before the
+  // user finished authorizing, so a just-connected app looked "not connected".
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const onFocus = () => { loadComposio() }
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
+  }, [])
+
   async function loadComposio() {
     dispatch({ type: 'LOADING' })
     let status: ComposioStatus
