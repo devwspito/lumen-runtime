@@ -189,8 +189,8 @@ class SqliteAgentRegistry:
               agent_id, name, color, role, register_tone, primary_mission,
               instructions, language, golden_rules, forbidden_phrases,
               is_default, autonomy_level, department, provider_alias,
-              managed_by, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 agent.agent_id,
@@ -207,7 +207,6 @@ class SqliteAgentRegistry:
                 agent.autonomy_level.value,
                 agent.department,
                 agent.provider_alias,
-                agent.managed_by,
                 agent.created_at.isoformat(),
                 agent.updated_at.isoformat(),
             ),
@@ -224,7 +223,6 @@ class SqliteAgentRegistry:
             autonomy = AutonomyLevel.BALANCED
         department: str | None = row["department"] if "department" in keys else None
         provider_alias: str | None = row["provider_alias"] if "provider_alias" in keys else None
-        managed_by: str | None = row["managed_by"] if "managed_by" in keys else None
         return Agent(
             agent_id=row["agent_id"],
             name=row["name"],
@@ -240,7 +238,6 @@ class SqliteAgentRegistry:
             autonomy_level=autonomy,
             department=department,
             provider_alias=provider_alias,
-            managed_by=managed_by,
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )
@@ -303,7 +300,6 @@ class SqliteAgentRegistry:
             autonomy_level=draft.autonomy_level,
             department=draft.department,
             provider_alias=draft.provider_alias,
-            managed_by=draft.managed_by,
             created_at=now,
             updated_at=now,
         )
@@ -331,8 +327,6 @@ class SqliteAgentRegistry:
                 autonomy_level=draft.autonomy_level,
                 department=draft.department,
                 provider_alias=draft.provider_alias,
-                # Preserve managed_by from the draft; allows re-stamping cloud ownership on update.
-                managed_by=draft.managed_by if draft.managed_by is not None else existing.managed_by,
                 created_at=existing.created_at,
                 updated_at=datetime.now(tz=UTC),
             )
@@ -344,7 +338,7 @@ class SqliteAgentRegistry:
                   primary_mission = ?, instructions = ?, language = ?,
                   golden_rules = ?, forbidden_phrases = ?,
                   autonomy_level = ?, department = ?, provider_alias = ?,
-                  managed_by = ?, updated_at = ?
+                  updated_at = ?
                 WHERE agent_id = ?
                 """,
                 (
@@ -360,7 +354,6 @@ class SqliteAgentRegistry:
                     updated.autonomy_level.value,
                     updated.department,
                     updated.provider_alias,
-                    updated.managed_by,
                     updated.updated_at.isoformat(),
                     agent_id,
                 ),

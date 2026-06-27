@@ -83,8 +83,6 @@ class AgentDraft:
     # Non-null → the engine resolves THIS provider for every cycle of this agent.
     # The value is the provider alias as stored in the providers table.
     provider_alias: str | None = None
-    # Nullable: None → locally created (owner). "cloud" → pushed by config-sync.
-    managed_by: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,9 +107,6 @@ class Agent:
     # Nullable: None → engine falls back to the globally active provider.
     # Non-null → the engine uses THIS provider alias for every cycle of this agent.
     provider_alias: str | None = None
-    # Nullable: None → locally created (owner). "cloud" → pushed by config-sync.
-    # Reconciliation: cloud-managed agents absent from the bundle are deleted; local agents are never touched.
-    managed_by: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(tz=UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(tz=UTC))
 

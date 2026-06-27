@@ -455,16 +455,7 @@ class DbusRuntimeServiceWiring:
 
         max_agents = lic.get("max_agents")
         if max_agents is not None and self._agent_registry is not None:
-            # The license cap counts only CLOUD-MANAGED agents (the licensed
-            # workforce the company pays for). The local CE default roster
-            # (managed_by=None) is a Community freebie and must NOT count —
-            # otherwise the 28-agent default roster blocks the cloud from
-            # provisioning the employee's agent (max_agents typically < 28).
-            current_count = sum(
-                1
-                for a in self._agent_registry.list_agents()
-                if getattr(a, "managed_by", None) == "cloud"
-            )
+            current_count = len(self._agent_registry.list_agents())
             if current_count >= int(max_agents):
                 logger.warning(
                     "hermes.dbus.license_exceeded",

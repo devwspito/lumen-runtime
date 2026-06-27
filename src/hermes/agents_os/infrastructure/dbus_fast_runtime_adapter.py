@@ -64,9 +64,7 @@ _AGENT_DRAFT_ALLOWED_KEYS = frozenset({
     "name", "role", "register", "primary_mission", "instructions",
     "color", "language", "golden_rules", "forbidden_phrases",
     "autonomy_level", "agent_id",
-    "department",       # nullable string; null → "mis-agentes" bucket in the roster
-    "provider_alias",   # nullable; non-null → per-agent provider binding (Fase 3c)
-    "managed_by",       # nullable; "cloud" → config-sync applier owns this agent (Fase 4)
+    "department",  # nullable string; null → "mis-agentes" bucket in the roster
 })
 
 # Allow-list of keys accepted in a house rule (Fix-10).
