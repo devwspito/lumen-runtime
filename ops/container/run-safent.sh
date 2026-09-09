@@ -11,14 +11,23 @@
 #
 # --codex-auth <path>: OPTIONAL. Bind-mounts an EXISTING, host-side OpenAI
 #   Codex CLI auth.json (from a `codex login` the owner already did on the
-#   HOST) read-only into the container's CODEX_HOME, so the OPT-IN
-#   `codex_app_server` runtime (hermes-agent 0.15.1, agent/transports/
-#   codex_app_server.py — spawns the REAL `codex` binary, which reads
-#   CODEX_HOME/auth.json itself) can reuse that session without a second
-#   login. This is a SECONDARY path for that opt-in runtime only — it needs
-#   no container flag for either of the two normal OpenAI Codex / ChatGPT
-#   provider paths below (both run entirely from inside Safent's own UI,
-#   Settings -> Providers -> OpenAI Codex / ChatGPT (suscripción)):
+#   HOST) read-only into the container at $HOME/.codex/auth.json (HOME is
+#   fixed to /var/lib/hermes/hermes-home by hermes-runtime.service) and
+#   points CODEX_HOME at the same directory. hermes-agent 0.21.1 has TWO
+#   independent consumers of that one file, both covered by this single flag:
+#     1. hermes_cli/auth_codex.py::_import_codex_cli_tokens /
+#        _recover_codex_tokens_from_cli — Hermes's OWN Codex OAuth session
+#        (~/.hermes/auth.json, a separate store) silently self-heals from
+#        this file when its refresh_token is rejected (rotation conflict),
+#        instead of surfacing a hard 401. This benefits BOTH normal OpenAI
+#        Codex / ChatGPT provider paths below transparently — no extra
+#        container flag needed for them either way.
+#     2. The OPT-IN `codex_app_server` runtime (agent/transports/
+#        codex_app_server.py) — spawns the REAL `codex` binary, which reads
+#        CODEX_HOME/auth.json itself. Same file, same env var.
+#   Both normal OpenAI Codex / ChatGPT provider paths (Safent's own UI,
+#   Settings -> Providers -> OpenAI Codex / ChatGPT (suscripción)) still need
+#   no container flag on their own:
 #     1. ChatGPT subscription, device-code login (the default: click "Iniciar
 #        sesión con ChatGPT" — dbus_runtime_service.py's _codex_oauth_worker).
 #     2. Your own OpenAI API key, pay-per-token fallback ("Usar clave de API
@@ -38,7 +47,7 @@ CODEX_AUTH_PATH=""
 _positional_index=0
 
 usage() {
-  sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [ $# -gt 0 ]; do
