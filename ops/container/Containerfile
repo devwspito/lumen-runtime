@@ -369,7 +369,7 @@ RUN mkdir -p /var/lib/hermes/workspace /var/lib/hermes/browser-sessions && \
 # ── Pre-warm the curated MCP cache (sellable clean image: "download → works") ──
 # The MCP runtime spawns OFFLINE (launcher injects npx --prefer-offline) from
 # /var/lib/hermes/npm-cache (hermes-mcp-launcher.service Environment). A FRESH install
-# has an empty cache, so the SEEDED npx MCPs (ruflo) fail at boot with
+# has an empty cache, so a SEEDED npx MCP would fail at boot with
 # "Connection closed" (the cage denies npm at runtime — C1 PASS-3). Warm the cache at
 # BUILD with the EXACT specs the seed runs (ops/.../seed/mcp-servers.json) so the full
 # dep tree is cached. /var/lib/hermes is volume-copied-up into the customer's fresh

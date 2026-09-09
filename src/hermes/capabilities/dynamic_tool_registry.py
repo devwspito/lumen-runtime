@@ -24,7 +24,7 @@ Design constraints
 
 Registered tool entry
 ---------------------
-  name    : qualified tool name (e.g. "mcp__ruflo__web_search", "gmail_send_email")
+  name    : qualified tool name (e.g. "mcp__serena__find_symbol", "gmail_send_email")
   origin  : "mcp" | "composio"
   llm_visible : True (always — these are the specs the LLM currently sees)
 """

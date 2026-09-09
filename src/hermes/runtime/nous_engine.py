@@ -2092,12 +2092,12 @@ class NousReasoningEngine:
             # Distinción CRÍTICA: search_mcp (Hub) = INSTALAR MCPs nuevos;
             # tool_search/tool_call = USAR los YA conectados. Qwen los confunde.
             "IMPORTANTE: distingue dos cosas. Para USAR una integración que YA está "
-            "conectada (p.ej. el swarm 'ruflo', cuyas herramientas son `mcp__ruflo__*`): "
-            "usa `tool_search`+`tool_call` — esas herramientas YA están en tu sistema, "
+            "conectada (sus herramientas se llaman `mcp__<servidor>__*`): usa "
+            "`tool_search`+`tool_call` — esas herramientas YA están en tu sistema, "
             "NO en ningún hub. `search_mcp` es OTRA cosa: solo sirve para INSTALAR un MCP "
-            "NUEVO desde el catálogo; NUNCA uses `search_mcp` para usar ruflo u otra "
-            "integración ya conectada (ahí no aparecerán). Si el usuario te pide operar "
-            "ruflo/un swarm/una app conectada, ve directo a `tool_search` con su nombre.",
+            "NUEVO desde el catálogo; NUNCA uses `search_mcp` para usar una integración "
+            "ya conectada (ahí no aparecerán). Si el usuario te pide operar un swarm/una "
+            "app ya conectada, ve directo a `tool_search` con su nombre.",
             # Body-awareness: the agent lives INSIDE this app and must know its own
             # UI so it GUIDES the user to the right section instead of handing out
             # raw shell commands (a `rm` in a chat is user-hostile). Each section has
