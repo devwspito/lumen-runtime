@@ -13,6 +13,7 @@ import { useChat } from '../hooks/useChat'
 import { useFeatures } from '../hooks/useFeatures'
 import { usePendingApprovals } from '../hooks/usePendingApprovals'
 import { usePendingInboundDelegations } from '../hooks/usePendingInboundDelegations'
+import { useAdsPanelOrigin } from '../hooks/useAdsPanel'
 import type { ConversationSummary } from '../api/types'
 import NotificationsPanel from './NotificationsPanel'
 import { useConfirmDialog } from './ConfirmDialog'
@@ -81,6 +82,17 @@ function SistemaIcon() {
   )
 }
 
+function AdsIcon() {
+  return (
+    <svg className="nav-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M2 6.3v3.4a1 1 0 0 0 1 1h1.3L8.5 13V3L4.3 5.3H3a1 1 0 0 0-1 1Z"
+        stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
+      <path d="M10.6 6c.55.6.55 3.4 0 4M12.4 4.4c1.35 1.5 1.35 5.7 0 7.2"
+        stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+    </svg>
+  )
+}
+
 interface HubNavItem extends NavItem {
   /** Visible when ANY of these backend view ids is allowed (hub aggregates them). */
   anyOf?: string[]
@@ -91,6 +103,9 @@ interface HubNavItem extends NavItem {
 /**
  * Four clean entries (owner decision): Chat · Agentes · Capacidades · Sistema.
  * The two hubs contain every other section as tabs (see SectionHubs.tsx).
+ * A fifth, "Anuncios", is appended conditionally by Layout below — not a
+ * feature-gated hub tab, but a connected product surface that only exists
+ * once the owner has connected safent-ads (see useAdsPanelOrigin).
  */
 function useNavItems(): HubNavItem[] {
   const t = useT()
@@ -435,6 +450,9 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
   const t = useT()
   const { locale, setLocale } = useLocale()
   const { isLoading: featuresLoading, allowed } = useFeatures()
+  // Sidebar visibility for "Anuncios" — a connection state, not a license
+  // feature, so it rides alongside (not inside) the allowed()/anyOf gate.
+  const adsPanelOrigin = useAdsPanelOrigin()
   // activeProviderReload is exposed on the outlet context so views like
   // ProvidersView can signal an immediate re-check after connecting a model.
   // The hook already self-heals via a 5 s poll; this enables instant feedback.
@@ -558,6 +576,19 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
                       </NavLink>
                     </li>
                   ))}
+                {adsPanelOrigin && (
+                  <li>
+                    <NavLink
+                      to="/anuncios"
+                      className={({ isActive }) =>
+                        ['nav-link', isActive ? 'active' : ''].filter(Boolean).join(' ')
+                      }
+                    >
+                      <AdsIcon />
+                      {t('nav.ads')}
+                    </NavLink>
+                  </li>
+                )}
               </ul>
             )}
           </div>

@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { Toaster } from 'sileo'
 import Layout from './components/Layout'
 import ChatView from './views/ChatView'
+import AdsView from './views/AdsView'
 import { CapacidadesView, SistemaView } from './views/SectionHubs'
 import { useActiveProvider } from './hooks/useActiveProvider'
 import { useFeatures } from './hooks/useFeatures'
@@ -91,6 +92,13 @@ export default function App() {
               lives inside them as tabs. Hubs gate their own tabs by features. */}
           <Route path="capacidades" element={<CapacidadesView />} />
           <Route path="sistema" element={<SistemaView />} />
+          {/* Anuncios: the one exception to "everything else is a hub tab" — the
+              ads vertical is its own connected product surface (a full external
+              panel, not a settings tab), and the sidebar entry only appears once
+              the owner has connected safent-ads (Layout / useAdsPanelOrigin). No
+              ViewGuard: visibility isn't a license feature, it's a connection
+              state, and the view itself handles the "not connected yet" case. */}
+          <Route path="anuncios" element={<AdsView />} />
           {/* Back-compat: old standalone paths (deep-links, the agent app-map)
               → the owning hub tab. */}
           <Route path="skills" element={<Navigate to="/capacidades?tab=skills" replace />} />

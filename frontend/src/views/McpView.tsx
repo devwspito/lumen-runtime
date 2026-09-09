@@ -1,6 +1,6 @@
 import { useEffect, useReducer, useRef, useState } from 'react'
 import { sileo } from 'sileo'
-import { X, Terminal, Search, Wrench, ExternalLink, Megaphone } from 'lucide-react'
+import { X, Terminal, Search, Wrench, ExternalLink, Megaphone, Link2, Lightbulb } from 'lucide-react'
 import { useT } from '../lib/i18n'
 import {
   listMcpServers, addMcpServer, removeMcpServer, searchMcpRegistry, scanInstall, recordSecurityDecision,
@@ -10,6 +10,7 @@ import type { McpServer, McpRegistryEntry, InstallScanResponse } from '../api/ty
 import { useConfirmDialog } from '../components/ConfirmDialog'
 import InstallScanModal from '../components/InstallScanModal'
 import type { MfaFactors } from '../components/MfaModal'
+import { panelOriginFromMcpUrl } from '../hooks/useAdsPanel'
 import { PageHeader } from '../components/ui/PageHeader'
 import { EmptyState } from '../components/ui/EmptyState'
 import { Button } from '../components/ui/Button'
@@ -662,6 +663,54 @@ function McpServerRow({ server, onRemove }: McpServerRowProps) {
   )
 }
 
+// ── Connected safent-ads preset: server row + quick links into its panel ────
+//
+// The ads service serves its own React panel at `/` on the SAME host as the
+// MCP bridge (`/mcp`) — panelOriginFromMcpUrl strips the path, https only,
+// never built from free text (the URL comes straight from the argv the
+// backend already validated when it registered this connection).
+
+interface ConnectedAdsPresetProps {
+  server: McpServer
+  onRemove: () => void
+}
+
+function ConnectedAdsPreset({ server, onRemove }: ConnectedAdsPresetProps) {
+  const t = useT()
+  const argv = Array.isArray(server.argv) ? server.argv : []
+  const mcpUrl = argv[argv.length - 1] ?? ''
+  const origin = mcpUrl ? panelOriginFromMcpUrl(mcpUrl) : null
+
+  return (
+    <>
+      <McpServerRow server={server} onRemove={onRemove} />
+      {origin && (
+        <div className={styles.adsPanel}>
+          <div className={styles.adsPanelHead}>
+            <Megaphone size={13} aria-hidden="true" />
+            <span>{t('ads.panel.title')}</span>
+          </div>
+          <div className={styles.adsPanelActions}>
+            <a className="cv-btn cv-btn--secondary cv-btn--sm" href={origin} target="_blank" rel="noopener noreferrer">
+              <ExternalLink size={13} aria-hidden="true" />
+              {t('ads.panel.open')}
+            </a>
+            <a className="cv-btn cv-btn--secondary cv-btn--sm" href={`${origin}/conexiones`} target="_blank" rel="noopener noreferrer">
+              <Link2 size={13} aria-hidden="true" />
+              {t('ads.panel.connections')}
+            </a>
+            <a className="cv-btn cv-btn--secondary cv-btn--sm" href={`${origin}/propuestas`} target="_blank" rel="noopener noreferrer">
+              <Lightbulb size={13} aria-hidden="true" />
+              {t('ads.panel.proposals')}
+            </a>
+          </div>
+          <p className={styles.adsPanelHint}>{t('ads.panel.hint')}</p>
+        </div>
+      )}
+    </>
+  )
+}
+
 // ── Safent Ads managed-remote preset card ───────────────────────────────────
 
 interface ManagedRemotePresetCardProps {
@@ -761,7 +810,7 @@ function ManagedRemotePresetCard({ connectedServer, onConnected, onRemove }: Man
   }
 
   if (connectedServer) {
-    return <McpServerRow server={connectedServer} onRemove={() => onRemove(connectedServer)} />
+    return <ConnectedAdsPreset server={connectedServer} onRemove={() => onRemove(connectedServer)} />
   }
 
   return (
