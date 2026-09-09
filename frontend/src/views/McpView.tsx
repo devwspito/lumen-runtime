@@ -2,6 +2,7 @@ import { useEffect, useReducer, useRef, useState } from 'react'
 import { sileo } from 'sileo'
 import { X, Terminal, Search, Wrench, ExternalLink, Megaphone, Link2, Lightbulb } from 'lucide-react'
 import { useT } from '../lib/i18n'
+import type { TranslationKey } from '../lib/i18n'
 import {
   listMcpServers, addMcpServer, removeMcpServer, searchMcpRegistry, scanInstall, recordSecurityDecision,
   listManagedRemoteEndpoints, connectManagedRemote, ApiError,
@@ -675,7 +676,7 @@ function McpServerRow({ server, onRemove }: McpServerRowProps) {
 // status value this build doesn't recognise yet (future finer states from
 // the companion's own /mcp/health) falls back to a generic "installed" dot
 // rather than showing nothing.
-const COMPANION_STATUS_META: Record<string, { key: string; state: StatusDotState }> = {
+const COMPANION_STATUS_META: Record<string, { key: TranslationKey; state: StatusDotState }> = {
   esperando_servicio: { key: 'mcp.managed.ads.status.waiting', state: 'warning' },
   listo: { key: 'mcp.managed.ads.status.ready', state: 'success' },
 }
