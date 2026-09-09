@@ -7,6 +7,40 @@
 # or port is already taken on this host, provisioning FAILS LOUD and Safent
 # starts WITHOUT the companion (FR-3/FR-6) — it never silently picks another
 # subnet/port (owner decision 2).
+#
+# ── Operation (owner-facing) ─────────────────────────────────────────────
+# State lives at $SAFENT_COMPANION_STATE (default ~/.safent/companions/ads):
+#   tls/            private CA + leaf for ads.safent.internal
+#   bearer          the /mcp bearer (0400)
+#   secrets/api.env    ads-api/ads-worker secrets — generated ONCE, edit by
+#                      hand only to uncomment TELEGRAM_BOT_TOKEN/
+#                      TELEGRAM_OWNER_CHAT_IDS once that path is optional
+#   secrets/broker.env ads-broker secrets — generated ONCE
+#   caps.yaml       hard spend caps (fail-closed) — edit by hand, see below
+#   companions.json the file Safent's own daemon reads (read-only bind)
+#
+# vendor.env (OPTIONAL, owner-created by hand, 0600, never generated here):
+# Safent's OWN Google Ads MCC / Meta app credentials, merged into
+# broker.env on every re-provision (never overwritten if already merged):
+#   GOOGLE_ADS_DEVELOPER_TOKEN=...
+#   GOOGLE_ADS_CLIENT_ID=...
+#   GOOGLE_ADS_CLIENT_SECRET=...
+#   GOOGLE_ADS_LOGIN_CUSTOMER_ID=...
+#   META_APP_ID=...
+#   META_APP_SECRET=...
+# These are the VENDOR's own platform app credentials — never a customer's
+# account credentials, which the owner connects from the ads panel UI
+# instead and which end up encrypted in ads-broker's credential store.
+#
+# caps.yaml starts with `accounts: {}` — NO account can spend anything
+# until the owner adds its real platform_account_id under `accounts:`
+# (see caps.template.yaml's own comments for the exact shape). Edit
+# $STATE/caps.yaml directly; provision.sh never touches it again once it
+# exists.
+#
+# Publishing ghcr.io/devwspito/safent-ads (SAFENT_ADS_IMAGE's default) is
+# the OWNER's own release step, from the ads repo's CI — never done from
+# here or from a developer machine.
 set -euo pipefail
 
 readonly COMPANION_SUBNET="10.201.0.0/24"
