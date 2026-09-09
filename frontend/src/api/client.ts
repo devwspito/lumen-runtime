@@ -22,6 +22,7 @@ import type {
   McpServer,
   McpRegistryEntry,
   McpAddResponse,
+  ManagedRemoteEndpointsResponse,
   ConfiguredTasksResponse,
   RecentTasksResponse,
   CreateTaskPayload,
@@ -419,6 +420,19 @@ export function searchMcpRegistry(query: string, limit = 30): Promise<McpRegistr
     `/mcp/registry?q=${encodeURIComponent(query)}&limit=${limit}`,
     { timeoutMs: 25_000 },
   )
+}
+
+export function listManagedRemoteEndpoints(): Promise<ManagedRemoteEndpointsResponse> {
+  return request<ManagedRemoteEndpointsResponse>('/mcp/managed-remote-endpoints')
+    .catch(() => ({ endpoints: {} }))
+}
+
+export function connectManagedRemote(slug: string, url: string, force = false): Promise<McpAddResponse> {
+  return request<McpAddResponse>(`/mcp/managed-remote/${encodeURIComponent(slug)}/connect`, {
+    method: 'POST',
+    body: JSON.stringify({ url, force }),
+    timeoutMs: 300_000,
+  })
 }
 
 // ── Tasks ─────────────────────────────────────────────────────────────────────

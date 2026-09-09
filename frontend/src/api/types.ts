@@ -269,6 +269,14 @@ export interface McpAddResponse {
   tool_count?: number
   ok?: boolean
   error?: string
+  blocked?: boolean
+  scan_id?: string
+  verdict?: string
+  risks?: unknown[]
+}
+
+export interface ManagedRemoteEndpointsResponse {
+  endpoints: Record<string, string>
 }
 
 // ── Tasks ─────────────────────────────────────────────────────────────────────

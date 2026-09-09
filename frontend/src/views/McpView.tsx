@@ -1,8 +1,11 @@
 import { useEffect, useReducer, useRef, useState } from 'react'
 import { sileo } from 'sileo'
-import { X, Terminal, Search, Wrench, ExternalLink } from 'lucide-react'
+import { X, Terminal, Search, Wrench, ExternalLink, Megaphone } from 'lucide-react'
 import { useT } from '../lib/i18n'
-import { listMcpServers, addMcpServer, removeMcpServer, searchMcpRegistry, scanInstall, recordSecurityDecision, ApiError } from '../api/client'
+import {
+  listMcpServers, addMcpServer, removeMcpServer, searchMcpRegistry, scanInstall, recordSecurityDecision,
+  listManagedRemoteEndpoints, connectManagedRemote, ApiError,
+} from '../api/client'
 import type { McpServer, McpRegistryEntry, InstallScanResponse } from '../api/types'
 import { useConfirmDialog } from '../components/ConfirmDialog'
 import InstallScanModal from '../components/InstallScanModal'
@@ -120,6 +123,46 @@ function parseEnvSchema(entry: McpRegistryEntry): EnvFieldSchema[] {
   )
 }
 
+// ── Safent Ads managed-remote preset ────────────────────────────────────────
+//
+// A managed-remote MCP server (safent-ads) bridges to Safent's own ads
+// control plane via mcp-remote — the owner sets ONE https URL (their tenant's
+// endpoint), never a local command. Mirrors the backend's validation
+// (hermes.shell_server.managed_remote_endpoints.validate_managed_remote_endpoint_url)
+// for instant feedback; the backend re-validates regardless (client-side
+// checks are UX only, never the trust boundary).
+
+const SAFENT_ADS_SLUG = 'safent-ads'
+// The one fetchable coordinate the install security-scan analyses (the URL is
+// a runtime argv value, not code — mirrors fetchableCoordinateFromArgv's own
+// npx→npm resolution for ['npx', '-y', 'mcp-remote', url]).
+const SAFENT_ADS_SCAN_TARGET = 'npm:mcp-remote'
+const SAFENT_ADS_BLOCKED_HOSTNAMES = new Set(['localhost', 'metadata.google.internal', 'metadata'])
+
+function isIpLiteralHostname(hostname: string): boolean {
+  const bare = hostname.replace(/^\[/, '').replace(/\]$/, '')
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(bare)) return true
+  return bare.includes(':')
+}
+
+function validateManagedRemoteUrl(t: ReturnType<typeof useT>, raw: string): string | null {
+  const value = raw.trim()
+  if (!value) return t('mcp.managed.err.required')
+  let parsed: URL
+  try {
+    parsed = new URL(value)
+  } catch {
+    return t('mcp.managed.err.invalid')
+  }
+  if (parsed.protocol !== 'https:') return t('mcp.managed.err.scheme')
+  const hostname = parsed.hostname.toLowerCase()
+  if (!hostname) return t('mcp.managed.err.hostname')
+  if (SAFENT_ADS_BLOCKED_HOSTNAMES.has(hostname)) return t('mcp.managed.err.blocked_hostname')
+  if (isIpLiteralHostname(hostname)) return t('mcp.managed.err.ip_literal')
+  if (parsed.port && parsed.port !== '443') return t('mcp.managed.err.port')
+  return null
+}
+
 // ── State ─────────────────────────────────────────────────────────────────────
 
 type State =
@@ -187,6 +230,28 @@ export default function McpView() {
   const installedIds = state.status === 'success'
     ? new Set(state.servers.map(s => s.server_id ?? s.id ?? ''))
     : new Set<string>()
+
+  const safentAdsServer = state.status === 'success'
+    ? state.servers.find(s => (s.server_id ?? s.id) === SAFENT_ADS_SLUG)
+    : undefined
+
+  async function handleRemoveServer(s: McpServer) {
+    const name = s.label ?? s.server_id ?? ''
+    const ok = await confirm({
+      title: t('mcp.remove.confirm.title').replace('{name}', name),
+      description: t('mcp.remove.confirm.desc'),
+      confirmLabel: t('mcp.remove'),
+      variant: 'danger',
+    })
+    if (!ok) return
+    try {
+      await removeMcpServer(s.server_id ?? s.id ?? '')
+      show(t('mcp.toast.removed'), 'ok')
+      load()
+    } catch (e) {
+      show(e instanceof Error ? e.message : t('mcp.err.generic'), 'error')
+    }
+  }
 
   async function doAddMcpServer(entry: McpRegistryEntry, collectedEnv: Record<string, string>, onDone: () => void, force = false) {
     const argv = Array.isArray(entry.argv)
@@ -387,23 +452,7 @@ export default function McpView() {
                           <AnimatedListItem key={s.server_id ?? s.id}>
                             <McpServerRow
                               server={s}
-                              onRemove={async () => {
-                                const name = s.label ?? s.server_id ?? ''
-                                const ok = await confirm({
-                                  title: t('mcp.remove.confirm.title').replace('{name}', name),
-                                  description: t('mcp.remove.confirm.desc'),
-                                  confirmLabel: t('mcp.remove'),
-                                  variant: 'danger',
-                                })
-                                if (!ok) return
-                                try {
-                                  await removeMcpServer(s.server_id ?? s.id ?? '')
-                                  show(t('mcp.toast.removed'), 'ok')
-                                  load()
-                                } catch (e) {
-                                  show(e instanceof Error ? e.message : t('mcp.err.generic'), 'error')
-                                }
-                              }}
+                              onRemove={() => handleRemoveServer(s)}
                             />
                           </AnimatedListItem>
                         ))}
@@ -411,6 +460,22 @@ export default function McpView() {
                     </ul>
                   )
               )}
+            </section>
+          </StaggerItem>
+
+          {/* ── Managed presets (Safent-operated MCP bridges) ────────────────── */}
+          <StaggerItem>
+            <section className="cv-section" aria-label={t('mcp.managed.section.aria')}>
+              <h2 className={styles.sectionLabel}>{t('mcp.managed.section')}</h2>
+              <ul className="cv-list" role="list">
+                <AnimatedListItem>
+                  <ManagedRemotePresetCard
+                    connectedServer={safentAdsServer}
+                    onConnected={load}
+                    onRemove={handleRemoveServer}
+                  />
+                </AnimatedListItem>
+              </ul>
             </section>
           </StaggerItem>
 
@@ -594,6 +659,156 @@ function McpServerRow({ server, onRemove }: McpServerRowProps) {
         </Button>
       </div>
     </HoverRow>
+  )
+}
+
+// ── Safent Ads managed-remote preset card ───────────────────────────────────
+
+interface ManagedRemotePresetCardProps {
+  connectedServer: McpServer | undefined
+  onConnected: () => void
+  onRemove: (server: McpServer) => void
+}
+
+function ManagedRemotePresetCard({ connectedServer, onConnected, onRemove }: ManagedRemotePresetCardProps) {
+  const t = useT()
+  const [url, setUrl] = useState('')
+  const [connecting, setConnecting] = useState(false)
+  const [pendingScan, setPendingScan] = useState<InstallScanResponse | null>(null)
+
+  useEffect(() => {
+    if (connectedServer) return
+    // Pre-fill from any URL the owner already set (e.g. via the D-Bus verb
+    // directly, or a previous session) so re-visiting the page doesn't lose it.
+    listManagedRemoteEndpoints()
+      .then(res => {
+        const saved = res.endpoints?.[SAFENT_ADS_SLUG]
+        if (saved) setUrl(saved)
+      })
+      .catch(() => undefined)
+  }, [connectedServer])
+
+  async function doConnect(force: boolean) {
+    setConnecting(true)
+    try {
+      const res = await connectManagedRemote(SAFENT_ADS_SLUG, url.trim(), force)
+      if (res && res.tool_count === 0) {
+        show(t('mcp.toast.no_tools').replace('{name}', t('mcp.managed.ads.title')), 'warn', 7000)
+      } else {
+        show(t('mcp.managed.ads.toast.connected'), 'ok')
+      }
+      onConnected()
+    } catch (e) {
+      // The daemon's own install security-scan (embedded in add_mcp_server)
+      // blocked this — its ad-hoc block dict isn't rich enough for the review
+      // modal, so re-scan through the dedicated endpoint to get a full,
+      // owner-reviewable verdict (same two-phase pattern as installEntry()).
+      const body = e instanceof ApiError && e.body && typeof e.body === 'object'
+        ? (e.body as Record<string, unknown>)
+        : null
+      if (body?.['blocked'] === true) {
+        try {
+          const scan = await scanInstall('mcp', SAFENT_ADS_SCAN_TARGET)
+          setPendingScan(scan)
+          return
+        } catch {
+          show(e instanceof Error ? e.message : t('mcp.err.generic'), 'error')
+          return
+        }
+      }
+      show(e instanceof Error ? e.message : t('mcp.err.generic'), 'error')
+    } finally {
+      setConnecting(false)
+    }
+  }
+
+  function handleConnectClick() {
+    const error = validateManagedRemoteUrl(t, url)
+    if (error) {
+      show(error, 'warn')
+      return
+    }
+    void doConnect(false)
+  }
+
+  async function handleScanApprove(factors: MfaFactors) {
+    if (!pendingScan) return
+    const scan = pendingScan
+    setPendingScan(null)
+    try {
+      await recordSecurityDecision({
+        scan_id: scan.scan_id,
+        decision: 'approve',
+        identifier: scan.identifier ?? SAFENT_ADS_SCAN_TARGET,
+        kind: 'mcp',
+        score: scan.score,
+        verdict: scan.verdict,
+        risks_json: JSON.stringify(scan.risks),
+        totp: factors.totp,
+      })
+      await doConnect(true)
+    } catch (e) {
+      show(e instanceof Error ? e.message : t('mcp.err.decision'), 'error')
+    }
+  }
+
+  if (connectedServer) {
+    return <McpServerRow server={connectedServer} onRemove={() => onRemove(connectedServer)} />
+  }
+
+  return (
+    <>
+      {pendingScan && (
+        <InstallScanModal
+          scan={pendingScan}
+          name={t('mcp.managed.ads.title')}
+          onApprove={handleScanApprove}
+          onCancel={() => setPendingScan(null)}
+        />
+      )}
+      <motion.div className={styles.catalogCard} whileHover={{ y: -1 }} transition={SPRING} layout>
+        <div className={styles.catalogCardMain}>
+          <span className={styles.catalogCardIcon} aria-hidden="true">
+            <Megaphone size={14} />
+          </span>
+          <div className={styles.catalogCardInfo}>
+            <div className={styles.catalogCardName}>{t('mcp.managed.ads.title')}</div>
+            <p className={styles.catalogCardDesc}>{t('mcp.managed.ads.desc')}</p>
+          </div>
+        </div>
+
+        <div className={styles.envForm}>
+          <div className={styles.envField}>
+            <label className={styles.envLabel} htmlFor="mcp-managed-ads-url">
+              {t('mcp.managed.ads.url.label')}
+            </label>
+            <input
+              id="mcp-managed-ads-url"
+              className={styles.envInput}
+              type="url"
+              inputMode="url"
+              autoComplete="off"
+              placeholder={t('mcp.managed.ads.url.placeholder')}
+              value={url}
+              onChange={e => setUrl(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') handleConnectClick() }}
+            />
+          </div>
+          <div className={styles.envActions}>
+            <Button
+              variant="primary"
+              size="sm"
+              type="button"
+              loading={connecting}
+              disabled={connecting}
+              onClick={handleConnectClick}
+            >
+              {connecting ? t('mcp.managed.connecting') : t('mcp.managed.connect')}
+            </Button>
+          </div>
+        </div>
+      </motion.div>
+    </>
   )
 }
 
