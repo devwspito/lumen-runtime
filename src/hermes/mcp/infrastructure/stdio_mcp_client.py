@@ -135,7 +135,8 @@ class StdioMcpClient:
             raise
         except Exception as exc:
             raise McpConnectionError(
-                f"StdioMcpClient: handshake failed via launcher for {argv!r}: {exc}"
+                f"StdioMcpClient: handshake failed via launcher for {argv!r}: "
+                f"{_describe_handshake_failure(exc, self._timeout_sec)}"
             ) from exc
 
     def _wire_launcher_streams(self, read_fd: int, write_fd: int) -> tuple[Any, Any]:
@@ -268,7 +269,8 @@ class StdioMcpClient:
             raise
         except Exception as exc:
             raise McpConnectionError(
-                f"StdioMcpClient: failed to connect via {argv!r}: {exc}"
+                f"StdioMcpClient: failed to connect via {argv!r}: "
+                f"{_describe_handshake_failure(exc, self._timeout_sec)}"
             ) from exc
 
     async def _start_session_owner(
@@ -426,6 +428,26 @@ class StdioMcpClient:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _describe_handshake_failure(exc: BaseException, timeout_sec: float) -> str:
+    """Render a connect failure so the journal line is never mute.
+
+    `asyncio.timeout` raises a BARE `TimeoutError()` whose `str()` is "", so the
+    f-string that built the connect error ended in ": " and nothing else: the
+    resulting `hermes.dbus.mcp_reconnect_failed server=excel: …:` line named
+    neither the failure nor even its class. Every failure now carries at least
+    its class name; a handshake timeout also says what timed out and after how
+    long, which is the difference between "the server never answered" and "the
+    server never started".
+    """
+    if isinstance(exc, TimeoutError) and not str(exc):
+        return (
+            f"TimeoutError: no initialize() response in {timeout_sec:g}s "
+            "(the server process started but never completed the MCP handshake)"
+        )
+    text = str(exc).strip()
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
 
 
 def _jsonrpc_line_decoder() -> Any:

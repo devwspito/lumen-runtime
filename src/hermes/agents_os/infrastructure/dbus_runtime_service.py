@@ -7896,8 +7896,14 @@ async def reconnect_persisted_mcp_servers(manager) -> None:
             # SKIPPED. It must NEVER re-warm the cache here: a download in the boot path
             # blocks the daemon from becoming ready → the UI shows "agente no disponible".
             # Cache delivery on upgrade is handled OUT of the boot path (post-ready).
+            # La CLASE de la excepción va explícita: un `TimeoutError()` desnudo
+            # tiene `str()` vacío y esta línea salía muda (terminaba en ": ").
+            # El traceback completo solo cuando el logger está en DEBUG — en
+            # INFO un seed que no conecta es una línea, no un muro.
             logger.warning(
-                "hermes.dbus.mcp_reconnect_failed server=%s: %s", sid, exc
+                "hermes.dbus.mcp_reconnect_failed server=%s: %s: %s",
+                sid, type(exc).__name__, exc,
+                exc_info=logger.isEnabledFor(logging.DEBUG),
             )
 
 

@@ -25,7 +25,8 @@ el mensaje vacío.
 
 Cobertura:
   (a) `_jsonrpc_line_decoder` decodifica con las DOS formas de JSONRPCMessage.
-  (b) handshake real (initialize + tools/list) sobre pipes de verdad, a través
+  (b) un fallo de handshake nunca produce un mensaje vacío.
+  (c) handshake real (initialize + tools/list) sobre pipes de verdad, a través
       de `_wire_launcher_streams` + `_start_session_owner` — el mismo camino de
       código que usa producción con los fds que llegan por SCM_RIGHTS.
 """
@@ -208,3 +209,89 @@ class TestLauncherBridgeHandshake:
         y éste es el de extremo a extremo por el camino real del launcher."""
         tools = asyncio.run(_handshake_over_pipes())
         assert [t["name"] for t in tools] == ["read_workbook", "write_cell"]
+
+
+# ---------------------------------------------------------------------------
+# (b) el mensaje de fallo nunca es mudo
+# ---------------------------------------------------------------------------
+
+
+class TestHandshakeFailureIsNeverMute:
+    """Un `TimeoutError()` desnudo tiene `str()` == "" — interpolarlo dejaba la
+    línea `hermes.dbus.mcp_reconnect_failed server=excel: ...:` sin decir NADA,
+    ni siquiera la clase. Eso, por sí solo, es un bug de diagnóstico."""
+
+    def test_bare_timeout_error_names_itself_and_the_budget(self) -> None:
+        from hermes.mcp.infrastructure.stdio_mcp_client import (
+            _describe_handshake_failure,
+        )
+
+        described = _describe_handshake_failure(TimeoutError(), 120.0)
+        assert described.startswith("TimeoutError:")
+        assert "120s" in described
+        assert "handshake" in described
+
+    def test_exception_without_message_still_names_its_class(self) -> None:
+        from hermes.mcp.infrastructure.stdio_mcp_client import (
+            _describe_handshake_failure,
+        )
+
+        assert _describe_handshake_failure(RuntimeError(), 30.0) == "RuntimeError"
+
+    def test_exception_with_message_keeps_both_class_and_message(self) -> None:
+        from hermes.mcp.infrastructure.stdio_mcp_client import (
+            _describe_handshake_failure,
+        )
+
+        described = _describe_handshake_failure(ValueError("Connection closed"), 30.0)
+        assert described == "ValueError: Connection closed"
+
+    def test_launcher_handshake_timeout_surfaces_a_non_empty_error(self) -> None:
+        """De extremo a extremo por el camino del launcher: un servidor que
+        arranca pero NUNCA contesta al initialize tiene que producir un
+        McpConnectionError legible, no uno acabado en dos puntos."""
+        from hermes.mcp.application.errors import McpConnectionError
+        from hermes.mcp.infrastructure.stdio_mcp_client import (
+            _describe_handshake_failure,
+        )
+
+        client_read_fd, server_out_fd = os.pipe()
+        server_in_fd, client_write_fd = os.pipe()
+        # Servidor mudo: se traga lo que le llega y no contesta jamás. Cierra su
+        # extremo de escritura al salir para que el pump de lectura vea EOF (si
+        # no, su hilo bloqueante sobreviviría al bucle de eventos).
+        stop = threading.Event()
+
+        def _mute_server() -> None:
+            with os.fdopen(server_in_fd, "rb", buffering=0) as rf:
+                while not stop.is_set():
+                    if not rf.read(1):
+                        break
+            os.close(server_out_fd)
+
+        thread = threading.Thread(target=_mute_server, daemon=True)
+        thread.start()
+        client = _make_client(timeout_sec=0.5)
+        client._launcher_read_fd = client_read_fd
+        client._launcher_write_fd = client_write_fd
+
+        async def _run() -> None:
+            streams = client._wire_launcher_streams(client_read_fd, client_write_fd)
+            try:
+                await client._start_session_owner(streams=streams)
+            except Exception as exc:  # noqa: BLE001 — se re-envuelve como en producción
+                raise McpConnectionError(
+                    "StdioMcpClient: handshake failed via launcher for "
+                    "['uvx', 'excel-mcp-server', 'stdio']: "
+                    + _describe_handshake_failure(exc, client._timeout_sec)
+                ) from exc
+            finally:
+                stop.set()
+                await client.close()
+
+        with pytest.raises(McpConnectionError) as caught:
+            asyncio.run(_run())
+        thread.join(timeout=5.0)
+        message = str(caught.value)
+        assert not message.rstrip().endswith(":"), message
+        assert "TimeoutError: no initialize() response in 0.5s" in message
