@@ -92,7 +92,7 @@ class TaskStreamPort:
     async def frames(self) -> AsyncIterator[StreamFrame]:
         """Yield StreamFrames until the stream ends or the connection is cut."""
         raise NotImplementedError  # pragma: no cover
-        yield  # make this a generator type  # noqa: unreachable
+        yield  # make this a generator type (unreachable, but defines the return type)
 
 
 # ---------------------------------------------------------------------------

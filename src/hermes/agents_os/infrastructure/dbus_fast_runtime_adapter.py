@@ -1680,16 +1680,16 @@ class Runtime1ServiceInterface(ServiceInterface):
         return json.dumps(self._wiring.list_recent_scans(limit=int(limit) or 50))
 
     @method()
-    async def RecordInstallDecision(  # noqa: N802,F821,UP037
+    async def RecordInstallDecision(  # noqa: N802
         self,
-        scan_id: "s",
-        decision: "s",
-        identifier: "s",
-        kind: "s",
-        score: "i",
-        verdict: "s",
-        risks_json: "s",
-    ) -> "s":
+        scan_id: "s",  # noqa: F821,UP037
+        decision: "s",  # noqa: F821,UP037
+        identifier: "s",  # noqa: F821,UP037
+        kind: "s",  # noqa: F821,UP037
+        score: "i",  # noqa: F821,UP037
+        verdict: "s",  # noqa: F821,UP037
+        risks_json: "s",  # noqa: F821,UP037
+    ) -> "s":  # noqa: F821,UP037
         """Persiste la decisión del usuario (allow/block/cancelled/installed).
         Muta → authZ por sender_uid del bus (CWE-862).
         Devuelve JSON {ok, error?}.
