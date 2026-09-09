@@ -1,0 +1,29 @@
+# caps.yaml — topes duros de ads-broker para el companion preinstalado
+# (024). provision.sh copia esta plantilla a $STATE/caps.yaml la primera
+# vez y nunca la vuelve a tocar. Fail-closed por diseño (ver
+# src/safent_ads/broker/infrastructure/caps_config.py en el repo safent-ads):
+# una cuenta SIN entrada bajo `accounts:` no tiene ninguna escritura
+# autorizada, así que `accounts: {}` es el estado inicial correcto, no uno
+# a medio configurar.
+#
+# Para autorizar una cuenta real, añade una entrada por cada
+# platform_account_id (el id de cuenta en Google Ads o Meta Ads, no un
+# nombre interno), en céntimos:
+#
+#   accounts:
+#     "1234567890":
+#       daily_cap_minor: 10000      # 100,00 EUR/día
+#       monthly_cap_minor: 300000   # 3000,00 EUR/mes
+#       floor_minor: 500            # 5,00 EUR/día  — nunca bajar de aquí en solitario
+#       ceiling_minor: 50000        # 500,00 EUR/día — nunca subir de aquí en solitario
+#       # max_step_pct / max_changes_per_day / autonomy_enabled son opcionales
+#       # por cuenta: si se omiten, se toman de `defaults` de abajo.
+#
+# NUNCA subir `autonomy_enabled` a `true` (ni en `defaults` ni por cuenta)
+# sin haber confirmado esa decisión con el dueño del negocio.
+defaults:
+  max_step_pct: 30
+  max_changes_per_day: 2
+  autonomy_enabled: false
+
+accounts: {}

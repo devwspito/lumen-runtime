@@ -15,12 +15,33 @@ porque es lo que `podman machine` comparte con la VM en Mac):
 2. Si no existe `tls/ca.crt`: CA ECDSA P-256 (10 años) + hoja para `SAN DNS:ads.safent.internal`
    (825 días). Claves `0600` del usuario. `ca.fingerprint` = SHA-256 del DER.
 3. Si no existe `bearer`: `openssl rand -hex 32`, `0400`.
-4. Escribe `secrets/api.env` del companion (`ADS_MCP_TOKEN`, rutas TLS) y `companions.json`.
-5. `podman compose -p safent-ads -f ops/container/companions/ads/compose.yaml up -d`.
-   Ese compose es **nuestro**, no el de desarrollo del repo de ads: fija tag de imagen,
-   `ipv4_address: 10.201.0.10`, monta la hoja TLS y el bearer, y **no publica** ningún puerto
-   salvo el panel en `127.0.0.1:8443` para el humano.
-6. Espera a `GET https://10.201.0.10:8443/mcp/health` con `--cacert` (timeout 60 s).
+4. Escribe `companions.json` (0444, `chown root:root` si hay privilegios).
+5. Descarga `SAFENT_ADS_IMAGE` (por defecto `ghcr.io/devwspito/safent-ads:latest` — el
+   artefacto de release del dueño; override a `safent-ads:local` para desarrollo) **solo si
+   no está ya en local**. Nunca la construye aquí (nada de `podman build`, no hay publicación
+   desde una máquina de desarrollador).
+6. La primera vez (marcador: `secrets/api.env` ausente), genera y escribe **una sola vez**,
+   `0600`, sin volver a tocarlos nunca: `secrets/api.env` (`ADS_MCP_TOKEN` = el bearer del
+   paso 3, `ADS_SESSION_SECRET`, `ADS_TOTP_ENC_KEY`, `ADS_APPROVAL_SIGNING_KEY`) y
+   `secrets/broker.env` (`ADS_APPROVAL_PUBLIC_KEY`, `ADS_CREDENTIAL_MASTER_KEY`,
+   `ADS_BROKER_ALLOWED_UIDS=10001`, `ADS_BROKER_HARD_CAPS_FILE`, `ADS_CREDENTIAL_STORE_DIR`,
+   `ADS_BROKER_SOCKET`). El par de aprobación sale de `python -m safent_ads.tools.gen_keys`
+   ejecutado dentro de la propia imagen (`--network none`). Si existe `$STATE/vendor.env`
+   (credenciales de la MCC de Google / app de Meta del propio Safent, puestas a mano por el
+   dueño), sus líneas `GOOGLE_ADS_*`/`META_*` se incorporan a `broker.env` en **cada**
+   ejecución sin duplicar claves — así el dueño puede añadirlas después del primer arranque.
+7. La primera vez (marcador: `caps.yaml` ausente), copia
+   `ops/container/companions/ads/caps.template.yaml` a `$STATE/caps.yaml` (0644): topes por
+   defecto de `spec.md §15 D-A1` y `accounts: {}` — fail-closed, ninguna cuenta autorizada
+   hasta que el dueño añada su `platform_account_id` real a mano.
+8. `podman compose -p safent-ads -f ops/container/companions/ads/compose.yaml up -d`.
+   Ese compose es **nuestro**, no el de desarrollo del repo de ads: fija la imagen del paso 5,
+   `ipv4_address: 10.201.0.10`, monta la hoja TLS y `caps.yaml` de solo lectura, y **no
+   publica** ningún puerto salvo el panel en `127.0.0.1:8443` para el humano.
+9. Espera a `GET https://ads.safent.internal:8443/mcp/health` (con `--cacert` la CA propia y
+   `--resolve` fijado a la IP, sin depender de que este HOST resuelva ese nombre) hasta 60 s;
+   un `401` sin bearer ya prueba que el companion está vivo (el endpoint exige bearer). Fail-
+   soft: si no responde, Safent arranca igual (FR-3).
 
 ### 1.2 Arranque de Safent
 
@@ -174,11 +195,20 @@ sobre dinero. Cambia el contrato externo del bundle, así que va al dueño, no s
 | `ops/agents-os-edition/netns/mcp-host.nft`, `mcp-ns.nft` | `include` del glob, antes del drop | 4 |
 | `ops/agents-os-edition/scripts/hermes-companion-nft` | **nuevo** generador de reglas + `/etc/hosts` | 90 |
 | `ops/agents-os-edition/systemd/hermes-companion-egress.service` | **nueva** oneshot | 25 |
-| `ops/container/Containerfile` | COPY de los dos ficheros nuevos | 3 |
-| `ops/container/companions/ads/compose.yaml` | **nuevo** compose fijado | 70 |
-| `ops/container/companions/ads/provision.sh` | **nuevo** red + CA + bearer + up + wait | 150 |
-| `ops/container/run-safent.sh` | fase companion, `--network`, 3 binds, `--no-companion` | 40 |
-| `safent` (CLI) | `companion status\|update\|rotate\|remove`; `cmd_update` re-provisiona | 70 |
+| `ops/container/Containerfile` | COPY de `ops/container/companions/ads/` al lado del seccomp | 4 |
+| `ops/container/companions/ads/compose.yaml` | compose fijado: entrypoints reales, TLS, `deploy.replicas: 1`, `caps.yaml` bind, `credential-store` | 183 |
+| `ops/container/companions/ads/provision.sh` | red + CA + bearer + imagen + secretos (api.env/broker.env) + caps.yaml + up + wait `/mcp/health` | 259 |
+| `ops/container/companions/ads/caps.template.yaml` | **nueva** plantilla de topes duros (fail-closed, `accounts: {}`) | 29 |
+| `ops/container/run-safent.sh` | fase companion, `--network`, 3 binds, `--no-companion`, `SAFENT_ADS_IMAGE` de conveniencia en dev | 45 |
+| `safent` (CLI) | fase companion antes de `_run` (fetch image→raw→caché igual que el seccomp), `--no-companion`, `uninstall` hace `compose down` + borra la red | 105 |
+| `tests/unit/ops/test_companion_provision.py` | **nuevo** — extremo a extremo de `provision.sh` contra estado temporal, podman/curl fingidos | 283 |
+
+Pendiente, NO implementado en esta pasada (fuera del alcance de esta corrección — el CLI sólo
+gana la fase de aprovisionamiento antes de `_run`/`uninstall`, no subcomandos nuevos):
+`safent companion status\|update\|rotate\|remove` como comandos de primer nivel. Hoy
+`safent update` re-provisiona el companion como efecto lateral de recrear el contenedor (llama
+a `_run`, que llama a `_provision_companion`), pero no hay un comando dedicado a
+inspeccionar/rotar/eliminar sólo el companion sin tocar Safent.
 | `src/hermes/shell_server/cowork/mcp_api.py` | estado en el listado; `PUT managed-remote-endpoints/safent-ads` → 409 si hay companion | 25 |
 | `frontend/src/views/McpView.tsx` | badge de estado, oculta el campo URL (**frontend-engineer**) | 40 |
 

@@ -121,6 +121,15 @@ fi
 COMPANION_STATE="${SAFENT_COMPANION_STATE:-$HOME/.safent/companions/ads}"
 COMPANION_RUN_ARGS=()
 if [ "$NO_COMPANION" -eq 0 ]; then
+  # Dev convenience, simplest rule: if SAFENT_ADS_IMAGE is unset AND a
+  # locally-built safent-ads:local already exists on this host (the
+  # historical dev workflow — build the ads image by hand, no publishing
+  # from a developer machine involved), use it; otherwise leave it unset so
+  # provision.sh falls back to its own default, the published
+  # ghcr.io/devwspito/safent-ads:latest release.
+  if [ -z "${SAFENT_ADS_IMAGE:-}" ] && "$RUNTIME" image inspect safent-ads:local >/dev/null 2>&1; then
+    export SAFENT_ADS_IMAGE=safent-ads:local
+  fi
   if "$HERE/companions/ads/provision.sh"; then
     COMPANION_RUN_ARGS=(
       --network safent-companions

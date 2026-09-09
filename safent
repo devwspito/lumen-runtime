@@ -16,7 +16,7 @@ set -e
 # Monotonic CLI revision. `safent update` self-updates this script from CLI_URL
 # when the published revision is HIGHER (never downgrades). Bump on every CLI
 # change or the fix will not reach installed machines.
-_CLI_REV=6
+_CLI_REV=7
 
 # ONE runtime image for both community and associate (paired) operation. The
 # image carries no edition-specific code: pairing state (the .enterprise marker +
@@ -38,6 +38,21 @@ SECCOMP_DIR="${HOME:-/tmp}/.safent"
 SECCOMP="$SECCOMP_DIR/safent-seccomp.json"
 # Where `safent update` fetches the newest CLI from (same source the installer uses).
 CLI_URL="${SAFENT_CLI_URL:-https://raw.githubusercontent.com/devwspito/safent-runtime/main/safent}"
+
+# safent-ads companion (024) — preinstalled MCP campaign tools (Google/Meta).
+# State (network config, TLS, secrets) lives under $STATE, same default
+# run-safent.sh uses; the ops/ scripts that provision it are fetched into
+# $COMPANION_BIN_DIR the same three-tier way _ensure_seccomp gets the
+# seccomp profile below (image > raw GitHub > cache), so there is exactly
+# ONE implementation of provisioning, never a copy embedded in this CLI.
+COMPANION_STATE="${SAFENT_COMPANION_STATE:-$HOME/.safent/companions/ads}"
+COMPANION_BIN_DIR="${HOME:-/tmp}/.safent/companions/ads/bin"
+COMPANION_RAW_BASE="${SAFENT_COMPANION_URL_BASE:-https://raw.githubusercontent.com/devwspito/safent-runtime/main/ops/container/companions/ads}"
+COMPANION_RUN_ARGS=""
+NO_COMPANION=0
+case "${1:-}" in
+  --no-companion) NO_COMPANION=1; shift ;;
+esac
 
 # GUI-launched contexts hand this script a MINIMAL PATH: a launchd LaunchAgent (the
 # `safent agent` update watcher) and a Finder-launched .app both run with roughly
@@ -121,11 +136,58 @@ _ensure_seccomp() {
   exit 1
 }
 
+# Fetch ONE companion file ($1: provision.sh / compose.yaml / caps.template.yaml)
+# into $COMPANION_BIN_DIR, same three-tier fallback as _ensure_seccomp: image
+# (version-matched, no network) > raw GitHub (retried) > cached copy. Always
+# left executable (harmless for the two YAML files, required for provision.sh).
+_fetch_companion_file() {
+  _cf_name="$1"
+  _cf_dst="$COMPANION_BIN_DIR/$_cf_name"
+  if "$RTN" run --rm --entrypoint cat "$(_image)" \
+       "/usr/share/hermes/companions/ads/$_cf_name" > "$_cf_dst.tmp" 2>/dev/null && [ -s "$_cf_dst.tmp" ]; then
+    mv "$_cf_dst.tmp" "$_cf_dst"; chmod 0755 "$_cf_dst"; return 0
+  fi
+  rm -f "$_cf_dst.tmp" 2>/dev/null || true
+  if curl -fsSL --retry 3 --retry-delay 2 "$COMPANION_RAW_BASE/$_cf_name" -o "$_cf_dst.tmp" 2>/dev/null && [ -s "$_cf_dst.tmp" ]; then
+    mv "$_cf_dst.tmp" "$_cf_dst"; chmod 0755 "$_cf_dst"; return 0
+  fi
+  rm -f "$_cf_dst.tmp" 2>/dev/null || true
+  if [ -s "$_cf_dst" ]; then
+    chmod 0755 "$_cf_dst" 2>/dev/null || true
+    return 0
+  fi
+  return 1
+}
+
+# Provision the safent-ads companion (024) BEFORE _run: companions.json has
+# to exist for the read-only bind _run adds. Mirrors run-safent.sh's own
+# companion phase exactly — same provision.sh, fetched rather than shipped a
+# second time in this CLI. NEVER fatal to Safent's own boot (FR-3): any
+# failure here just leaves COMPANION_RUN_ARGS empty and _run starts without
+# --network/the companion binds, same as --no-companion.
+_provision_companion() {
+  COMPANION_RUN_ARGS=""
+  [ "$NO_COMPANION" -eq 0 ] || return 0
+  mkdir -p "$COMPANION_BIN_DIR" 2>/dev/null || true
+  for _cf in provision.sh compose.yaml caps.template.yaml; do
+    _fetch_companion_file "$_cf" || {
+      echo "[!] Companion: could not obtain $_cf — starting Safent without it." >&2
+      return 0
+    }
+  done
+  if "$COMPANION_BIN_DIR/provision.sh"; then
+    COMPANION_RUN_ARGS="--network safent-companions -v ${COMPANION_STATE}/companions.json:/etc/hermes/companions.json:ro -v ${COMPANION_STATE}/tls/ca.crt:/etc/hermes/companions/ads-ca.crt:ro -v ${COMPANION_STATE}/bearer:/etc/hermes/companions/ads.bearer:ro"
+  else
+    echo "[!] Companion provisioning failed — starting Safent without it (FR-3)." >&2
+  fi
+}
+
 # Recreate the container with the hardened cage (loopback + min caps + seccomp).
 # Uses _image() (single runtime image, paired or not).
 _run() {
   _ensure_machine
   _ensure_seccomp
+  _provision_companion
   _active_image="$(_image)"
   "$RT" rm -f "$NAME" >/dev/null 2>&1 || true
   if [ -n "$PORT_PIN" ]; then publish="127.0.0.1:${PORT_PIN}:7517"; else publish="127.0.0.1::7517"; fi
@@ -139,6 +201,7 @@ _run() {
     -v /sys/kernel/security:/sys/kernel/security:ro \
     -v "$DATA_VOLUME":/var/lib/hermes \
     --shm-size=1g \
+    $COMPANION_RUN_ARGS \
     "$_active_image" >/dev/null
 }
 
@@ -463,12 +526,37 @@ cmd_agent() {
   done
 }
 
-# Remove Safent from the machine: the container, its data volume, the seccomp cache,
-# the UI-update agent, and the CLI itself. Leaves podman/docker installed (they are
-# general tools you may use elsewhere). Triggerable from the UI (POST /system/uninstall
-# → marker → the agent runs this) or by hand: `safent uninstall`.
+# Tear down the safent-ads companion (024): compose down its four services
+# and remove the fixed network, using the SAME cached compose.yaml
+# provisioning used to start it (nothing rebuilt here). Best-effort — a
+# companion that was never provisioned (no cached compose.yaml) is a no-op.
+# $STATE itself (TLS, secrets, caps.yaml) is NOT touched here: it is removed
+# below by the same `rm -rf "$SECCOMP_DIR"` that already wipes every other
+# piece of local Safent state (there is no partial-uninstall mode in this
+# CLI today — see cmd_uninstall's own doc comment).
+_uninstall_companion() {
+  [ -f "$COMPANION_BIN_DIR/compose.yaml" ] || return 0
+  echo "[*] Removing the safent-ads companion…"
+  SAFENT_STATE="$COMPANION_STATE"
+  SAFENT_ADS_IMAGE="${SAFENT_ADS_IMAGE:-ghcr.io/devwspito/safent-ads:latest}"
+  if [ -f "$COMPANION_STATE/pg_password" ]; then
+    ADS_POSTGRES_PASSWORD="$(cat "$COMPANION_STATE/pg_password" 2>/dev/null || true)"
+  else
+    ADS_POSTGRES_PASSWORD="unused-for-down"
+  fi
+  export SAFENT_STATE SAFENT_ADS_IMAGE ADS_POSTGRES_PASSWORD
+  "$RT" compose -p safent-ads -f "$COMPANION_BIN_DIR/compose.yaml" down >/dev/null 2>&1 || true
+  "$RT" network rm safent-companions >/dev/null 2>&1 || true
+}
+
+# Remove Safent from the machine: the container, the companion, its data
+# volume, the seccomp cache, the UI-update agent, and the CLI itself. Leaves
+# podman/docker installed (they are general tools you may use elsewhere).
+# Triggerable from the UI (POST /system/uninstall → marker → the agent runs
+# this) or by hand: `safent uninstall`.
 cmd_uninstall() {
   echo "[*] Uninstalling Safent…"
+  _uninstall_companion
   "$RT" rm -f "$NAME" >/dev/null 2>&1 || true
   "$RT" volume rm "$DATA_VOLUME" >/dev/null 2>&1 || true
   rm -rf "$SECCOMP_DIR" 2>/dev/null || true
@@ -503,6 +591,10 @@ safent - control your local Safent
   safent pair <code>   associate with an enterprise tenant (same image, associate mode)
   safent unpair        remove the enterprise association (reverts to community edition)
   safent uninstall     remove Safent (container + data + CLI + agent; keeps podman/docker)
+
+  --no-companion    FIRST argument, any command: skip provisioning/joining the
+                     preinstalled Safent Ads companion (MCP campaign tools).
+                     A failed provisioning attempt never blocks Safent itself.
 EOF
 }
 
