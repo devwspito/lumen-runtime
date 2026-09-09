@@ -28,6 +28,7 @@ from uuid import UUID, uuid4
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from hermes import __version__ as HERMES_VERSION
 from hermes.shell_server.providers.domain import (
     ProviderKind,
     new_provider,
@@ -44,6 +45,17 @@ _DB_PATH = Path(
         "/var/lib/hermes/shell-state.db",
     )
 )
+
+
+def _healthz_payload() -> dict[str, Any]:
+    # Pure so it's unit-testable without the full create_app() bootstrap
+    # (SecretsVault needs a baked /var/lib/hermes/master.key, absent in dev/CI).
+    return {
+        "status": "ok",
+        "service": "hermes-shell-server",
+        "version": HERMES_VERSION,
+        "ts": datetime.now(tz=UTC).isoformat(),
+    }
 
 
 # ============================================================
@@ -918,12 +930,7 @@ def create_app() -> FastAPI:
 
     @app.get("/healthz")
     async def healthz() -> dict[str, Any]:
-        return {
-            "status": "ok",
-            "service": "hermes-shell-server",
-            "version": "0.4.0",
-            "ts": datetime.now(tz=UTC).isoformat(),
-        }
+        return _healthz_payload()
 
     @app.get("/api/v1/profile")
     async def profile() -> dict[str, Any]:
