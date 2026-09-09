@@ -101,6 +101,14 @@ class TestKindToNativeTarget:
         assert t.provider_id == "nous"
         assert t.env_var == ""
 
+    def test_codex_maps_to_openai_codex_with_api_key_fallback(self) -> None:
+        """CODEX is OAuth-first (item 4) but keeps OPENAI_API_KEY as an
+        explicit fallback (plan.md D-A4) — UNLIKE NOUS, env_var is NOT empty."""
+        t = kind_to_native_target(ProviderKind.CODEX)
+        assert t.provider_id == "openai-codex"
+        assert t.env_var == "OPENAI_API_KEY"
+        assert t.needs_base_url is False
+
     def test_qwen_dashscope_maps_to_alibaba(self) -> None:
         t = kind_to_native_target(ProviderKind.QWEN_DASHSCOPE)
         assert t.provider_id == "alibaba"

@@ -189,6 +189,23 @@ _CATALOG: dict[ProviderKind, CanonicalProvider] = {
         hermes_cli_slug="nous",
         route=_REG,
     ),
+    # OpenAI Codex / ChatGPT (suscripción): device-code flow — credentials
+    # persist via hermes_cli.auth._save_codex_tokens (HERMES_HOME auth-store),
+    # same shape as NOUS. REGISTERED_SLUG with hermes_cli_slug="openai-codex"
+    # (confirmed against dbus_runtime_service._codex_oauth_worker's own
+    # _write_hermes_model_config("openai-codex", ...) call, and against
+    # _read_native_active()'s PROVIDER_REGISTRY.get(pid) lookup — both already
+    # use this exact slug string). plan.md D-A4: default gpt-6-astra, with
+    # OPENAI_API_KEY as an explicit, owner-approved fallback (see
+    # native_sync.py — unlike NOUS, this kind KEEPS an env_var).
+    ProviderKind.CODEX: CanonicalProvider(
+        litellm_prefix="openai-codex",
+        hermes_cli_slug="openai-codex",
+        route=_REG,
+        label="OpenAI Codex / ChatGPT (suscripción)",
+        default_model="gpt-6-astra",
+        alternative_models=("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"),
+    ),
 }
 
 # Verify at module load time that every ProviderKind has an entry.

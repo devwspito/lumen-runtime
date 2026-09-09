@@ -46,6 +46,12 @@ class CanonicalProvider:
         requires_base_url: True if the provider MUST have a base_url configured.
         default_base_url: Canonical endpoint for EXPLICIT_OPENAI_COMPAT providers.
             None for providers where hermes_cli resolves the endpoint itself.
+        label: OPTIONAL owner-facing display name (Settings provider picker).
+            None for kinds that don't need one here (the UI has its own
+            labels today) — only CODEX sets this so far.
+        default_model: OPTIONAL suggested default model id for this kind.
+        alternative_models: OPTIONAL suggested alternative model ids, in the
+            order they should be offered.
     """
 
     litellm_prefix: str
@@ -53,3 +59,6 @@ class CanonicalProvider:
     route: HermesCliRoute
     requires_base_url: bool = False
     default_base_url: str | None = None
+    label: str | None = None
+    default_model: str | None = None
+    alternative_models: tuple[str, ...] = ()

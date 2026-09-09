@@ -6,12 +6,48 @@
 # bare `docker run`. See SECURITY.md for what each flag enforces and the host
 # requirements (a Landlock-capable kernel).
 #
-#   ./run-safent.sh [IMAGE] [HOST_PORT]
+#   ./run-safent.sh [IMAGE] [HOST_PORT] [--codex-auth <path-to-auth.json>]
 #
+# --codex-auth <path>: OPTIONAL. Bind-mounts an EXISTING, host-side OpenAI
+#   Codex CLI auth.json (from a `codex login` the owner already did on the
+#   HOST) read-only into the container's CODEX_HOME, so the OPT-IN
+#   `codex_app_server` runtime (hermes-agent 0.15.1, agent/transports/
+#   codex_app_server.py — spawns the REAL `codex` binary, which reads
+#   CODEX_HOME/auth.json itself) can reuse that session without a second
+#   login. This is NOT the primary Codex auth path — the owner normally
+#   authenticates the SUBSCRIPTION device-code flow from inside Safent's own
+#   UI (Settings -> Providers -> OpenAI Codex; dbus_runtime_service.py's
+#   _codex_oauth_worker), which needs no container flag at all.
 set -euo pipefail
 
-IMAGE="${1:-ghcr.io/devwspito/safent:latest}"
-HOST_PORT="${2:-17517}"
+IMAGE="ghcr.io/devwspito/safent:latest"
+HOST_PORT="17517"
+CODEX_AUTH_PATH=""
+_positional_index=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --codex-auth)
+      [ $# -ge 2 ] || { echo "--codex-auth requires a path"; exit 1; }
+      CODEX_AUTH_PATH="$2"
+      shift 2
+      ;;
+    --codex-auth=*)
+      CODEX_AUTH_PATH="${1#*=}"
+      shift
+      ;;
+    *)
+      case "$_positional_index" in
+        0) IMAGE="$1" ;;
+        1) HOST_PORT="$1" ;;
+        *) echo "unexpected argument: $1"; exit 1 ;;
+      esac
+      _positional_index=$((_positional_index + 1))
+      shift
+      ;;
+  esac
+done
+
 NAME="${SAFENT_NAME:-safent}"
 RUNTIME="$(command -v podman || command -v docker)"
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -19,6 +55,19 @@ SECCOMP="${SAFENT_SECCOMP:-$HERE/seccomp/safent.json}"
 
 [ -n "$RUNTIME" ] || { echo "need podman or docker"; exit 1; }
 [ -f "$SECCOMP" ] || { echo "seccomp profile not found: $SECCOMP"; exit 1; }
+
+# CODEX_HOME lives inside the ALREADY-mounted safent-data volume (HERMES_HOME
+# is /var/lib/hermes/hermes-home — see ops/agents-os-edition/systemd/hermes-
+# runtime.service) so it persists across image updates like every other
+# credential. Read-only: the container never writes back to the host's file.
+CODEX_AUTH_MOUNT=()
+if [ -n "$CODEX_AUTH_PATH" ]; then
+  [ -f "$CODEX_AUTH_PATH" ] || { echo "codex auth file not found: $CODEX_AUTH_PATH"; exit 1; }
+  CODEX_AUTH_MOUNT=(
+    -v "${CODEX_AUTH_PATH}:/var/lib/hermes/hermes-home/.codex/auth.json:ro"
+    -e "CODEX_HOME=/var/lib/hermes/hermes-home/.codex"
+  )
+fi
 
 "$RUNTIME" rm -f "$NAME" >/dev/null 2>&1 || true
 
@@ -82,4 +131,5 @@ exec "$RUNTIME" run -d --name "$NAME" --systemd=always \
   -v /sys/kernel/security:/sys/kernel/security:ro \
   -v safent-data:/var/lib/hermes \
   --shm-size=1g \
+  ${CODEX_AUTH_MOUNT[@]+"${CODEX_AUTH_MOUNT[@]}"} \
   "$IMAGE"

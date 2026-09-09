@@ -52,6 +52,13 @@ class ProviderKind(StrEnum):
     # el auth-store de hermes_cli bajo HERMES_HOME, no en el vault: el row del
     # provider lleva has_api_key=False y la resolución va por REGISTERED_SLUG.
     NOUS = "nous"
+    # OpenAI Codex / ChatGPT (suscripción) — OAuth device-code igual que NOUS
+    # (dbus_runtime_service._codex_oauth_worker ya implementa el flujo y fija
+    # config.yaml directamente), PERO admite un OPENAI_API_KEY opcional como
+    # respaldo (plan.md D-A4) — a diferencia de NOUS, native_sync SÍ declara un
+    # env_var para este kind, así que un provider row añadido con api_key vía
+    # el Settings genérico también activa el camino nativo (ver native_sync.py).
+    CODEX = "openai_codex"
 
 
 # Mapping ProviderKind -> default LiteLLM model prefix.
@@ -83,6 +90,10 @@ LITELLM_PREFIX: dict[ProviderKind, str] = {
     # api.openai.com). litellm no entiende "nous/" pero ese engine es fallback
     # no usado (HERMES_ENGINE=nous); la resolución correcta del slug manda.
     ProviderKind.NOUS: "nous",
+    # Same reasoning as NOUS above: a distinct prefix so it never collides
+    # with plain "openai" (which would route to api.openai.com instead of
+    # the ChatGPT-subscription OAuth path).
+    ProviderKind.CODEX: "openai-codex",
 }
 
 

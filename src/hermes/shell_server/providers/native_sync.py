@@ -70,6 +70,12 @@ _KIND_MAP: dict[ProviderKind, tuple[str, str, str, bool]] = {
     ProviderKind.MOONSHOT:         ("kimi-coding",  "KIMI_API_KEY",      "KIMI_BASE_URL",      False),
     # NOUS: OAuth path — env_var intentionally empty (caller skips key-write)
     ProviderKind.NOUS:             ("nous",         "",                  "",                   False),
+    # CODEX: OAuth-first (device-code, see dbus_runtime_service._codex_oauth_
+    # worker), but plan.md D-A4 keeps OPENAI_API_KEY as an explicit, owner-
+    # approved fallback — UNLIKE NOUS, env_var is NOT empty, so a Codex
+    # provider row added with an api_key still activates via the generic
+    # _sync_to_native_provider path (same key-write branch as OPENAI).
+    ProviderKind.CODEX: ("openai-codex", "OPENAI_API_KEY", "", False),
     #
     # OpenAI-compatible kinds without a dedicated PROVIDER_REGISTRY entry:
     # map to openai-api + base_url (the user's base_url is the endpoint pointer).

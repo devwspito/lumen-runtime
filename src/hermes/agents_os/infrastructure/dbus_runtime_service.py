@@ -6075,7 +6075,12 @@ def _codex_oauth_worker(session_id: str) -> None:
             "access_token": tokens["access_token"],
             "refresh_token": tokens.get("refresh_token", ""),
         })
-        _write_hermes_model_config("openai-codex", "gpt-5-codex")
+        # Default model comes from the catalog (single source of truth, item 4 /
+        # plan.md D-A4) rather than a second hardcoded literal here.
+        from hermes.providers.domain.catalog import canonical_for  # noqa: PLC0415
+        from hermes.shell_server.providers.domain import ProviderKind  # noqa: PLC0415
+        _codex_default_model = canonical_for(ProviderKind.CODEX).default_model or "gpt-6-astra"
+        _write_hermes_model_config("openai-codex", _codex_default_model)
         with _OAUTH_SESSIONS_LOCK:
             _OAUTH_SESSIONS[session_id]["status"] = "approved"
         logger.info("hermes.dbus.oauth_codex_approved session=%s", session_id[:8])
