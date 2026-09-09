@@ -221,6 +221,11 @@ COPY ops/agents-os-edition/seccomp/chromium-browser.json /usr/share/hermes/secco
 # (version-matched) instead of fetching it over the network at every start — the
 # download-only path bricked `safent update` on any transient GitHub hiccup.
 COPY ops/container/seccomp/safent.json /usr/share/hermes/seccomp/safent.json
+# safent-ads companion provisioning (024) — same reasoning as the seccomp
+# profile above: the CLI extracts provision.sh/compose.yaml/caps.template.yaml
+# from the image (version-matched, no network) before falling back to
+# raw.githubusercontent.com.
+COPY ops/container/companions/ads/ /usr/share/hermes/companions/ads/
 
 # ── Egress blocklist (hagezi "light" — bundled at build time) ─────────────────
 # Proxy reads /usr/share/hermes/egress-blocklist.txt at boot and applies it as an

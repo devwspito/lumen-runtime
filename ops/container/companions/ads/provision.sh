@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # provision.sh — one-time-idempotent host-side provisioning of the safent-ads
 # companion (024, plan.md §1.1). Invoked by run-safent.sh BEFORE the Safent
-# container starts, and by `safent update` on every re-provision.
+# container starts, and by the `safent` CLI on every run/update.
 #
 # Product constants (spec.md §7) — NEVER re-chosen at runtime. If the subnet
 # or port is already taken on this host, provisioning FAILS LOUD and Safent
@@ -15,6 +15,12 @@ readonly COMPANION_IP="10.201.0.10"
 readonly COMPANION_PORT="8443"
 readonly COMPANION_HOST="ads.safent.internal"
 readonly COMPANION_NETWORK="safent-companions"
+# The image is the OWNER'S release artifact (ghcr.io/devwspito/safent-ads),
+# published by the ads team's own pipeline — never built here (no publishing
+# from a developer machine). Override for local dev with
+# SAFENT_ADS_IMAGE=safent-ads:local (run-safent.sh does this automatically
+# when that image already exists locally — see its own comment).
+readonly SAFENT_ADS_IMAGE="${SAFENT_ADS_IMAGE:-ghcr.io/devwspito/safent-ads:latest}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE="${SAFENT_COMPANION_STATE:-$HOME/.safent/companions/ads}"
@@ -22,7 +28,7 @@ RUNTIME="$(command -v podman || command -v docker)"
 [ -n "$RUNTIME" ] || { echo "provision.sh: need podman or docker" >&2; exit 1; }
 
 mkdir -p "$STATE/tls" "$STATE/secrets"
-chmod 0700 "$STATE"
+chmod 0700 "$STATE" "$STATE/secrets"
 
 log() { echo "[companion:ads] $*"; }
 fail() { echo "[companion:ads] FALLO: $*" >&2; exit 1; }
@@ -107,31 +113,133 @@ JSON
   mv -f "$STATE/companions.json.tmp" "$STATE/companions.json"
 }
 
-# ── 5. secrets/api.env for ads-api/ads-worker + up ───────────────────────────
-ensure_compose_secrets() {
-  [ -f "$STATE/secrets/api.env" ] || : > "$STATE/secrets/api.env"
+# ── 5. Image — the owner's published release, pulled only if absent ─────────
+ensure_image() {
+  if "$RUNTIME" image inspect "$SAFENT_ADS_IMAGE" >/dev/null 2>&1; then
+    log "imagen '$SAFENT_ADS_IMAGE' ya está en local — OK"
+    return 0
+  fi
+  log "descargando '$SAFENT_ADS_IMAGE'…"
+  "$RUNTIME" pull "$SAFENT_ADS_IMAGE" || fail "no se pudo descargar '$SAFENT_ADS_IMAGE'"
+}
+
+# ── 6. Postgres password (compose.yaml's ADS_POSTGRES_PASSWORD) ─────────────
+ensure_pg_password() {
   [ -f "$STATE/pg_password" ] || openssl rand -hex 32 > "$STATE/pg_password"
   chmod 0400 "$STATE/pg_password"
 }
 
+# ── 7. secrets/api.env + secrets/broker.env — generated ONCE, never touched
+# again once api.env exists (both files are always created together in the
+# same run, so api.env's presence is the idempotency marker for the pair).
+# GOOGLE_*/META_* vendor credentials are the exception: those are merged
+# into broker.env on EVERY run from $STATE/vendor.env, because the owner
+# may add them after the first install (see merge_vendor_credentials).
+ensure_secrets() {
+  if [ -f "$STATE/secrets/api.env" ]; then
+    log "secretos de api.env/broker.env ya existen — no se regeneran"
+  else
+    log "generando secretos de ads-api/ads-worker/ads-broker (una sola vez)…"
+    local keypair signing_key public_key session_secret totp_key master_key
+    keypair="$("$RUNTIME" run --rm --network none "$SAFENT_ADS_IMAGE" \
+      python -m safent_ads.tools.gen_keys)"
+    signing_key="$(printf '%s\n' "$keypair" | sed -n 's/^ADS_APPROVAL_SIGNING_KEY=//p')"
+    public_key="$(printf '%s\n' "$keypair" | sed -n 's/^ADS_APPROVAL_PUBLIC_KEY=//p')"
+    [ -n "$signing_key" ] && [ -n "$public_key" ] || \
+      fail "gen_keys no devolvió el par de claves de aprobación esperado"
+    session_secret="$(openssl rand -base64 32)"
+    totp_key="$(openssl rand -base64 32)"
+    master_key="$(openssl rand -base64 32)"
+
+    umask 077
+    cat > "$STATE/secrets/api.env.tmp" <<EOF
+ADS_MCP_TOKEN=$(cat "$STATE/bearer")
+ADS_SESSION_SECRET=$session_secret
+ADS_TOTP_ENC_KEY=$totp_key
+ADS_APPROVAL_SIGNING_KEY=$signing_key
+# Opcional: el dueño puede activar el bot de Telegram añadiendo aquí
+# (el arranque sigue sin ellas mientras esa vía siga siendo opcional):
+# TELEGRAM_BOT_TOKEN=
+# TELEGRAM_OWNER_CHAT_IDS=[123456789]
+EOF
+    cat > "$STATE/secrets/broker.env.tmp" <<EOF
+ADS_APPROVAL_PUBLIC_KEY=$public_key
+ADS_CREDENTIAL_MASTER_KEY=$master_key
+ADS_BROKER_ALLOWED_UIDS=10001
+ADS_BROKER_HARD_CAPS_FILE=/etc/ads-broker/caps.yaml
+ADS_CREDENTIAL_STORE_DIR=/var/lib/ads-broker/credentials
+ADS_BROKER_SOCKET=/run/ads-broker/broker.sock
+EOF
+    chmod 0600 "$STATE/secrets/api.env.tmp" "$STATE/secrets/broker.env.tmp"
+    mv -f "$STATE/secrets/api.env.tmp" "$STATE/secrets/api.env"
+    mv -f "$STATE/secrets/broker.env.tmp" "$STATE/secrets/broker.env"
+    log "secretos generados (0600) en $STATE/secrets/"
+  fi
+  merge_vendor_credentials
+}
+
+# Vendor (Safent's own Google MCC / Meta app) credentials: owner-provided,
+# never generated here. $STATE/vendor.env is written BY HAND by the owner
+# (0600, GOOGLE_ADS_*/META_* lines only) — if present, its lines are merged
+# into broker.env, skipping any key that is already there, so re-running
+# provisioning after the owner adds the file picks it up without ever
+# duplicating or overwriting a line.
+merge_vendor_credentials() {
+  local vendor="$STATE/vendor.env"
+  [ -f "$vendor" ] || return 0
+  local line key
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      GOOGLE_ADS_*=*|META_*=*) ;;
+      *) continue ;;
+    esac
+    key="${line%%=*}"
+    grep -q "^${key}=" "$STATE/secrets/broker.env" 2>/dev/null && continue
+    printf '%s\n' "$line" >> "$STATE/secrets/broker.env"
+    log "credencial de vendor '$key' incorporada a broker.env"
+  done < "$vendor"
+}
+
+# ── 8. caps.yaml — hard caps template, installed once, owner edits by hand ──
+ensure_caps() {
+  [ -f "$STATE/caps.yaml" ] && return 0
+  cp "$HERE/caps.template.yaml" "$STATE/caps.yaml"
+  chmod 0644 "$STATE/caps.yaml"
+  if [ "$(id -u)" -eq 0 ]; then
+    chown 0:0 "$STATE/caps.yaml"
+  elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+    sudo -n chown 0:0 "$STATE/caps.yaml" || \
+      log "sin privilegios para chown root:root — vale igual (bind :ro)"
+  fi
+  log "caps.yaml creado desde la plantilla — sin cuentas autorizadas todavía (fail-closed)"
+}
+
 start_companion() {
   export SAFENT_STATE="$STATE"
+  export SAFENT_ADS_IMAGE
   export ADS_POSTGRES_PASSWORD
   ADS_POSTGRES_PASSWORD="$(cat "$STATE/pg_password")"
   "$RUNTIME" compose -p safent-ads -f "$HERE/compose.yaml" up -d
 }
 
-# ── 6. Wait for /mcp/health (best-effort — see this feature's report: the
-# ads image doesn't expose it yet, so this simply times out today without
-# blocking Safent's own boot, matching FR-3). ────────────────────────────────
+# ── 9. Wait for /mcp/health — the endpoint exists in the shipped image now
+# (bearer-protected, constant-time compare). We never send a bearer here (no
+# secret on a curl command line/env of a script that could be traced), so a
+# BARE 401 is the expected "up and answering" response; 200 would mean an
+# unauthenticated deployment, which never happens with this image, but is
+# accepted too so this check never chases an implementation detail. --resolve
+# pins the SAN-matching hostname to the fixed companion IP without needing an
+# /etc/hosts entry on THIS host (that entry belongs to the container, not us).
 wait_for_health() {
-  local i=0
+  local i=0 code
   while [ $i -lt 60 ]; do
-    if curl -fsS --max-time 2 --cacert "$STATE/tls/ca.crt" \
-        "https://$COMPANION_IP:$COMPANION_PORT/mcp/health" >/dev/null 2>&1; then
-      log "companion listo"
-      return 0
-    fi
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 \
+        --cacert "$STATE/tls/ca.crt" \
+        --resolve "$COMPANION_HOST:$COMPANION_PORT:$COMPANION_IP" \
+        "https://$COMPANION_HOST:$COMPANION_PORT/mcp/health" 2>/dev/null || true)"
+    case "$code" in
+      200|401) log "companion listo (/mcp/health -> $code)"; return 0 ;;
+    esac
     i=$((i + 1))
     sleep 1
   done
@@ -142,7 +250,10 @@ ensure_network
 ensure_tls
 ensure_bearer
 write_companions_json
-ensure_compose_secrets
+ensure_image
+ensure_pg_password
+ensure_secrets
+ensure_caps
 start_companion
 wait_for_health
 log "aprovisionamiento OK — $STATE/companions.json listo para el bind read-only"

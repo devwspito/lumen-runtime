@@ -2,26 +2,26 @@
 # deployment of safent-ads (024, item 4, plan.md §1.1 step 5).
 #
 # NOT the ads service's own dev compose (/home/.../safent-ads/compose.yaml,
-# network `safent-ads-net`, ads-api plaintext on :8410, no /mcp/health,
-# no TLS) — that file is the ads team's, referenced here for the service
-# shapes only, never forked. THIS file is what provision.sh actually runs:
-# fixed to the product constants (spec.md §7, never re-chosen at runtime):
-# network 10.201.0.0/24, ads-api pinned at 10.201.0.10:8443 with TLS from
-# the install-time private CA. Same image (safent-ads:local, built from the
-# ads repo's own Containerfile by provision.sh) — a different, hardened
-# deployment shape around it.
+# network `safent-ads-net`, ads-api plaintext on :8410, no TLS) — that file
+# is the ads team's, referenced here for the service SHAPES only, never
+# forked. THIS file is what provision.sh actually runs: fixed to the
+# product constants (spec.md §7, never re-chosen at runtime): network
+# 10.201.0.0/24, ads-api pinned at 10.201.0.10:8443 with TLS terminated by
+# ads-api itself, using the install-time private CA leaf.
 #
-# PENDING on the ads side (tracked — see this feature's implementation
-# report to the ads lane, not fixed here): `--ssl-certfile/--ssl-keyfile`
-# support in ads-api's uvicorn command (today plaintext :8410 only),
-# GET /mcp/health, and constant-time bearer comparison on /mcp. The TLS/
-# secret mounts below are already wired so landing that support is a
-# one-line `command:` change here, not a compose rewrite.
+# The image is `${SAFENT_ADS_IMAGE:-safent-ads:local}` — provision.sh always
+# exports SAFENT_ADS_IMAGE (its own default is the published
+# ghcr.io/devwspito/safent-ads:latest release), so this file's inline
+# `:-safent-ads:local` only matters if someone runs `podman compose -f
+# this` directly without going through provision.sh (local dev). This file
+# never builds the image (no publishing from a developer machine) — see
+# provision.sh's ensure_image.
 #
 # Variables provision.sh exports before `podman compose -f this -p safent-ads
 # up -d` (never committed, never defaulted to a real secret):
-#   SAFENT_STATE          ~/.safent/companions/ads (CA, leaf, bearer, secrets/)
-#   ADS_POSTGRES_PASSWORD generated once by provision.sh, openssl rand -hex 32
+#   SAFENT_STATE          ~/.safent/companions/ads (TLS, caps.yaml, secrets/)
+#   SAFENT_ADS_IMAGE       image ref (see above)
+#   ADS_POSTGRES_PASSWORD  generated once by provision.sh, openssl rand -hex 32
 
 name: safent-ads-companion
 
@@ -54,22 +54,28 @@ services:
     security_opt: ["no-new-privileges:true"]
 
   ads-api:
-    image: safent-ads:local
+    image: ${SAFENT_ADS_IMAGE:-safent-ads:local}
     restart: unless-stopped
     user: "10001:10001"
     # ads-broker-clients (gid 10003, upstream Containerfile) — connect() to
     # the broker socket needs this supplementary group.
     group_add: ["10003"]
-    command: >
-      python -m uvicorn safent_ads.composition.app:create_app
-      --factory --host 0.0.0.0 --port 8443
+    # `composition/app.py:main()` picks host/port/TLS itself from
+    # ADS_COMPANION_MODE — see environment below. Same entrypoint as the
+    # ads team's own image CMD, never a bespoke uvicorn invocation.
+    command: python -m safent_ads.composition.app
     environment:
       ADS_DATABASE_URL: postgresql+asyncpg://ads:${ADS_POSTGRES_PASSWORD}@ads-db/ads
       ADS_BROKER_SOCKET: /run/ads-broker/broker.sock
+      ADS_COMPANION_MODE: "true"
+      ADS_TLS_CERTFILE: /etc/ads-companion/tls/leaf.crt
+      ADS_TLS_KEYFILE: /etc/ads-companion/tls/leaf.key
+      # The host `mcp.presentation.http._transport_security_for` allow-lists
+      # against for the anti DNS-rebinding check on /mcp (plan.md §1.2).
       ADS_PUBLIC_BASE_URL: https://ads.safent.internal:8443
     env_file:
       - path: ${SAFENT_STATE}/secrets/api.env
-        required: false
+        required: true
     networks:
       safent-companions:
         ipv4_address: 10.201.0.10
@@ -80,15 +86,34 @@ services:
     volumes:
       - broker-sock:/run/ads-broker
       - ${SAFENT_STATE}/tls:/etc/ads-companion/tls:ro
-      - ${SAFENT_STATE}/bearer:/etc/ads-companion/bearer:ro
     depends_on:
       ads-db:
         condition: service_healthy
+    # Self-check inside the container: 127.0.0.1 is the same process (the
+    # server listens on 0.0.0.0), so this never crosses the runtime's
+    # daddr+dport rule. The leaf is issued for SAN DNS:ads.safent.internal,
+    # not 127.0.0.1 — verifying it here would fail on hostname, not real
+    # health, hence the unverified context; the trust chain that matters
+    # (private CA + SAN + fingerprint pin) is enforced by the runtime when
+    # it connects from outside (hermes.shell_server.companions).
+    healthcheck:
+      # CMD-SHELL in a single line — `podman compose` splits the list form
+      # on whitespace and leaves the service permanently unhealthy.
+      test: ["CMD-SHELL", "python -c \"import ssl, urllib.request; ctx = ssl._create_unverified_context(); urllib.request.urlopen('https://127.0.0.1:8443/api/v1/health', timeout=3, context=ctx)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     security_opt: ["no-new-privileges:true"]
     cap_drop: ["ALL"]
+    deploy:
+      # Security review F2/F3: ads-api also runs defensive actions
+      # (apply_defensive_action) → a single replica, same reasoning as
+      # ads-worker below.
+      replicas: 1
 
   ads-worker:
-    image: safent-ads:local
+    image: ${SAFENT_ADS_IMAGE:-safent-ads:local}
     restart: unless-stopped
     user: "10001:10001"
     group_add: ["10003"]
@@ -96,9 +121,10 @@ services:
     environment:
       ADS_DATABASE_URL: postgresql+asyncpg://ads:${ADS_POSTGRES_PASSWORD}@ads-db/ads
       ADS_BROKER_SOCKET: /run/ads-broker/broker.sock
+      ADS_PUBLIC_BASE_URL: https://ads.safent.internal:8443
     env_file:
       - path: ${SAFENT_STATE}/secrets/api.env
-        required: false
+        required: true
     networks:
       - safent-companions
     volumes:
@@ -108,9 +134,17 @@ services:
         condition: service_healthy
     security_opt: ["no-new-privileges:true"]
     cap_drop: ["ALL"]
+    deploy:
+      # threat-model.md C-15/C-17: no per-account/ledger lock inside
+      # `_pass_gates` yet — two workers claiming different attempts on the
+      # SAME entity would read the same spend_ledger snapshot in separate
+      # transactions and both pass the daily cap. Until that guardrail lock
+      # lands, "one worker" is a security invariant, not a capacity choice
+      # — do not raise this.
+      replicas: 1
 
   ads-broker:
-    image: safent-ads:local
+    image: ${SAFENT_ADS_IMAGE:-safent-ads:local}
     restart: unless-stopped
     user: "10002:10002"
     group_add: ["10003"]
@@ -118,11 +152,23 @@ services:
     command: python -m safent_ads.composition.broker
     env_file:
       - path: ${SAFENT_STATE}/secrets/broker.env
-        required: false
+        required: true
     networks:
       - safent-companions
     volumes:
       - broker-sock:/run/ads-broker
+      # credential_store.py::EncryptedCredentialStore mkdir's
+      # ADS_CREDENTIAL_STORE_DIR on every boot; read_only above makes the
+      # whole container filesystem read-only except explicit volumes/tmpfs,
+      # and the encrypted client credentials (Google/Meta tokens) it holds
+      # must survive restarts — a real named volume, never tmpfs.
+      - credential-store:/var/lib/ads-broker
+      - type: bind
+        source: ${SAFENT_STATE}/caps.yaml
+        target: /etc/ads-broker/caps.yaml
+        read_only: true
+        bind:
+          create_host_path: false
     tmpfs:
       - /tmp
     security_opt: ["no-new-privileges:true"]
@@ -133,3 +179,5 @@ volumes:
     name: safent-ads-companion-db-data
   broker-sock:
     name: safent-ads-companion-broker-sock
+  credential-store:
+    name: safent-ads-companion-credential-store
