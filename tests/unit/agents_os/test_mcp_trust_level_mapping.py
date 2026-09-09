@@ -36,6 +36,11 @@ class TestMcpConnectTrustLevelMapping:
         assert trust is TrustLevel.MANAGED_REMOTE
 
     @pytest.mark.asyncio
+    async def test_safent_ads_is_managed_remote(self) -> None:
+        trust = await _connect_and_capture_trust_level("safent-ads")
+        assert trust is TrustLevel.MANAGED_REMOTE
+
+    @pytest.mark.asyncio
     async def test_excel_stays_builtin(self) -> None:
         trust = await _connect_and_capture_trust_level("excel")
         assert trust is TrustLevel.BUILTIN

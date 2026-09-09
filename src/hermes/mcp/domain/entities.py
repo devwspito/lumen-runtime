@@ -58,6 +58,7 @@ class McpTool:
             read_only_hint=read_only_hint,
             destructive_hint=destructive_hint,
             trust_level=trust_level,
+            slug=str(slug),
         )
         return cls(
             name=name,

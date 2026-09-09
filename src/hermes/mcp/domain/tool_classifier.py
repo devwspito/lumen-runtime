@@ -51,6 +51,7 @@ def classify_mcp_tool(
     read_only_hint: bool | None = None,
     destructive_hint: bool | None = None,
     trust_level: TrustLevel,
+    slug: str | None = None,
 ) -> McpToolClassification:
     """Classify an MCP tool's risk and auto_executable flag.
 
@@ -60,6 +61,10 @@ def classify_mcp_tool(
 
     Advisory hints may only keep-safe, never elevate risk.
     USER_ADDED servers force auto_executable=False (always require HITL).
+
+    `slug` (the MANAGED_REMOTE server's own slug, e.g. "safent-control" /
+    "safent-ads") is OPTIONAL and consulted ONLY for TrustLevel.MANAGED_REMOTE —
+    see `_classify_managed_remote` for the per-slug policy table.
     """
     # BUILTIN = MCP de fábrica horneado y vetado por NOSOTROS (local, sin egress, confinado
     # a la jaula). TODAS sus operaciones fluyen sin HITL (LOW + auto), incluido guardar/
@@ -77,7 +82,7 @@ def classify_mcp_tool(
     # is the authority: reads flow (LOW+auto), writes stay LOW+not-auto (gated).
     # An untrusted remote cannot flip our read verdict via a hint.
     if trust_level is TrustLevel.MANAGED_REMOTE:
-        return _classify_managed_remote(name)
+        return _classify_managed_remote(name, slug)
 
     forced_high = _is_forced_high(destructive_hint, trust_level)
     if forced_high:
@@ -91,7 +96,37 @@ def classify_mcp_tool(
     return McpToolClassification(risk=RiskLevel.HIGH, auto_executable=False)
 
 
-def _classify_managed_remote(name: str) -> McpToolClassification:
+# Explicit, PER-SLUG widening of the MANAGED_REMOTE auto-executable surface.
+# Default (a slug absent here, e.g. "safent-control") keeps the generic
+# read-verb-only policy (_managed_remote_looks_read_only) — writes always
+# gate. A slug is added here ONLY when its ENTIRE non-read surface is
+# reviewed and proven to never touch a third-party platform directly:
+#
+#   "safent-ads": the ads-vertical MCP contract (mcp-tools.md rule 3) —
+#   propose_*/apply_defensive_action/generate_* NEVER write to Google/Meta;
+#   propose_* only creates a pending PropuestaDeAccion in ITS OWN datastore,
+#   and apply_defensive_action is re-validated server-side against a firing,
+#   AUTO-tier rule + guardrails before any real write (see mcp-tools.md).
+#   explain_* is a dry-run narrative, already read-shaped. Entries are exact
+#   tool-name PREFIXES — "apply_defensive_action" is spelled out in full
+#   (not "apply_") so a hypothetical future "apply_proposal"/"apply_change"
+#   write verb does NOT silently inherit this widening (defense in depth,
+#   see TestSafentAdsNeverAutoExecutesSpendVerbs).
+#
+# Adding a slug here is a reviewed, deliberate security decision — NEVER
+# inferred from tool names alone, and NEVER weakens any OTHER managed-remote
+# server (each slug's tuple is independent; an absent slug is unaffected).
+_MANAGED_REMOTE_AUTO_PREFIXES: dict[str, tuple[str, ...]] = {
+    "safent-ads": (
+        "list_", "get_", "search_", "run_gaql", "get_insights",
+        "propose_", "apply_defensive_action", "generate_", "explain_",
+    ),
+}
+
+
+def _classify_managed_remote(
+    name: str, slug: str | None = None
+) -> McpToolClassification:
     """Classify a MANAGED_REMOTE tool by name alone (no hint dependency).
 
     MANAGED_REMOTE servers are first-party but egress to a managed
@@ -109,7 +144,16 @@ def _classify_managed_remote(name: str) -> McpToolClassification:
     neither to auto-approve a write (readOnlyHint) nor to gate a read
     (destructiveHint). Writes already gate via auto_executable=False + CTRL-5, so
     ignoring destructiveHint loses no safety while preserving read fluency.
+
+    `slug` selects an OPTIONAL per-slug widening (_MANAGED_REMOTE_AUTO_PREFIXES,
+    above) — a slug absent from that table (or slug=None) gets the generic,
+    read-verb-only policy, identical to before this parameter existed.
     """
+    bare = name.split("__")[-1] if "__" in name else name
+    prefixes = _MANAGED_REMOTE_AUTO_PREFIXES.get(slug or "")
+    if prefixes is not None:
+        auto = bare.lower().startswith(prefixes)
+        return McpToolClassification(risk=RiskLevel.LOW, auto_executable=auto)
     if _managed_remote_looks_read_only(name):
         return McpToolClassification(risk=RiskLevel.LOW, auto_executable=True)
     return McpToolClassification(risk=RiskLevel.LOW, auto_executable=False)

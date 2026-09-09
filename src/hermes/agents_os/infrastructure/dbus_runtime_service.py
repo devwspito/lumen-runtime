@@ -7181,7 +7181,7 @@ def _mcp_id(server_id: str):
 # OAuth bridges), as opposed to a third-party published server or a local/offline one.
 # Shared by _mcp_connect (trust classification) and _grant_mcp_egress_for_managed_remote
 # (R16, below) — single source, no drift between the two call sites.
-_MANAGED_REMOTE_MCP_SLUGS: frozenset[str] = frozenset({"safent-control"})
+_MANAGED_REMOTE_MCP_SLUGS: frozenset[str] = frozenset({"safent-control", "safent-ads"})
 
 
 def _grant_mcp_egress_for_managed_remote(server_id: str) -> None:

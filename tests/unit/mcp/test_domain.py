@@ -264,6 +264,123 @@ class TestClassifyMcpToolManagedRemoteDoesNotAffectOtherTiers:
 
 
 # ---------------------------------------------------------------------------
+# classify_mcp_tool — per-slug MANAGED_REMOTE widening (safent-ads).
+#
+# safent-ads's propose_*/apply_defensive_action/generate_*/explain_* verbs
+# NEVER write to a third-party ad platform (mcp-tools.md rule 3) — they only
+# ever create a pending proposal in ads-api's own datastore, or run a
+# server-re-validated defensive action. That is why THIS slug (and only this
+# slug) may treat them as auto-executable. safent-control (and any other
+# MANAGED_REMOTE slug) is untouched: still read-verb-only.
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyMcpToolSafentAdsPerSlugWidening:
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "list_campaigns",
+            "get_insights",
+            "search_decision_log",
+            "run_gaql",
+            "propose_budget_change",
+            "propose_pause",
+            "apply_defensive_action",
+            "generate_creative_assets",
+            "explain_signal",
+            "explain_rule",
+        ],
+    )
+    def test_safent_ads_contract_write_verbs_are_auto(self, name: str) -> None:
+        cls = classify_mcp_tool(
+            name, trust_level=TrustLevel.MANAGED_REMOTE, slug="safent-ads",
+        )
+        assert cls.risk is RiskLevel.LOW
+        assert cls.auto_executable is True
+
+    def test_safent_ads_hypothetical_platform_write_stays_hitl(self) -> None:
+        """A verb NOT in the reviewed prefix table (e.g. a hypothetical future
+        'update_budget' that would write straight to Google/Meta) must stay
+        gated — the allow-list is default-deny, not everything-goes."""
+        cls = classify_mcp_tool(
+            "update_budget", trust_level=TrustLevel.MANAGED_REMOTE, slug="safent-ads",
+        )
+        assert cls.risk is RiskLevel.LOW
+        assert cls.auto_executable is False
+
+    def test_safent_ads_qualified_name_widening_still_applies(self) -> None:
+        cls = classify_mcp_tool(
+            "mcp__safent-ads__propose_budget_change",
+            trust_level=TrustLevel.MANAGED_REMOTE,
+            slug="safent-ads",
+        )
+        assert cls.auto_executable is True
+
+    def test_safent_control_unaffected_by_safent_ads_widening(self) -> None:
+        """Regression: adding the safent-ads policy must NOT leak into
+        safent-control (or any other managed-remote slug) — write verbs there
+        stay gated exactly as before."""
+        cls = classify_mcp_tool(
+            "create_employee", trust_level=TrustLevel.MANAGED_REMOTE, slug="safent-control",
+        )
+        assert cls.risk is RiskLevel.LOW
+        assert cls.auto_executable is False
+
+    def test_no_slug_falls_back_to_generic_read_only_policy(self) -> None:
+        """slug=None (e.g. a caller that hasn't been updated) must behave
+        exactly like before this parameter existed — no accidental widening."""
+        cls = classify_mcp_tool(
+            "propose_budget_change", trust_level=TrustLevel.MANAGED_REMOTE,
+        )
+        assert cls.auto_executable is False
+
+
+class TestSafentAdsNeverAutoExecutesSpendVerbs:
+    """Defense in depth (item 5): even if a future safent-ads catalog change
+    introduced an approval/execution verb, it must NEVER become
+    auto-executable — the sidecar executes platform writes, the agent never
+    does (mcp-tools.md: 'Ninguna herramienta escribe en una plataforma').
+    This guards the _MANAGED_REMOTE_AUTO_PREFIXES table itself, independent
+    of whatever the live catalog happens to expose today.
+    """
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "approve_proposal",
+            "approve_action",
+            "execute_write",
+            "execute_proposal",
+            "apply_proposal",
+            "apply_proposal_now",
+            "apply_change",
+            "resolve_approval",
+        ],
+    )
+    def test_dangerous_verb_shapes_never_auto_executable(self, name: str) -> None:
+        cls = classify_mcp_tool(
+            name, trust_level=TrustLevel.MANAGED_REMOTE, slug="safent-ads",
+        )
+        assert cls.auto_executable is False
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "approve_proposal",
+            "execute_write",
+            "apply_proposal",
+        ],
+    )
+    def test_dangerous_verb_shapes_never_auto_executable_qualified(self, name: str) -> None:
+        cls = classify_mcp_tool(
+            f"mcp__safent-ads__{name}",
+            trust_level=TrustLevel.MANAGED_REMOTE,
+            slug="safent-ads",
+        )
+        assert cls.auto_executable is False
+
+
+# ---------------------------------------------------------------------------
 # McpTool entity
 # ---------------------------------------------------------------------------
 
