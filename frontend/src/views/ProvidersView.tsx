@@ -34,6 +34,7 @@ const KIND_COLORS: Record<string, string> = {
   anthropic:         '#D97706',
   openai:            '#10A37F',
   openai_compatible: '#10A37F',
+  openai_codex:      '#10A37F',
   google:            '#4285F4',
   gemini:            '#4285F4',
   azure:             '#0078D4',
@@ -51,6 +52,20 @@ const KIND_COLORS: Record<string, string> = {
 
 const OAUTH_IDS = new Set(['nous', 'openai-codex', 'xai-oauth'])
 
+// ── OpenAI Codex / ChatGPT (suscripción) — item 4, plan.md D-A4 ────────────────
+// Two independent auth paths share this one kind: device-code OAuth (native
+// catalogue row, provider_id "openai-codex") and an OPENAI_API_KEY fallback
+// (a Provider row of this kind added through the generic add_provider flow —
+// see native_sync.kind_to_native_target, which keeps the env_var non-empty
+// for CODEX unlike NOUS).
+const CODEX_KIND = 'openai_codex'
+const CODEX_PROVIDER_ID = 'openai-codex'
+// Mirrors hermes.providers.domain.catalog's canonical entry for ProviderKind.CODEX
+// (label, default model, alternatives) — a small closed catalog, hardcoded here
+// the same way mcpCatalog() curates the MCP suggestions client-side.
+const CODEX_MODELS = ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'] as const
+const CODEX_DEFAULT_MODEL: string = CODEX_MODELS[0]
+
 function badgeLabel(p: Provider): string {
   if (p.kind) return p.kind
   const a = String(p.auth_type ?? '').toLowerCase()
@@ -64,6 +79,7 @@ function badgeLabel(p: Provider): string {
 function badgeDisplayLabel(label: string, t: ReturnType<typeof useT>): string {
   if (label === 'API key') return t('providers.badge.apikey')
   if (label === 'Modelo') return t('providers.badge.model')
+  if (label === CODEX_KIND) return t('providers.codex.badge')
   return label
 }
 
@@ -76,6 +92,16 @@ function isOAuthProvider(p: Provider): boolean {
 
 function providerName(p: Provider): string {
   return p.alias ?? p.name ?? p.provider_id ?? ''
+}
+
+// POST /api/v1/providers/native returns {ok:false, error:"oauth_required", auth_type}
+// when the native registry entry needs OAuth instead of an api_key (e.g. Codex's
+// registry auth_type isn't "api_key") — the caller must pivot to the device-code
+// flow rather than surface this as a plain failure.
+function isOAuthRequiredError(e: unknown): boolean {
+  if (!(e instanceof ApiError)) return false
+  const body = e.body as Record<string, unknown> | null
+  return body?.['error'] === 'oauth_required' || e.message === 'oauth_required'
 }
 
 // ── Discriminated state ───────────────────────────────────────────────────────
@@ -102,6 +128,86 @@ function show(message: string, kind: 'ok' | 'warn' | 'error' = 'ok') {
   if (kind === 'ok') sileo.success({ title: message })
   else if (kind === 'error') sileo.error({ title: message })
   else sileo.warning({ title: message })
+}
+
+// ── Device-code OAuth connect — shared by any provider row (native catalogue
+// or the Codex onboarding card) so the polling state machine lives in ONE place ─
+
+function useProviderOAuthConnect(onConnected: () => void) {
+  const t = useT()
+  const [connectingId, setConnectingId] = useState<string | null>(null)
+  const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => () => {
+    if (pollRef.current) clearTimeout(pollRef.current)
+  }, [])
+
+  async function startOAuthConnect(providerId: string, name: string) {
+    setConnectingId(providerId)
+    let r: Record<string, unknown>
+    try {
+      r = await startProviderOAuth(providerId)
+    } catch (e) {
+      show(e instanceof Error ? e.message : t('providers.oauth.err.connect'), 'error')
+      setConnectingId(null)
+      return
+    }
+
+    if (!r || r['error']) {
+      show(t('providers.oauth.err.connect_reason').replace('{reason}', (r?.['error'] as string) ?? t('providers.err.unknown')), 'error')
+      setConnectingId(null)
+      return
+    }
+
+    const session = r['session_id'] as string | undefined
+    const url = (r['auth_url'] ?? r['verification_url']) as string | undefined
+    const code = r['user_code'] as string | undefined
+
+    if (url) {
+      window.open(url, '_blank', 'noopener,noreferrer')
+      show(t('providers.oauth.opening').replace('{name}', name), 'ok')
+    }
+    if (code) {
+      show(t('providers.oauth.go_and_code').replace('{url}', url ?? '').replace('{code}', code), 'ok')
+    } else {
+      show(t('providers.oauth.waiting').replace('{name}', name), 'ok')
+    }
+
+    if (!session) { setConnectingId(null); return }
+
+    const intervalMs = Math.max(2000, ((r['poll_interval'] as number | undefined) ?? 4) * 1000)
+    const deadline = Date.now() + Math.max(60, ((r['expires_in'] as number | undefined) ?? 600)) * 1000
+
+    const poll = async () => {
+      if (Date.now() > deadline) {
+        show(t('providers.oauth.expired'), 'warn')
+        setConnectingId(null)
+        return
+      }
+      const st = await getProviderOAuthStatus(session)
+      const status = String(st?.status ?? '').toLowerCase()
+      if (status === 'approved' || status === 'connected' || status === 'success') {
+        show(t('providers.oauth.connected').replace('{name}', name), 'ok')
+        setConnectingId(null)
+        onConnected()
+        return
+      }
+      if (status === 'error' || status === 'failed') {
+        show(t('providers.oauth.err.connect_reason').replace('{reason}', String(st?.error_message ?? st?.error ?? t('providers.err.unknown'))), 'error')
+        setConnectingId(null)
+        return
+      }
+      if (status === 'expired') {
+        show(t('providers.oauth.expired'), 'warn')
+        setConnectingId(null)
+        return
+      }
+      pollRef.current = setTimeout(poll, intervalMs)
+    }
+    pollRef.current = setTimeout(poll, intervalMs)
+  }
+
+  return { connectingId, startOAuthConnect }
 }
 
 // ── Provider kind icon ────────────────────────────────────────────────────────
@@ -208,6 +314,10 @@ export default function ProvidersView() {
     ? new Set(state.configured.map(p => p.provider_id))
     : new Set<string>()
 
+  const codexAlreadyConfigured = state.status === 'success' && state.configured.some(
+    p => p.kind === CODEX_KIND || p.provider_id === CODEX_PROVIDER_ID,
+  )
+
   return (
     <>
       {ConfirmDialogNode}
@@ -285,6 +395,16 @@ export default function ProvidersView() {
               </section>
             </StaggerItem>
 
+            {/* ── OpenAI Codex / ChatGPT (suscripción) ── */}
+            {!codexAlreadyConfigured && (
+              <StaggerItem>
+                <section className={css.section} aria-label={t('providers.section.codex.aria')}>
+                  <h2 className={css.sectionLabel}>{t('providers.section.codex')}</h2>
+                  <CodexProviderCard onAdded={load} onToast={show} />
+                </section>
+              </StaggerItem>
+            )}
+
             {/* ── Native Hermes catalogue ── */}
             <StaggerItem>
               <section
@@ -301,7 +421,12 @@ export default function ProvidersView() {
                   <ul className={css.list} role="list">
                     <AnimatePresence initial={false}>
                       {state.native
-                        .filter(p => !configuredIds.has(p.provider_id))
+                        // Codex has its own dedicated onboarding card above (model
+                        // picker + the two auth paths explained) — don't also list
+                        // its bare native-catalogue row here, it would just be a
+                        // second, less informative "Connect" button for the SAME
+                        // provider_id.
+                        .filter(p => !configuredIds.has(p.provider_id) && p.provider_id !== CODEX_PROVIDER_ID)
                         .map(p => (
                           <AnimatedListItem key={p.provider_id}>
                             <ProviderRow
@@ -343,12 +468,11 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
   const t = useT()
   const reduced = useReducedMotion()
   const [testing, setTesting] = useState(false)
-  const [oauthPending, setOauthPending] = useState(false)
   const [showKeyForm, setShowKeyForm] = useState(false)
   const [apiKeyInput, setApiKeyInput] = useState('')
   const [addingKey, setAddingKey] = useState(false)
   const [addConnFailed, setAddConnFailed] = useState(false)
-  const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const { connectingId, startOAuthConnect } = useProviderOAuthConnect(onRefresh)
 
   const label = badgeLabel(provider)
   const displayLabel = badgeDisplayLabel(label, t)
@@ -361,6 +485,7 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
   const isCloudManaged = provider.managed_by === 'cloud'
 
   const isActive = isConfigured && provider.is_active
+  const oauthPending = connectingId === id
 
   async function handleActivate() {
     try {
@@ -434,80 +559,25 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
         onRefresh()
       }
     } catch (e) {
+      if (isOAuthRequiredError(e)) {
+        // This native row needs OAuth (its registry auth_type isn't api_key) —
+        // pivot straight to the device-code flow instead of surfacing the raw
+        // "oauth_required" error string.
+        setShowKeyForm(false)
+        setApiKeyInput('')
+        onToast(t('providers.oauth.fallback_notice').replace('{name}', name), 'ok')
+        void startOAuthConnect(provider.provider_id ?? id, name)
+        return
+      }
       onToast(e instanceof Error ? e.message : t('providers.err.generic'), 'error')
     } finally {
       setAddingKey(false)
     }
   }
 
-  async function handleOAuth() {
-    setOauthPending(true)
-    let r: Record<string, unknown>
-    try {
-      r = await startProviderOAuth(id)
-    } catch (e) {
-      onToast(e instanceof Error ? e.message : t('providers.oauth.err.connect'), 'error')
-      setOauthPending(false)
-      return
-    }
-
-    if (!r || r['error']) {
-      onToast(t('providers.oauth.err.connect_reason').replace('{reason}', (r?.['error'] as string) ?? t('providers.err.unknown')), 'error')
-      setOauthPending(false)
-      return
-    }
-
-    const session = r['session_id'] as string | undefined
-    const url = (r['auth_url'] ?? r['verification_url']) as string | undefined
-    const code = r['user_code'] as string | undefined
-
-    if (url) {
-      window.open(url, '_blank', 'noopener,noreferrer')
-      onToast(t('providers.oauth.opening').replace('{name}', name), 'ok')
-    }
-    if (code) {
-      onToast(t('providers.oauth.go_and_code').replace('{url}', url ?? '').replace('{code}', code), 'ok')
-    } else {
-      onToast(t('providers.oauth.waiting').replace('{name}', name), 'ok')
-    }
-
-    if (!session) { setOauthPending(false); return }
-
-    const intervalMs = Math.max(2000, ((r['poll_interval'] as number | undefined) ?? 4) * 1000)
-    const deadline = Date.now() + Math.max(60, ((r['expires_in'] as number | undefined) ?? 600)) * 1000
-
-    const poll = async () => {
-      if (Date.now() > deadline) {
-        onToast(t('providers.oauth.expired'), 'warn')
-        setOauthPending(false)
-        return
-      }
-      const st = await getProviderOAuthStatus(session)
-      const status = String(st?.status ?? '').toLowerCase()
-      if (status === 'approved' || status === 'connected' || status === 'success') {
-        onToast(t('providers.oauth.connected').replace('{name}', name), 'ok')
-        setOauthPending(false)
-        onRefresh()
-        return
-      }
-      if (status === 'error' || status === 'failed') {
-        onToast(t('providers.oauth.err.connect_reason').replace('{reason}', String(st?.error_message ?? st?.error ?? t('providers.err.unknown'))), 'error')
-        setOauthPending(false)
-        return
-      }
-      if (status === 'expired') {
-        onToast(t('providers.oauth.expired'), 'warn')
-        setOauthPending(false)
-        return
-      }
-      pollRef.current = setTimeout(poll, intervalMs)
-    }
-    pollRef.current = setTimeout(poll, intervalMs)
+  function handleOAuth() {
+    void startOAuthConnect(id, name)
   }
-
-  useEffect(() => () => {
-    if (pollRef.current) clearTimeout(pollRef.current)
-  }, [])
 
   const rowClass = [css.row, isActive ? css.rowActive : ''].filter(Boolean).join(' ')
 
@@ -816,6 +886,149 @@ function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
           </div>
         </div>
       </AnimatedExpanderContent>
+    </motion.div>
+  )
+}
+
+// ── OpenAI Codex / ChatGPT (suscripción) onboarding card ───────────────────────
+//
+// Two independent auth paths, both explained up front so the owner picks the
+// one that matches how they pay for Codex — a ChatGPT subscription (no key,
+// device-code login) or their own OpenAI API key (pay-per-token fallback,
+// plan.md D-A4). The device-code button reuses the SAME OAuth state machine
+// as the native-catalogue "Connect" button (useProviderOAuthConnect); the key
+// path goes through the generic add_provider flow with kind="openai_codex" —
+// NOT /providers/native, which would reject an api_key for this provider_id
+// (its registry auth_type isn't "api_key", see isOAuthRequiredError).
+
+interface CodexProviderCardProps {
+  onAdded: () => void
+  onToast: (msg: string, kind: 'ok' | 'warn' | 'error') => void
+}
+
+function CodexProviderCard({ onAdded, onToast }: CodexProviderCardProps) {
+  const t = useT()
+  const [model, setModel] = useState<string>(CODEX_DEFAULT_MODEL)
+  const [showKeyForm, setShowKeyForm] = useState(false)
+  const [apiKeyInput, setApiKeyInput] = useState('')
+  const [savingKey, setSavingKey] = useState(false)
+  const { connectingId, startOAuthConnect } = useProviderOAuthConnect(onAdded)
+  const oauthPending = connectingId === CODEX_PROVIDER_ID
+
+  async function handleApiKeySave() {
+    if (!apiKeyInput.trim()) { onToast(t('providers.err.enter_key'), 'warn'); return }
+    setSavingKey(true)
+    try {
+      const created = await addProvider({
+        kind: CODEX_KIND,
+        alias: t('providers.codex.alias'),
+        default_model: model,
+        api_key: apiKeyInput.trim(),
+        set_active: true,
+      })
+      const newId = (created as { provider_id?: string }).provider_id
+      setApiKeyInput('')
+      setShowKeyForm(false)
+
+      let testPassed = false
+      if (newId) {
+        try {
+          const r = await testProvider(newId)
+          testPassed = r?.ok === true
+        } catch {
+          testPassed = false
+        }
+      }
+      onToast(
+        testPassed
+          ? t('providers.toast.connected_verified').replace('{name}', t('providers.codex.alias'))
+          : t('providers.custom.conn_failed'),
+        testPassed ? 'ok' : 'warn',
+      )
+      onAdded()
+    } catch (e) {
+      onToast(e instanceof Error ? e.message : t('providers.err.generic'), 'error')
+    } finally {
+      setSavingKey(false)
+    }
+  }
+
+  return (
+    <motion.div className={css.customCard} layout>
+      <div className={css.customCardHeader}>
+        <p className={css.customCardIntro}>{t('providers.codex.explain')}</p>
+      </div>
+
+      <div className={css.formStack}>
+        <div className={css.formField}>
+          <label className={css.formLabel} htmlFor="pv-codex-model">
+            {t('providers.codex.model.label')}
+          </label>
+          <select
+            id="pv-codex-model"
+            className={css.formInput}
+            value={model}
+            onChange={e => setModel(e.target.value)}
+          >
+            {CODEX_MODELS.map(m => <option key={m} value={m}>{m}</option>)}
+          </select>
+        </div>
+
+        <div className={css.formActions}>
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={() => void startOAuthConnect(CODEX_PROVIDER_ID, t('providers.codex.alias'))}
+            disabled={oauthPending}
+            loading={oauthPending}
+          >
+            {oauthPending ? t('providers.connecting') : t('providers.codex.login_btn')}
+          </Button>
+          {!showKeyForm && (
+            <Button variant="ghost" size="sm" onClick={() => setShowKeyForm(true)}>
+              {t('providers.codex.use_key_btn')}
+            </Button>
+          )}
+        </div>
+
+        <AnimatedExpanderContent open={showKeyForm}>
+          <div className={css.formStack} style={{ borderTop: 'none', paddingTop: 0 }}>
+            <div className={css.formField}>
+              <label className={css.formLabel} htmlFor="pv-codex-key">
+                {t('providers.custom.key.label')}
+              </label>
+              <input
+                id="pv-codex-key"
+                className={css.formInput}
+                type="password"
+                autoComplete="new-password"
+                placeholder={t('providers.codex.key.placeholder')}
+                value={apiKeyInput}
+                onChange={e => setApiKeyInput(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') void handleApiKeySave() }}
+              />
+            </div>
+            <div className={css.formActions}>
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={handleApiKeySave}
+                disabled={savingKey}
+                loading={savingKey}
+              >
+                {savingKey ? t('providers.saving') : t('providers.save')}
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => { setShowKeyForm(false); setApiKeyInput('') }}
+              >
+                {t('providers.cancel')}
+              </Button>
+            </div>
+          </div>
+        </AnimatedExpanderContent>
+      </div>
     </motion.div>
   )
 }
