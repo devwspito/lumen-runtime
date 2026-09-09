@@ -27,9 +27,14 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any
 
-from hermes.mcp.application.errors import McpCallError, McpConnectionError
+from hermes.mcp.application.errors import (
+    McpCallError,
+    McpConnectionError,
+    McpProtocolFaultError,
+)
 from hermes.mcp.domain.value_objects import Transport
 
 logger = logging.getLogger("hermes.mcp.stdio_client")
@@ -46,8 +51,12 @@ class StdioMcpClient:
     def __init__(self, transport: Transport, *, timeout_sec: float = 30.0) -> None:
         self._transport = transport
         self._timeout_sec = timeout_sec
+        self._child_label = _child_label(transport.argv)
         self._client_session: Any = None
         self._stdio_context: Any = None
+        # First transport-level protocol fault delivered via ClientSession's
+        # message_handler (see _serve_session / _initialize_or_fail_fast).
+        self._protocol_fault: BaseException | None = None
         # Launcher path: raw fds to close on teardown; None on direct path.
         self._launcher_read_fd: int | None = None
         self._launcher_write_fd: int | None = None
@@ -189,15 +198,23 @@ class StdioMcpClient:
                             try:
                                 message = decode_line(line)
                             except Exception as exc:  # noqa: BLE001 — línea corrupta del MCP
-                                # El SDK 2.0 se TRAGA los Exception del read stream
-                                # (JsonRpcDispatcher._dispatch: logger.debug + return),
-                                # así que sin este warning una línea indescifrable se
-                                # manifiesta 120 s después como un timeout mudo.
-                                logger.warning(
-                                    "hermes.mcp.launcher_decode_error: %s: %s",
-                                    type(exc).__name__, exc,
+                                # El SDK 2.0 se TRAGA los Exception "pelados" del
+                                # read stream a nivel DEBUG (JSONRPCDispatcher._dispatch)
+                                # si nadie tiene `on_stream_exception` enganchado; aquí
+                                # mandamos un McpProtocolFaultError — sigue siendo un
+                                # Exception (mismo contrato de stream que ambos SDKs
+                                # esperan) pero con identidad propia, y ClientSession lo
+                                # entrega vía `message_handler` en 1.x Y 2.0 por igual
+                                # (ver _serve_session / _initialize_or_fail_fast, que lo
+                                # corren en carrera contra initialize() para fallar en
+                                # caliente en vez de a los 120 s).
+                                fault = McpProtocolFaultError(
+                                    child=self._child_label,
+                                    line_preview=_redacted_line_preview(line),
+                                    cause=exc,
                                 )
-                                await read_stream_writer.send(exc)
+                                logger.warning("hermes.mcp.launcher_decode_error: %s", fault)
+                                await read_stream_writer.send(fault)
                                 continue
                             await read_stream_writer.send(SessionMessage(message))
                         if not chunk:
@@ -323,10 +340,23 @@ class StdioMcpClient:
         import asyncio as _asyncio  # noqa: PLC0415
 
         ClientSession = _import_mcp_session()
-        async with ClientSession(read_stream, write_stream) as session:
+        fault_evt = _asyncio.Event()
+
+        async def _on_transport_message(message: Any) -> None:
+            # The ONE hook that survived the SDK 1.x→2.0 JSONRPCMessage break:
+            # both versions route `Exception` items pulled off the read stream
+            # to ClientSession's `message_handler` (2.0 via the dispatcher's
+            # `on_stream_exception`, auto-wired by ClientSession.__init__; 1.x
+            # inline in its own receive loop) — see _initialize_or_fail_fast.
+            if isinstance(message, BaseException) and self._protocol_fault is None:
+                self._protocol_fault = message
+                fault_evt.set()
+
+        async with ClientSession(
+            read_stream, write_stream, message_handler=_on_transport_message
+        ) as session:
             try:
-                async with _asyncio.timeout(self._timeout_sec):
-                    await session.initialize()
+                await self._initialize_or_fail_fast(session, fault_evt)
             except BaseException as exc:  # noqa: BLE001 — surface to the connect caller
                 if not ready.done():
                     ready.set_exception(exc)
@@ -336,6 +366,33 @@ class StdioMcpClient:
                 ready.set_result(True)
             # Hold the session open until close() asks us to tear it down.
             await self._close_evt.wait()
+
+    async def _initialize_or_fail_fast(self, session: Any, fault_evt: Any) -> None:
+        """Race session.initialize() against a transport protocol fault.
+
+        Without this race, a corrupt/incompatible line from the child is
+        dropped by the SDK's dispatcher and initialize() blocks for the FULL
+        timeout budget before raising a bare, unnamed TimeoutError — the fault
+        (delivered via message_handler, see _serve_session) now wins the race
+        and fails the handshake immediately with a typed, diagnosable error.
+        """
+        import asyncio as _asyncio  # noqa: PLC0415
+
+        init_task = _asyncio.ensure_future(session.initialize())
+        fault_task = _asyncio.ensure_future(fault_evt.wait())
+        try:
+            async with _asyncio.timeout(self._timeout_sec):
+                await _asyncio.wait(
+                    {init_task, fault_task}, return_when=_asyncio.FIRST_COMPLETED
+                )
+        finally:
+            for task in (init_task, fault_task):
+                if not task.done():
+                    task.cancel()
+            await _asyncio.gather(init_task, fault_task, return_exceptions=True)
+        if self._protocol_fault is not None:
+            raise self._protocol_fault
+        init_task.result()
 
     async def list_tools(self) -> list[dict[str, Any]]:
         """Return raw tool descriptors from the MCP server.
@@ -448,6 +505,45 @@ def _describe_handshake_failure(exc: BaseException, timeout_sec: float) -> str:
         )
     text = str(exc).strip()
     return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
+
+_LINE_PREVIEW_MAX_CHARS = 200
+
+# `Bearer <token>` (Authorization header echoed back by a misbehaving child)
+# and JWT-shaped strings (header.payload.signature, base64url) — both are
+# "bearer-like": presenting either grants the holder access.
+_BEARER_LIKE_RE = re.compile(
+    r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}"
+    r"|\bey[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_-]{10,}){1,2}\b"
+)
+
+
+def _redacted_line_preview(line: str, *, max_chars: int = _LINE_PREVIEW_MAX_CHARS) -> str:
+    """Redact bearer-like tokens and cap `line` for safe inclusion in a typed error.
+
+    The line comes from an undecodable/unexpected child response — it must
+    never leak a credential into logs or error messages, and must stay short
+    enough that a pathological child can't blow up a log line.
+    """
+    redacted = _BEARER_LIKE_RE.sub("[REDACTED]", line)
+    if len(redacted) <= max_chars:
+        return redacted
+    return redacted[:max_chars] + "…[truncated]"
+
+
+def _child_label(argv: tuple[str, ...]) -> str:
+    """Human-readable identity of the MCP child process for diagnostics.
+
+    For runner-wrapped argv (`uvx <pkg> ...`, `npx <pkg> ...`) the package
+    name is far more useful than the shared runner binary; otherwise falls
+    back to the bare executable name (no path).
+    """
+    if not argv:
+        return "<unknown>"
+    runner = argv[0].rsplit("/", 1)[-1]
+    if runner in ("npx", "uvx") and len(argv) > 1:
+        return argv[1]
+    return runner
 
 
 def _jsonrpc_line_decoder() -> Any:

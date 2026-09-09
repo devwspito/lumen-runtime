@@ -29,6 +29,9 @@ Cobertura:
   (c) handshake real (initialize + tools/list) sobre pipes de verdad, a través
       de `_wire_launcher_streams` + `_start_session_owner` — el mismo camino de
       código que usa producción con los fds que llegan por SCM_RIGHTS.
+  (d) una línea indescifrable falla el handshake EN CALIENTE (< 1 s) con un
+      McpProtocolFaultError tipado, en vez de expirar a los 120 s del
+      presupuesto real — ver stdio_mcp_client._initialize_or_fail_fast.
 """
 
 from __future__ import annotations
@@ -37,6 +40,7 @@ import asyncio
 import json
 import os
 import threading
+import time
 
 import pytest
 
@@ -110,6 +114,20 @@ def _serve_fake_mcp(server_in_fd: int, server_out_fd: int) -> None:
                     }
                 wf.write((json.dumps(reply) + "\n").encode("utf-8"))
                 wf.flush()
+
+
+def _serve_one_garbage_line(server_in_fd: int, server_out_fd: int, garbage: bytes) -> None:
+    """Servidor que emite UNA línea indescifrable y luego se queda mudo —
+    reproduce el niño corrupto/incompatible del bug real: nunca contesta al
+    `initialize` porque su única línea de salida no es JSON-RPC válido."""
+    with (
+        os.fdopen(server_in_fd, "rb", buffering=0) as rf,
+        os.fdopen(server_out_fd, "wb", buffering=0) as wf,
+    ):
+        wf.write(garbage)
+        wf.flush()
+        while rf.read(1):  # se traga cualquier request entrante sin contestar
+            pass
 
 
 def _make_client(timeout_sec: float = 5.0):
@@ -295,3 +313,66 @@ class TestHandshakeFailureIsNeverMute:
         message = str(caught.value)
         assert not message.rstrip().endswith(":"), message
         assert "TimeoutError: no initialize() response in 0.5s" in message
+
+
+# ---------------------------------------------------------------------------
+# (d) una línea indescifrable falla el handshake EN CALIENTE, no a los 120 s
+# ---------------------------------------------------------------------------
+
+
+class TestProtocolFaultFailsFast:
+    """FALLABA ANTES del fix: contra el SDK 2.0 (el de la imagen), el
+    `except` de `_wire_launcher_streams` mandaba la excepción pelada al read
+    stream, `JSONRPCDispatcher._dispatch` la descartaba a nivel DEBUG (no hay
+    `on_stream_exception` enganchado) y `initialize()` se quedaba esperando
+    una respuesta que jamás llegaría — hasta agotar el presupuesto REAL de
+    120 s. Con el fix, `_wire_launcher_streams` manda un McpProtocolFaultError
+    tipado y `_initialize_or_fail_fast` lo corre en carrera contra
+    `initialize()` vía `message_handler` (hook idéntico en 1.x y 2.0)."""
+
+    def test_garbage_line_fails_handshake_fast_with_typed_error(self) -> None:
+        from hermes.mcp.application.errors import McpProtocolFaultError
+
+        client_read_fd, server_out_fd = os.pipe()
+        server_in_fd, client_write_fd = os.pipe()
+        garbage = b"not a json-rpc line at all, Bearer sekret-token-1234567890\n"
+        thread = threading.Thread(
+            target=_serve_one_garbage_line,
+            args=(server_in_fd, server_out_fd, garbage),
+            daemon=True,
+        )
+        thread.start()
+        # El presupuesto REAL del bug (120s) — si el fix no gana la carrera,
+        # este test cuelga 120s en vez de fallar rápido.
+        client = _make_client(timeout_sec=120.0)
+        client._launcher_read_fd = client_read_fd
+        client._launcher_write_fd = client_write_fd
+
+        async def _run() -> McpProtocolFaultError:
+            streams = client._wire_launcher_streams(client_read_fd, client_write_fd)
+            try:
+                await client._start_session_owner(streams=streams)
+                raise AssertionError(
+                    "expected McpProtocolFaultError, handshake succeeded"
+                )
+            finally:
+                await client.close()
+
+        start = time.monotonic()
+        with pytest.raises(McpProtocolFaultError) as caught:
+            asyncio.run(_run())
+        elapsed = time.monotonic() - start
+        thread.join(timeout=5.0)
+
+        assert elapsed < 1.0, (
+            f"handshake fail-fast took {elapsed:.2f}s against a 120s budget "
+            "— the race against initialize() is not winning"
+        )
+        fault = caught.value
+        assert fault.child == "excel-mcp-server"
+        assert fault.cause_type  # names the exception class, never empty
+        assert "not a json-rpc line at all" in fault.line_preview
+        assert "Bearer" not in fault.line_preview
+        assert "sekret-token-1234567890" not in fault.line_preview
+        assert "[REDACTED]" in fault.line_preview
+        assert str(fault).startswith("MCP protocol fault from 'excel-mcp-server'")
