@@ -400,10 +400,12 @@ export function listMcpServers(): Promise<McpServer[]> {
 }
 
 export function addMcpServer(payload: Record<string, unknown>): Promise<McpAddResponse> {
-  // The daemon connects eagerly and reports failures as {ok:false} with 2xx.
-  // The request<T> helper already throws ApiError on ok:false, but addMcpServer
-  // also does a dedicated tool_count=0 warning, so we return raw and let callers
-  // surface that separately.
+  // The daemon connects eagerly; a rejection (bad draft, disallowed runner,
+  // security-scan block, ...) is now a 400/403 — request<T>'s !res.ok branch
+  // throws ApiError(message, status, body) with the daemon's {ok, error, ...}
+  // under body.detail (see mcp_api.py._raise_if_failed). tool_count===0 on a
+  // genuine success (connected but exposes no tools) is NOT a failure, so it
+  // still resolves — callers surface that warning separately.
   return request<McpAddResponse>('/mcp', {
     method: 'POST',
     body: JSON.stringify(payload),

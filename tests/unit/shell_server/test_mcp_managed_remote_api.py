@@ -4,12 +4,19 @@ Coverage:
   - GET /api/v1/mcp/managed-remote-endpoints — reads the local JSON store
     directly (no D-Bus), fail-soft to {} via the module's own load function.
   - PUT /api/v1/mcp/managed-remote-endpoints/{slug} — proxies
-    set_managed_remote_endpoint(slug, url); pass-through of {ok:false, error}
-    (daemon validation), 503 on AgentUnavailable.
+    set_managed_remote_endpoint(slug, url); a daemon {ok:false} (bad scheme,
+    IP literal, disallowed port, unknown slug, ...) becomes a 400 via
+    _raise_if_failed — NEVER a 200 (see feedback_mcp_add_ok_false_http201_silent:
+    a 2xx never trips a caller's try/catch, so the failure passes silently).
+    503 on AgentUnavailable.
   - POST /api/v1/mcp/managed-remote/{slug}/connect — two-step convenience:
     set_managed_remote_endpoint then add_mcp_server with the mcp-remote argv;
-    short-circuits (never calls add_mcp_server) when step 1 fails; force
-    pass-through to the add_mcp_server draft.
+    short-circuits (never calls add_mcp_server) when step 1 fails, reporting
+    that rejection as 400/403 too; force pass-through to the add_mcp_server
+    draft; a blocked security-scan verdict (step 2) is 403, any other add
+    failure is 400.
+  - POST /api/v1/mcp (add_mcp_server) — same _raise_if_failed sweep: a
+    rejected draft never reports the route's default 201.
 """
 
 from __future__ import annotations
@@ -103,17 +110,29 @@ class TestSetManagedRemoteEndpoint:
             "set_managed_remote_endpoint", "safent-ads", "https://ads.tenant.ts.net/mcp"
         )
 
-    def test_daemon_validation_error_passed_through(self) -> None:
-        p = _proxy(mutator_return={"ok": False, "error": "managed_remote endpoint must use https://"})
+    @pytest.mark.parametrize(
+        "error",
+        [
+            "managed_remote endpoint must use https:// (got 'http://')",
+            "managed_remote endpoint must be a DNS name, not an IP literal: '10.0.0.1'",
+            "managed_remote endpoint must use port 443 (got 8443)",
+            "managed_remote endpoint must have a hostname",
+        ],
+    )
+    def test_daemon_validation_error_returns_400(self, error: str) -> None:
+        p = _proxy(mutator_return={"ok": False, "error": error})
         client = TestClient(_make_app(p))
         r = client.put(
             "/api/v1/mcp/managed-remote-endpoints/safent-ads",
             json={"url": "http://ads.example.com"},
         )
-        assert r.status_code == 200
-        assert r.json()["ok"] is False
+        assert r.status_code == 400
+        body = r.json()
+        assert body["detail"]["ok"] is False
+        assert body["detail"]["error"] == error
+        assert body["detail"]["message"] == error
 
-    def test_unknown_slug_error_passed_through(self) -> None:
+    def test_unknown_slug_error_returns_400(self) -> None:
         p = _proxy(mutator_return={
             "ok": False,
             "error": "slug 'unknown' no es un servidor MANAGED_REMOTE conocido",
@@ -123,7 +142,8 @@ class TestSetManagedRemoteEndpoint:
             "/api/v1/mcp/managed-remote-endpoints/unknown",
             json={"url": "https://example.com"},
         )
-        assert r.json()["ok"] is False
+        assert r.status_code == 400
+        assert r.json()["detail"]["ok"] is False
 
     def test_503_on_agent_unavailable(self) -> None:
         p = _proxy(mutator_side_effect=AgentUnavailable("daemon down"))
@@ -192,16 +212,34 @@ class TestConnectManagedRemote:
         assert draft["label"] == "Safent Ads"
         assert draft["force"] is True
 
-    def test_endpoint_rejection_short_circuits_before_add(self) -> None:
+    def test_endpoint_rejection_short_circuits_before_add_returns_400(self) -> None:
         p = _proxy(mutator_return={"ok": False, "error": "managed_remote endpoint must use https://"})
         client = TestClient(_make_app(p))
         r = client.post(
             "/api/v1/mcp/managed-remote/safent-ads/connect",
             json={"url": "http://ads.example.com"},
         )
-        assert r.status_code == 200
-        assert r.json()["ok"] is False
+        assert r.status_code == 400
+        assert r.json()["detail"]["ok"] is False
         p.call_mutator.assert_called_once()
+
+    def test_add_step_failure_returns_400(self) -> None:
+        """Step 1 (set endpoint) succeeds; step 2 (add_mcp_server) rejects the
+        draft (e.g. disallowed runner) — never a silent 200."""
+        p = _proxy(
+            mutator_side_effect=[
+                {"ok": True},
+                {"ok": False, "error": "runner 'curl' no permitido"},
+            ]
+        )
+        client = TestClient(_make_app(p))
+        r = client.post(
+            "/api/v1/mcp/managed-remote/safent-ads/connect",
+            json={"url": "https://ads.tenant.ts.net/mcp"},
+        )
+        assert r.status_code == 400
+        assert r.json()["detail"]["ok"] is False
+        assert p.call_mutator.call_count == 2
 
     def test_503_on_agent_unavailable_during_set_endpoint(self) -> None:
         p = _proxy(mutator_side_effect=AgentUnavailable("daemon down"))
@@ -228,7 +266,7 @@ class TestConnectManagedRemote:
         assert r.status_code == 503
         assert p.call_mutator.call_count == 2
 
-    def test_blocked_scan_result_passed_through(self) -> None:
+    def test_blocked_scan_result_returns_403(self) -> None:
         blocked = {
             "ok": False, "blocked": True, "scan_id": "abc123",
             "verdict": "WARN", "error": "revisión requerida",
@@ -239,8 +277,11 @@ class TestConnectManagedRemote:
             "/api/v1/mcp/managed-remote/safent-ads/connect",
             json={"url": "https://ads.tenant.ts.net/mcp"},
         )
-        assert r.status_code == 200
-        assert r.json() == blocked
+        assert r.status_code == 403
+        detail = r.json()["detail"]
+        assert detail["blocked"] is True
+        assert detail["scan_id"] == "abc123"
+        assert detail["error"] == "revisión requerida"
 
     def test_empty_url_rejected_by_pydantic(self) -> None:
         p = _proxy()
@@ -248,3 +289,45 @@ class TestConnectManagedRemote:
         r = client.post("/api/v1/mcp/managed-remote/safent-ads/connect", json={"url": ""})
         assert r.status_code == 422
         p.call_mutator.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/mcp (add_mcp_server) — same _raise_if_failed sweep
+# ---------------------------------------------------------------------------
+
+
+class TestAddMcpServer:
+    def test_success_returns_201(self) -> None:
+        p = _proxy(mutator_return={"ok": True, "tool_count": 2})
+        client = TestClient(_make_app(p))
+        r = client.post(
+            "/api/v1/mcp",
+            json={"server_id": "excel", "argv": ["npx", "-y", "excel-mcp-server"]},
+        )
+        assert r.status_code == 201
+        assert r.json() == {"ok": True, "tool_count": 2}
+
+    def test_validation_failure_returns_400(self) -> None:
+        p = _proxy(mutator_return={
+            "ok": False, "error": "runner 'curl' no permitido (allowlist: npx, uvx)",
+        })
+        client = TestClient(_make_app(p))
+        r = client.post(
+            "/api/v1/mcp",
+            json={"server_id": "evil", "argv": ["curl", "http://x"]},
+        )
+        assert r.status_code == 400
+        assert r.json()["detail"]["ok"] is False
+
+    def test_blocked_scan_result_returns_403(self) -> None:
+        p = _proxy(mutator_return={
+            "ok": False, "blocked": True, "scan_id": "s1", "verdict": "FAIL",
+            "error": "paquete con firma maliciosa conocida",
+        })
+        client = TestClient(_make_app(p))
+        r = client.post(
+            "/api/v1/mcp",
+            json={"server_id": "bad-pkg", "argv": ["npx", "-y", "bad-pkg"]},
+        )
+        assert r.status_code == 403
+        assert r.json()["detail"]["blocked"] is True

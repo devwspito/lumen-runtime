@@ -19,6 +19,16 @@ Security:
     SAME operator-authZ D-Bus mutators as add_mcp_server
     (set_managed_remote_endpoint, add_mcp_server) — https-only/no-IP-literal
     validation and the install security-scan gate both apply unchanged.
+  - Daemon mutators encode a rejected operation as {"ok": False, "error": ...}
+    instead of raising (D-Bus can't carry a Python exception across the wire).
+    This layer NEVER reports that as a 2xx — a silent {ok:false} under 200/201
+    is exactly the shape a try/catch never fires on (see
+    feedback_mcp_add_ok_false_http201_silent). add_mcp_server,
+    set_managed_remote_endpoint and managed-remote/connect all funnel through
+    _raise_if_failed(): ok:False + blocked:True (the install security-scan
+    gate refused it) -> 403; any other ok:False (bad scheme, IP literal,
+    disallowed port, unknown slug/runner, malformed draft, ...) -> 400. The
+    daemon's message lands in detail.message. Only ok:True stays 2xx.
 """
 
 from __future__ import annotations
@@ -81,7 +91,7 @@ class ConnectManagedRemoteRequest(BaseModel):
 # ------------------------------------------------------------------
 
 
-def create_mcp_router() -> APIRouter:
+def create_mcp_router() -> APIRouter:  # noqa: PLR0915 — 6 REST routes, one factory
     router = APIRouter(prefix="/api/v1/mcp", tags=["mcp"])
 
     @router.get("")
@@ -102,7 +112,12 @@ def create_mcp_router() -> APIRouter:
 
     @router.post("", status_code=201)
     async def add_mcp_server(request: Request, body: AddMcpServerRequest) -> dict:
-        """Register a new MCP server (local command or remote URL)."""
+        """Register a new MCP server (local command or remote URL).
+
+        A rejected add (bad server_id/argv/env, disallowed runner, security-scan
+        block, prefetch/connect/persistence failure) never reports 201 — see
+        _raise_if_failed().
+        """
         proxy = request.app.state.dbus_proxy
         draft = {
             "server_id": body.server_id,
@@ -115,9 +130,10 @@ def create_mcp_router() -> APIRouter:
             "force": body.force,
         }
         try:
-            return await proxy.call_mutator("add_mcp_server", json.dumps(draft))
+            result = await proxy.call_mutator("add_mcp_server", json.dumps(draft))
         except AgentUnavailable as exc:
             _raise_503(exc, "add_mcp_server")
+        return _raise_if_failed(result)
 
     @router.delete("/{server_id}", status_code=204)
     async def remove_mcp_server(request: Request, server_id: str) -> None:
@@ -163,13 +179,15 @@ def create_mcp_router() -> APIRouter:
 
         The daemon validates https-only/no-IP-literal/port-443 and rejects a
         slug outside its own _MANAGED_REMOTE_MCP_SLUGS allowlist — this layer
-        does not duplicate that check, it just surfaces {ok, error} as-is.
+        does not duplicate that check, it turns the rejection into a 400 (see
+        _raise_if_failed()) instead of passing {ok, error} through as a 200.
         """
         proxy = request.app.state.dbus_proxy
         try:
-            return await proxy.call_mutator("set_managed_remote_endpoint", slug, body.url)
+            result = await proxy.call_mutator("set_managed_remote_endpoint", slug, body.url)
         except AgentUnavailable as exc:
             _raise_503(exc, "set_managed_remote_endpoint")
+        return _raise_if_failed(result)
 
     @router.post("/managed-remote/{slug}/connect")
     async def connect_managed_remote(
@@ -181,10 +199,12 @@ def create_mcp_router() -> APIRouter:
         reconnects the SAME server_id (the daemon's add_mcp_server upserts by
         server_id). Stops after step 1 if the URL is rejected (invalid/not a
         known managed-remote slug) — never attempts to add a server pointed at
-        an unvalidated URL. Step 2 goes through the SAME install security-scan
-        gate as any other add_mcp_server call: a FAIL/WARN verdict comes back
-        as {ok: false, blocked: true, scan_id, ...} unless `force` carries an
-        already-recorded owner override (see AddMcpServerRequest.force).
+        an unvalidated URL, and never reports that rejection as a 200 (see
+        _raise_if_failed()). Step 2 goes through the SAME install
+        security-scan gate as any other add_mcp_server call: a FAIL/WARN
+        verdict comes back as {ok: false, blocked: true, scan_id, ...} — 403,
+        unless `force` carries an already-recorded owner override (see
+        AddMcpServerRequest.force).
         """
         proxy = request.app.state.dbus_proxy
         try:
@@ -193,8 +213,7 @@ def create_mcp_router() -> APIRouter:
             )
         except AgentUnavailable as exc:
             _raise_503(exc, "set_managed_remote_endpoint")
-        if not endpoint_result.get("ok"):
-            return endpoint_result
+        _raise_if_failed(endpoint_result)  # step 1 must 4xx, never a silent 200
 
         draft = {
             "server_id": slug,
@@ -204,11 +223,33 @@ def create_mcp_router() -> APIRouter:
             "force": body.force,
         }
         try:
-            return await proxy.call_mutator("add_mcp_server", json.dumps(draft))
+            add_result = await proxy.call_mutator("add_mcp_server", json.dumps(draft))
         except AgentUnavailable as exc:
             _raise_503(exc, "add_mcp_server")
+        return _raise_if_failed(add_result)
 
     return router
+
+
+def _raise_if_failed(result: dict) -> dict:
+    """Turn a daemon mutator's {"ok": False, "error": ...} into an HTTP error.
+
+    D-Bus mutators can't raise a Python exception across the wire, so a
+    rejected operation comes back as ok:False instead — passing that through
+    under a 2xx status is a silent failure (callers whose try/catch only
+    triggers on a non-2xx never see it; feedback_mcp_add_ok_false_http201_silent).
+    ok:False + blocked:True (the install security-scan gate refused it) maps
+    to 403; any other ok:False (bad scheme, IP literal, disallowed port,
+    unknown slug/runner, malformed draft, ...) maps to 400. ok:True passes
+    through unchanged.
+    """
+    if result.get("ok"):
+        return result
+    status = 403 if result.get("blocked") else 400
+    raise HTTPException(
+        status_code=status,
+        detail={"message": result.get("error") or "La operación fue rechazada.", **result},
+    )
 
 
 def _raise_503(exc: AgentUnavailable, operation: str) -> None:

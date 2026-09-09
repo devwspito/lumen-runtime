@@ -703,10 +703,18 @@ function ManagedRemotePresetCard({ connectedServer, onConnected, onRemove }: Man
       // blocked this — its ad-hoc block dict isn't rich enough for the review
       // modal, so re-scan through the dedicated endpoint to get a full,
       // owner-reviewable verdict (same two-phase pattern as installEntry()).
-      const body = e instanceof ApiError && e.body && typeof e.body === 'object'
-        ? (e.body as Record<string, unknown>)
+      //
+      // A blocked scan is now a 403 (mcp_api.py._raise_if_failed), so
+      // request<T>'s !res.ok branch wraps the daemon's {ok, blocked, ...}
+      // result under `detail` — read it from there, not the response top
+      // level (which is just {detail: ...} now, never {blocked: ...} itself).
+      const detail = e instanceof ApiError && e.body && typeof e.body === 'object'
+        ? (e.body as Record<string, unknown>)['detail']
         : null
-      if (body?.['blocked'] === true) {
+      const blocked = detail && typeof detail === 'object'
+        ? (detail as Record<string, unknown>)['blocked']
+        : null
+      if (blocked === true) {
         try {
           const scan = await scanInstall('mcp', SAFENT_ADS_SCAN_TARGET)
           setPendingScan(scan)
