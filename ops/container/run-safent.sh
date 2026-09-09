@@ -6,8 +6,12 @@
 # bare `docker run`. See SECURITY.md for what each flag enforces and the host
 # requirements (a Landlock-capable kernel).
 #
-#   ./run-safent.sh [IMAGE] [HOST_PORT] [--codex-auth <path-to-auth.json>]
+#   ./run-safent.sh [IMAGE] [HOST_PORT] [--codex-auth <path-to-auth.json>] [--no-companion]
 #   ./run-safent.sh --help
+#
+# --no-companion: OPTIONAL. Skip provisioning/joining the safent-ads companion
+#   entirely (FR-6) — Safent starts with no --network/binds for it. Use this
+#   to keep the pre-024 self-hosted-URL path (Herramientas -> Safent Ads).
 #
 # --codex-auth <path>: OPTIONAL. Bind-mounts an EXISTING, host-side OpenAI
 #   Codex CLI auth.json (from a `codex login` the owner already did on the
@@ -33,21 +37,26 @@
 #     2. Your own OpenAI API key, pay-per-token fallback ("Usar clave de API
 #        en su lugar" on the same card — plan.md D-A4).
 #
-# Safent Ads (MCP campaign tools, Google/Meta) is set up the SAME way, no
-# container flag either: Herramientas -> "Safent Ads · campañas Google/Meta"
-# -> paste your tenant's https:// MCP URL -> Conectar. That single URL is the
-# owner-authorized managed-remote endpoint (hermes.shell_server.
-# managed_remote_endpoints; https-only, no IP literals, port 443 only) the
-# container's default-deny MCP netns is allowed to reach for that ONE bridge.
+# Safent Ads (MCP campaign tools, Google/Meta) is PREINSTALLED as a companion
+# (024): this script provisions it (network + CA + bearer + compose up, see
+# ops/container/companions/ads/provision.sh) BEFORE starting Safent, then
+# joins Safent to the fixed `safent-companions` network and binds the three
+# read-only files under /etc/hermes/companions.json — no URL to paste. If
+# provisioning fails (subnet/port already taken — never re-chosen, see
+# provision.sh), Safent still starts, just without the companion (FR-3); the
+# owner can fall back to a self-hosted MCP URL via Herramientas -> "Safent
+# Ads" -> Conectar (hermes.shell_server.managed_remote_endpoints), or skip
+# provisioning entirely with --no-companion.
 set -euo pipefail
 
 IMAGE="ghcr.io/devwspito/safent:latest"
 HOST_PORT="17517"
 CODEX_AUTH_PATH=""
+NO_COMPANION=0
 _positional_index=0
 
 usage() {
-  sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [ $# -gt 0 ]; do
@@ -63,6 +72,10 @@ while [ $# -gt 0 ]; do
       ;;
     --codex-auth=*)
       CODEX_AUTH_PATH="${1#*=}"
+      shift
+      ;;
+    --no-companion)
+      NO_COMPANION=1
       shift
       ;;
     *)
@@ -99,6 +112,25 @@ if [ -n "$CODEX_AUTH_PATH" ]; then
     -v "${CODEX_AUTH_PATH}:/var/lib/hermes/hermes-home/.codex/auth.json:ro"
     -e "CODEX_HOME=/var/lib/hermes/hermes-home/.codex"
   )
+fi
+
+# Companion (024) — provision BEFORE the container starts (companions.json
+# has to exist for the read-only bind below). A provisioning failure is
+# NEVER fatal to Safent's own boot (FR-3): we just skip --network/the binds
+# and Safent starts companion-less, exactly like --no-companion.
+COMPANION_STATE="${SAFENT_COMPANION_STATE:-$HOME/.safent/companions/ads}"
+COMPANION_RUN_ARGS=()
+if [ "$NO_COMPANION" -eq 0 ]; then
+  if "$HERE/companions/ads/provision.sh"; then
+    COMPANION_RUN_ARGS=(
+      --network safent-companions
+      -v "${COMPANION_STATE}/companions.json:/etc/hermes/companions.json:ro"
+      -v "${COMPANION_STATE}/tls/ca.crt:/etc/hermes/companions/ads-ca.crt:ro"
+      -v "${COMPANION_STATE}/bearer:/etc/hermes/companions/ads.bearer:ro"
+    )
+  else
+    echo "run-safent.sh: companion provisioning failed — starting Safent WITHOUT it (FR-3)" >&2
+  fi
 fi
 
 "$RUNTIME" rm -f "$NAME" >/dev/null 2>&1 || true
@@ -164,4 +196,5 @@ exec "$RUNTIME" run -d --name "$NAME" --systemd=always \
   -v "${VOLUME}:/var/lib/hermes" \
   --shm-size=1g \
   ${CODEX_AUTH_MOUNT[@]+"${CODEX_AUTH_MOUNT[@]}"} \
+  ${COMPANION_RUN_ARGS[@]+"${COMPANION_RUN_ARGS[@]}"} \
   "$IMAGE"

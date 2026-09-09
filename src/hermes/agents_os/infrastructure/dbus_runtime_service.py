@@ -7053,6 +7053,16 @@ def _import_seed_companion_servers() -> None:
 
     No companion this boot -> no Neus entry -> the slug's tools are simply
     ABSENT from the catalog (FR-3: present-and-broken is never acceptable).
+
+    MIGRATION NOTE (existing installs, plan.md §5): an install with a
+    pre-024 owner-typed `managed_remote_endpoints["safent-ads"]` URL (option
+    C) keeps working unchanged — this importer only checks `existing` (the
+    slug already has a Neus entry) and, CONSERVATIVELY, never overwrites it.
+    Full FR-5 precedence ("the companion wins, superseding the saved remote
+    endpoint, without deleting it, `hermes.dbus.companion_supersedes_
+    endpoint` logged once") is a deliberately deferred ~20 LOC follow-up —
+    today an owner who wants the companion on an install with a pre-existing
+    URL entry runs `remove_mcp_server("safent-ads")` once, then reboots.
     """
     from hermes.shell_server.companions import get_companion  # noqa: PLC0415
 

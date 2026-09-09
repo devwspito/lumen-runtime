@@ -1,0 +1,135 @@
+# ops/container/companions/ads/compose.yaml — Safent's OWN companion
+# deployment of safent-ads (024, item 4, plan.md §1.1 step 5).
+#
+# NOT the ads service's own dev compose (/home/.../safent-ads/compose.yaml,
+# network `safent-ads-net`, ads-api plaintext on :8410, no /mcp/health,
+# no TLS) — that file is the ads team's, referenced here for the service
+# shapes only, never forked. THIS file is what provision.sh actually runs:
+# fixed to the product constants (spec.md §7, never re-chosen at runtime):
+# network 10.201.0.0/24, ads-api pinned at 10.201.0.10:8443 with TLS from
+# the install-time private CA. Same image (safent-ads:local, built from the
+# ads repo's own Containerfile by provision.sh) — a different, hardened
+# deployment shape around it.
+#
+# PENDING on the ads side (tracked — see this feature's implementation
+# report to the ads lane, not fixed here): `--ssl-certfile/--ssl-keyfile`
+# support in ads-api's uvicorn command (today plaintext :8410 only),
+# GET /mcp/health, and constant-time bearer comparison on /mcp. The TLS/
+# secret mounts below are already wired so landing that support is a
+# one-line `command:` change here, not a compose rewrite.
+#
+# Variables provision.sh exports before `podman compose -f this -p safent-ads
+# up -d` (never committed, never defaulted to a real secret):
+#   SAFENT_STATE          ~/.safent/companions/ads (CA, leaf, bearer, secrets/)
+#   ADS_POSTGRES_PASSWORD generated once by provision.sh, openssl rand -hex 32
+
+name: safent-ads-companion
+
+networks:
+  safent-companions:
+    name: safent-companions
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.201.0.0/24
+
+services:
+  ads-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    networks:
+      - safent-companions
+    environment:
+      POSTGRES_USER: ads
+      POSTGRES_PASSWORD: ${ADS_POSTGRES_PASSWORD:?ADS_POSTGRES_PASSWORD requerido (lo genera provision.sh)}
+      POSTGRES_DB: ads
+    volumes:
+      - ads-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ads -d ads"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    security_opt: ["no-new-privileges:true"]
+
+  ads-api:
+    image: safent-ads:local
+    restart: unless-stopped
+    user: "10001:10001"
+    # ads-broker-clients (gid 10003, upstream Containerfile) — connect() to
+    # the broker socket needs this supplementary group.
+    group_add: ["10003"]
+    command: >
+      python -m uvicorn safent_ads.composition.app:create_app
+      --factory --host 0.0.0.0 --port 8443
+    environment:
+      ADS_DATABASE_URL: postgresql+asyncpg://ads:${ADS_POSTGRES_PASSWORD}@ads-db/ads
+      ADS_BROKER_SOCKET: /run/ads-broker/broker.sock
+      ADS_PUBLIC_BASE_URL: https://ads.safent.internal:8443
+    env_file:
+      - path: ${SAFENT_STATE}/secrets/api.env
+        required: false
+    networks:
+      safent-companions:
+        ipv4_address: 10.201.0.10
+    # ONLY the human panel, loopback — the MCP bridge (10.201.0.10:8443) is
+    # reached by Safent's nft-generated route, never a published port.
+    ports:
+      - "127.0.0.1:8443:8443"
+    volumes:
+      - broker-sock:/run/ads-broker
+      - ${SAFENT_STATE}/tls:/etc/ads-companion/tls:ro
+      - ${SAFENT_STATE}/bearer:/etc/ads-companion/bearer:ro
+    depends_on:
+      ads-db:
+        condition: service_healthy
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+
+  ads-worker:
+    image: safent-ads:local
+    restart: unless-stopped
+    user: "10001:10001"
+    group_add: ["10003"]
+    command: python -m safent_ads.composition.worker
+    environment:
+      ADS_DATABASE_URL: postgresql+asyncpg://ads:${ADS_POSTGRES_PASSWORD}@ads-db/ads
+      ADS_BROKER_SOCKET: /run/ads-broker/broker.sock
+    env_file:
+      - path: ${SAFENT_STATE}/secrets/api.env
+        required: false
+    networks:
+      - safent-companions
+    volumes:
+      - broker-sock:/run/ads-broker
+    depends_on:
+      ads-db:
+        condition: service_healthy
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+
+  ads-broker:
+    image: safent-ads:local
+    restart: unless-stopped
+    user: "10002:10002"
+    group_add: ["10003"]
+    read_only: true
+    command: python -m safent_ads.composition.broker
+    env_file:
+      - path: ${SAFENT_STATE}/secrets/broker.env
+        required: false
+    networks:
+      - safent-companions
+    volumes:
+      - broker-sock:/run/ads-broker
+    tmpfs:
+      - /tmp
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+
+volumes:
+  ads-db-data:
+    name: safent-ads-companion-db-data
+  broker-sock:
+    name: safent-ads-companion-broker-sock
