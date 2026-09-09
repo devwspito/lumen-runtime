@@ -410,10 +410,14 @@ ENV UV_CACHE_DIR=/var/lib/hermes/uv-cache
 ENV XDG_CACHE_HOME=/var/lib/hermes/xdg-cache
 # Warm BOTH runner caches with the EXACT seed specs (ops/.../seed/mcp-servers.json) so the
 # curated MCPs connect OFFLINE on a fresh boot (the cage denies npm/uv at runtime). Today
-# mcp-servers.json only lists uvx MCPs (Excel / Word / PowerPoint, locales sin clave), so
-# only the uvx loop below actually warms anything; the npx/npm-cache path is prepped ahead
-# of an upcoming npx MCP seed (no-op until that lands). /var/lib/hermes is volume-copied-up
-# on first boot.
+# mcp-servers.json only lists uvx MCPs (Excel / Word / PowerPoint, locales sin clave); the
+# npx/npm-cache path warms `mcp-remote` below, the bridge the safent-ads companion seed
+# (hermes.shell_server.companions.CompanionEndpoint.argv, 024) spawns via `npx -y mcp-remote`.
+# Without this, npx's first-ever run needs the npm registry to resolve the package, but the
+# MCP netns's egress is default-deny beyond the proxy + the companion IP (C1 PASS-3) — the
+# seeded companion would never get past "esperando_servicio" on a fresh install. mcp-remote
+# is warmed with `--help` (never a real URL): the goal is caching the npm package itself, not
+# exercising a connection that has no companion to reach at build time.
 RUN mkdir -p /var/lib/hermes/npm-cache /var/lib/hermes/uv-cache /var/lib/hermes/xdg-cache \
       /var/lib/hermes/mcp-home && \
     for spec in "excel-mcp-server stdio" \
@@ -422,6 +426,8 @@ RUN mkdir -p /var/lib/hermes/npm-cache /var/lib/hermes/uv-cache /var/lib/hermes/
       echo "▸ warming uvx $spec" ; \
       HOME=/var/lib/hermes/mcp-home timeout 240 uvx $spec </dev/null >/dev/null 2>&1 || true ; \
     done ; \
+    echo "▸ warming npx mcp-remote" ; \
+    HOME=/var/lib/hermes/mcp-home timeout 240 npx -y mcp-remote --help </dev/null >/dev/null 2>&1 || true ; \
     chown -R hermes:hermes-work /var/lib/hermes/npm-cache /var/lib/hermes/uv-cache \
       /var/lib/hermes/xdg-cache /var/lib/hermes/mcp-home && \
     chmod -R g+rwX /var/lib/hermes/npm-cache /var/lib/hermes/uv-cache \

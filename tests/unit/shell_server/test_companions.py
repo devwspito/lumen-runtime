@@ -108,7 +108,10 @@ class TestLoadCompanionsHappyPath:
     def test_argv_never_contains_the_bearer(self, tmp_path: Path, mount: Path) -> None:
         path = _write_companions_json(tmp_path, mount)
         endpoint = load_companions(path=path)["safent-ads"]
-        assert endpoint.argv == ["npx", "-y", "mcp-remote", endpoint.url]
+        assert endpoint.argv == [
+            "npx", "-y", "mcp-remote", endpoint.url,
+            "--header", "Authorization: Bearer ${ADS_BEARER}",
+        ]
         assert "s3cr3t-bearer-token" not in " ".join(endpoint.argv)
 
     def test_get_companion_returns_the_slug(self, tmp_path: Path, mount: Path) -> None:

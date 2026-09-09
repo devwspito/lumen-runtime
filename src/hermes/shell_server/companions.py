@@ -87,10 +87,19 @@ class CompanionEndpoint:
     def argv(self) -> list[str]:
         """The mcp-remote argv this companion is reached through (plan.md §1.4).
 
-        The bearer is NEVER in argv (INV-4) — mcp-remote expands the header
-        from its own process env (`ADS_BEARER`, filled at connect time).
+        `--header "Authorization: Bearer ${ADS_BEARER}"` is the literal
+        `${VAR}` placeholder text, NOT the bearer's value (INV-4) — mcp-remote
+        expands it from its own process env at connect time (`ADS_BEARER`,
+        filled by `_autowire_companion_env`). Without this flag mcp-remote
+        sends no Authorization header at all and every request to `/mcp`
+        (BearerTokenMiddleware, safent-ads's mcp/presentation/http.py) is
+        rejected 401 — the companion would list as a seeded server with zero
+        reachable tools, not "absent" (FR-3) but silently broken instead.
         """
-        return ["npx", "-y", "mcp-remote", self.url]
+        return [
+            "npx", "-y", "mcp-remote", self.url,
+            "--header", "Authorization: Bearer ${ADS_BEARER}",
+        ]
 
 
 def load_companions(*, path: Path = _COMPANIONS_PATH) -> dict[str, CompanionEndpoint]:

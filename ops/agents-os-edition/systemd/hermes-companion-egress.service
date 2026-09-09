@@ -31,6 +31,9 @@ ExecStart=/usr/libexec/hermes/hermes-companion-nft
 
 # Least privilege: no CAP_NET_ADMIN (this unit only WRITES fragment files;
 # hermes-browser-netns.service is what actually loads them via `nft -f`).
+# CapabilityBoundingSet stays EMPTY on purpose — see tmpfiles/hermes.conf's
+# own comment on /run/hermes's 0771 mode for why root (no capabilities)
+# can still traverse into /run/hermes/nft without CAP_DAC_OVERRIDE.
 CapabilityBoundingSet=
 NoNewPrivileges=yes
 # ProtectSystem=strict makes /etc READ-ONLY except the paths below — /etc/hosts

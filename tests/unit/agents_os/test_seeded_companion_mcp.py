@@ -173,6 +173,7 @@ class TestImportSeedCompanionServers:
         assert written["server_id"] == "safent-ads"
         assert written["argv"] == [
             "npx", "-y", "mcp-remote", "https://ads.safent.internal:8443/mcp",
+            "--header", "Authorization: Bearer ${ADS_BEARER}",
         ]
         assert written["env"] == {"ADS_BEARER": "", "NODE_EXTRA_CA_CERTS": ""}
         assert written["register"] is False

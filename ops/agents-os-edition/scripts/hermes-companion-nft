@@ -79,10 +79,14 @@ def _pin_etc_hosts(endpoints: list) -> None:
         lines = []
     for ep in sorted(endpoints, key=lambda e: e.slug):
         lines.append(f"{ep.ip}\t{ep.host}\t{_ETC_HOSTS_MARKER} {ep.slug}\n")
-    tmp = _ETC_HOSTS + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
+    # NOT the tmp-file + os.replace() pattern _write_or_remove uses:
+    # /etc/hosts is the container engine's own bind mount, and os.replace()
+    # is a rename(2) onto that mountpoint — EBUSY every time ("Device or
+    # resource busy"), verified empirically. Truncate-and-rewrite the SAME
+    # inode in place instead; it's a single-writer, once-per-boot file, so
+    # the brief non-atomic window is an acceptable trade for "works at all".
+    with open(_ETC_HOSTS, "w", encoding="utf-8") as fh:
         fh.writelines(lines)
-    os.replace(tmp, _ETC_HOSTS)
 
 
 if __name__ == "__main__":

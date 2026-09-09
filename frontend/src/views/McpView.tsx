@@ -689,7 +689,12 @@ interface ConnectedAdsPresetProps {
 function ConnectedAdsPreset({ server, onRemove }: ConnectedAdsPresetProps) {
   const t = useT()
   const argv = Array.isArray(server.argv) ? server.argv : []
-  const mcpUrl = argv[argv.length - 1] ?? ''
+  // The URL is always the element right after "mcp-remote", never assumed
+  // to be the LAST one — a seeded companion's argv (hermes.shell_server.
+  // companions.CompanionEndpoint.argv) appends "--header" "Authorization:
+  // Bearer ${ADS_BEARER}" after the URL, so argv[argv.length - 1] would
+  // read the header value instead of the URL for that slug.
+  const mcpUrl = argv[argv.indexOf('mcp-remote') + 1] ?? ''
   const origin = mcpUrl ? panelOriginFromMcpUrl(mcpUrl) : null
   const companionMeta = server.companion_status
     ? (COMPANION_STATUS_META[server.companion_status]
