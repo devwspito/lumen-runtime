@@ -27,6 +27,14 @@ table inet hermes_mcp_local {
         # The ONLY permitted exit: the egress proxy on the host (MCP gateway).
         ip daddr 10.200.1.1 tcp dport 3128 accept comment "mcp→proxy CONNECT (DNS via proxy)"
 
+        # Companion egress (024, item 3) — belt-and-suspenders on top of the
+        # host forward accept: even if mcp-host.nft's forward rule were ever
+        # misconfigured, the companion destination still has to clear THIS
+        # netns-local output gate too. Wildcard include — see mcp-host.nft's
+        # own comment on why the `*` is load-bearing (no companion == no file
+        # == silently skipped, never a boot-blocking error).
+        include "/run/hermes/nft/companion-*-out.nft"
+
         log prefix "hmcp NS OUT DROP: " level warn drop
     }
 

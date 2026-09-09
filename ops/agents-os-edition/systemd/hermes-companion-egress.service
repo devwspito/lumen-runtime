@@ -1,0 +1,52 @@
+# hermes-companion-egress.service — companion egress nft fragments (024, item 3).
+#
+# Root oneshot: reads /etc/hermes/companions.json through the SAME validated
+# loader the daemon uses (hermes.shell_server.companions) and regenerates the
+# three `include`d nft fragments under /run/hermes/nft/ (tmpfs) PLUS the
+# single /etc/hosts pin — see hermes-companion-nft's own docstring for the
+# full design. Must run BEFORE hermes-browser-netns.service loads mcp-host.nft/
+# mcp-ns.nft: a `drop` in nftables is terminal, so the companion accept has
+# to already be on disk for the `include` to pick it up on THIS boot, not a
+# later reload.
+#
+# Fail-soft by construction: hermes-companion-nft always exits 0 (a companion
+# is optional infrastructure, FR-3) — this unit's success/failure never gates
+# hermes-browser-netns.service (no `Requires=`, ordering only).
+
+[Unit]
+Description=Hermes — companion egress nft fragments + /etc/hosts pin
+Documentation=file:///usr/libexec/hermes/hermes-companion-nft
+After=systemd-tmpfiles-setup.service
+Before=hermes-browser-netns.service
+WantedBy=hermes-workspace.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Restart=no
+User=root
+Group=root
+
+ExecStart=/usr/libexec/hermes/hermes-companion-nft
+
+# Least privilege: no CAP_NET_ADMIN (this unit only WRITES fragment files;
+# hermes-browser-netns.service is what actually loads them via `nft -f`).
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+# ProtectSystem=strict makes /etc READ-ONLY except the paths below — /etc/hosts
+# is the ONE file this unit writes (the companion host pin); ReadWritePaths
+# also covers /run/hermes/nft (tmpfs, already root:root 0700 via tmpfiles.d).
+ProtectSystem=strict
+ReadWritePaths=/etc/hosts /run/hermes/nft
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=hermes-workspace.target

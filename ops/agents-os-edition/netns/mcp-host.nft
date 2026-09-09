@@ -33,6 +33,16 @@ table inet hermes_mcp_egress {
 
         ct state established,related accept comment "respuestas ct established"
 
+        # Companion egress (024, item 3) — generated at boot by hermes-companion-
+        # nft from the validated companions.json into /run/hermes/nft/ (tmpfs).
+        # The `*` makes this a WILDCARD include: nft treats "no matches" as a
+        # no-op (never an error) ONLY when a wildcard is present — a literal
+        # path to a file that may legitimately not exist (no companion this
+        # boot) would otherwise abort the whole `nft -f` load. MUST come BEFORE
+        # the RFC1918 drop below: 10.201.0.0/24 sits inside 10.0.0.0/8, and a
+        # `drop` in nftables is terminal — ordering here is load-bearing.
+        include "/run/hermes/nft/companion-*-fwd.nft"
+
         # Anti-pivot: no RFC1918 / loopback / link-local+metadata / CGNAT from the MCP.
         ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8, 169.254.0.0/16, 100.64.0.0/10 } \
             log prefix "hmcp FWD DROP meta: " level warn drop \
@@ -50,5 +60,13 @@ table inet hermes_mcp_egress {
 
         ip saddr 10.200.1.1 oifname != "veth-hmcp-host" masquerade \
             comment "NAT of the egress proxy to WAN (never the MCP directly)"
+
+        # Companion egress (024, item 3): the companion sits on a DIFFERENT
+        # podman/docker bridge network (safent-companions) that has no route
+        # back into the nested hermes-mcp netns — masquerading to Safent's
+        # own companions-network address lets the reply find its way back via
+        # conntrack. Scoped to the ONE companion destination only (see
+        # companion_nft.py's _nat_rule) — never a blanket masquerade.
+        include "/run/hermes/nft/companion-*-nat.nft"
     }
 }

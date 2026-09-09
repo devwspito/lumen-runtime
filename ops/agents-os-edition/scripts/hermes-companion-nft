@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+"""hermes-companion-nft — root oneshot: companion egress nft rules + /etc/hosts (024).
+
+Runs once per boot, BEFORE hermes-browser-netns.service loads mcp-host.nft/
+mcp-ns.nft (see hermes-companion-egress.service's `Before=`). Reads the SAME
+validated companions.json loader the daemon uses (hermes.shell_server.
+companions — fail-closed, no override), regenerates the three nft fragments
+under /run/hermes/nft/ (tmpfs, so a companion the owner removed or a file
+that starts validating as broken simply stops producing a rule on the next
+boot — nothing to clean up by hand), and pins the ONE hostname Safent is
+allowed to resolve for its companion via /etc/hosts (no DNS involved).
+
+No companion this boot -> the three fragments are simply not (re)written and
+any stale ones from a previous boot are removed -> the `include "*.nft"`
+glob in mcp-host.nft/mcp-ns.nft matches nothing (not an error) -> Safent
+boots with no companion egress at all (FR-3).
+
+Exit code is ALWAYS 0 — a companion is optional infrastructure; this script
+must never fail hermes-browser-netns.service's boot chain.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+
+# hermes is installed system-wide (pip install --no-deps of the wheel, see
+# Containerfile) — importable here with no sys.path surgery, same as the
+# `from hermes.security.landlock_loader import ...` in hermes-browser-launcher.
+from hermes.shell_server.companion_nft import (  # noqa: E402
+    FORWARD_FRAGMENT_FILENAME,
+    NAT_FRAGMENT_FILENAME,
+    OUTPUT_FRAGMENT_FILENAME,
+    render_companion_forward_rules,
+    render_companion_nat_rules,
+    render_companion_output_rules,
+)
+from hermes.shell_server.companions import load_companions  # noqa: E402
+
+_NFT_DIR = "/run/hermes/nft"
+_ETC_HOSTS = "/etc/hosts"
+_ETC_HOSTS_MARKER = "# hermes-companion-nft"
+
+
+def main() -> int:
+    endpoints = list(load_companions().values())
+    os.makedirs(_NFT_DIR, exist_ok=True)
+    _write_or_remove(FORWARD_FRAGMENT_FILENAME, render_companion_forward_rules(endpoints))
+    _write_or_remove(OUTPUT_FRAGMENT_FILENAME, render_companion_output_rules(endpoints))
+    _write_or_remove(NAT_FRAGMENT_FILENAME, render_companion_nat_rules(endpoints))
+    _pin_etc_hosts(endpoints)
+    print(f"[companion-nft] {len(endpoints)} companion(s) provisioned")
+    return 0
+
+
+def _write_or_remove(filename: str, content: str) -> None:
+    path = os.path.join(_NFT_DIR, filename)
+    if not content:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        return
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(content)
+    os.replace(tmp, path)
+
+
+def _pin_etc_hosts(endpoints: list) -> None:
+    """Replace any PRIOR hermes-companion-nft block with the current one —
+    a companion's host resolves to EXACTLY the validated ip, never DNS
+    (spec.md §7: "ads.safent.internal se fija por /etc/hosts y nunca se
+    resuelve por DNS")."""
+    try:
+        with open(_ETC_HOSTS, encoding="utf-8") as fh:
+            lines = [ln for ln in fh if _ETC_HOSTS_MARKER not in ln]
+    except OSError:
+        lines = []
+    for ep in sorted(endpoints, key=lambda e: e.slug):
+        lines.append(f"{ep.ip}\t{ep.host}\t{_ETC_HOSTS_MARKER} {ep.slug}\n")
+    tmp = _ETC_HOSTS + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.writelines(lines)
+    os.replace(tmp, _ETC_HOSTS)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as exc:  # noqa: BLE001 — never block boot on a companion failure
+        print(f"[companion-nft] failed (non-fatal): {exc}", file=sys.stderr)
+        sys.exit(0)

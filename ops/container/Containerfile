@@ -244,6 +244,9 @@ COPY ops/agents-os-edition/scripts/hermes-browser-jail    /usr/libexec/hermes/br
 COPY ops/agents-os-edition/scripts/hermes-clipboard-server /usr/libexec/hermes/hermes-clipboard-server
 COPY ops/agents-os-edition/scripts/hermes-mcp-cache-sync   /usr/libexec/hermes/hermes-mcp-cache-sync
 COPY ops/agents-os-edition/scripts/hermes-landlock-assert /usr/bin/hermes-landlock-assert
+# Companion egress nft fragments + /etc/hosts pin (024) — root oneshot, see
+# hermes-companion-egress.service (enabled below).
+COPY ops/agents-os-edition/scripts/hermes-companion-nft   /usr/libexec/hermes/hermes-companion-nft
 # CDP-controller confinement shim (2026-07-05 audit): replaces the /usr/bin/agent-browser
 # npm symlink so EVERY runtime agent-browser invocation applies the BROWSER_CONTROLLER
 # Landlock ruleset (denies the daemon's keystore to the controller) before execing the
@@ -461,6 +464,7 @@ RUN systemctl enable \
       hermes-browser-netns.service hermes-browser-launcher.service \
       hermes-exec-launcher.service \
       hermes-audit-tail.service \
+      hermes-companion-egress.service \
       hermes-workspace.target 2>&1 | tail -3 || true
 
 # ── Edition marker + EE service gate ─────────────────────────────────────────
