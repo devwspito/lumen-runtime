@@ -140,6 +140,13 @@
   line-height: var(--leading-normal);
 }
 
+/* Seeded companion (024) status badge — sits between the server row and the
+   ads panel quick links (absent for a non-companion managed-remote server). */
+.companionStatus {
+  margin-top: calc(var(--space-1) * -1);
+  margin-bottom: var(--space-1);
+}
+
 /* ── Catalog card ───────────────────────────────────────────────────────── */
 
 .catalogCard {

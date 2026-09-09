@@ -245,6 +245,10 @@ export interface McpServer {
   argv?: string | string[]
   health?: string
   tool_count?: number
+  // Seeded companion (024) only — "esperando_servicio" | "listo" | future
+  // finer states from the companion's own /mcp/health. Absent for every
+  // other server (owner-typed managed-remote URL, user-added, built-in).
+  companion_status?: string
 }
 
 export interface McpRegistryEntry {

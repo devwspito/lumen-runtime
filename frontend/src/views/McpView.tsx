@@ -15,6 +15,7 @@ import { PageHeader } from '../components/ui/PageHeader'
 import { EmptyState } from '../components/ui/EmptyState'
 import { Button } from '../components/ui/Button'
 import { Badge as DsBadge, StatusDot } from '../components/ui/Badge'
+import type { StatusDotState } from '../components/ui/Badge'
 import {
   AnimatePresence,
   AnimatedListItem,
@@ -670,6 +671,15 @@ function McpServerRow({ server, onRemove }: McpServerRowProps) {
 // never built from free text (the URL comes straight from the argv the
 // backend already validated when it registered this connection).
 
+// Seeded-companion status (024) -> {label i18n key, StatusDot state}. A
+// status value this build doesn't recognise yet (future finer states from
+// the companion's own /mcp/health) falls back to a generic "installed" dot
+// rather than showing nothing.
+const COMPANION_STATUS_META: Record<string, { key: string; state: StatusDotState }> = {
+  esperando_servicio: { key: 'mcp.managed.ads.status.waiting', state: 'warning' },
+  listo: { key: 'mcp.managed.ads.status.ready', state: 'success' },
+}
+
 interface ConnectedAdsPresetProps {
   server: McpServer
   onRemove: () => void
@@ -680,10 +690,19 @@ function ConnectedAdsPreset({ server, onRemove }: ConnectedAdsPresetProps) {
   const argv = Array.isArray(server.argv) ? server.argv : []
   const mcpUrl = argv[argv.length - 1] ?? ''
   const origin = mcpUrl ? panelOriginFromMcpUrl(mcpUrl) : null
+  const companionMeta = server.companion_status
+    ? (COMPANION_STATUS_META[server.companion_status]
+        ?? { key: 'mcp.managed.ads.status.installed', state: 'success' as StatusDotState })
+    : null
 
   return (
     <>
       <McpServerRow server={server} onRemove={onRemove} />
+      {companionMeta && (
+        <div className={styles.companionStatus}>
+          <StatusDot state={companionMeta.state} label={t(companionMeta.key)} />
+        </div>
+      )}
       {origin && (
         <div className={styles.adsPanel}>
           <div className={styles.adsPanelHead}>
