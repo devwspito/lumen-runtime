@@ -149,6 +149,20 @@ _SLICE = "agents-os-mcp.slice"
 # C1 PASS-2: the MCP netns reaches the proxy on its OWN gateway (10.200.1.1), so the
 # proxy sees the MCP's distinct source IP (10.200.1.2) and applies the pinned policy.
 _EGRESS_PROXY_URL = "http://10.200.1.1:3128"
+
+# Destinations the runner must reach DIRECTLY, never through the proxy above.
+# Today exactly one: the safent-ads companion (024). Its whole design is a direct
+# path — one `ip daddr`+`tcp dport` accept plus a masquerade in mcp-host.nft — and
+# the proxy's pinned policy (default-deny, no registries) does NOT list it, so any
+# attempt to tunnel there answers 403. That mattered the moment NODE_OPTIONS gained
+# `--use-env-proxy` (Node >= 24): node's global fetch then honours http(s)_proxy for
+# EVERY request, so mcp-remote stopped using its direct route and the companion
+# handshake died with "Proxy response (403) !== 200 when HTTP Tunneling". node's
+# --use-env-proxy honours no_proxy, so this is the exact counterpart of that flag.
+# EXACT host + IP, never a suffix or a CIDR: this is a proxy-bypass list, and the
+# narrower it is the less it can ever be abused to exfiltrate around the audit.
+# Mirrors the product constants in hermes.shell_server.companions (spec.md §7).
+_COMPANION_NO_PROXY = "ads.safent.internal,10.201.0.10"
 _MCP_RUNTIME_MAX_S = 86_400  # 24h ceiling for a long-lived MCP server unit
 
 # HARDCODED transient-unit hardening (caller cannot modify these). Mirrors the
@@ -552,11 +566,15 @@ def _build_jailed_cmd(argv: list[str], env: dict[str, str]) -> list[str]:
     # (a package whose bin is reached via npx must not also trigger a postinstall).
     cmd.append("--setenv=npm_config_ignore_scripts=true")
     # Egress proxy vars LAST → authoritative (force every runner through the proxy).
+    # no_proxy travels WITH them, and equally authoritative: the caller cannot widen
+    # the bypass list any more than it can drop the proxy itself.
     cmd.extend([
         f"--setenv=http_proxy={_EGRESS_PROXY_URL}",
         f"--setenv=https_proxy={_EGRESS_PROXY_URL}",
         f"--setenv=HTTP_PROXY={_EGRESS_PROXY_URL}",
         f"--setenv=HTTPS_PROXY={_EGRESS_PROXY_URL}",
+        f"--setenv=no_proxy={_COMPANION_NO_PROXY}",
+        f"--setenv=NO_PROXY={_COMPANION_NO_PROXY}",
     ])
     cmd.append("--")
     cmd.extend(argv)
