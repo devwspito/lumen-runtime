@@ -7,6 +7,7 @@
 # requirements (a Landlock-capable kernel).
 #
 #   ./run-safent.sh [IMAGE] [HOST_PORT] [--codex-auth <path-to-auth.json>]
+#   ./run-safent.sh --help
 #
 # --codex-auth <path>: OPTIONAL. Bind-mounts an EXISTING, host-side OpenAI
 #   Codex CLI auth.json (from a `codex login` the owner already did on the
@@ -14,10 +15,21 @@
 #   `codex_app_server` runtime (hermes-agent 0.15.1, agent/transports/
 #   codex_app_server.py — spawns the REAL `codex` binary, which reads
 #   CODEX_HOME/auth.json itself) can reuse that session without a second
-#   login. This is NOT the primary Codex auth path — the owner normally
-#   authenticates the SUBSCRIPTION device-code flow from inside Safent's own
-#   UI (Settings -> Providers -> OpenAI Codex; dbus_runtime_service.py's
-#   _codex_oauth_worker), which needs no container flag at all.
+#   login. This is a SECONDARY path for that opt-in runtime only — it needs
+#   no container flag for either of the two normal OpenAI Codex / ChatGPT
+#   provider paths below (both run entirely from inside Safent's own UI,
+#   Settings -> Providers -> OpenAI Codex / ChatGPT (suscripción)):
+#     1. ChatGPT subscription, device-code login (the default: click "Iniciar
+#        sesión con ChatGPT" — dbus_runtime_service.py's _codex_oauth_worker).
+#     2. Your own OpenAI API key, pay-per-token fallback ("Usar clave de API
+#        en su lugar" on the same card — plan.md D-A4).
+#
+# Safent Ads (MCP campaign tools, Google/Meta) is set up the SAME way, no
+# container flag either: Herramientas -> "Safent Ads · campañas Google/Meta"
+# -> paste your tenant's https:// MCP URL -> Conectar. That single URL is the
+# owner-authorized managed-remote endpoint (hermes.shell_server.
+# managed_remote_endpoints; https-only, no IP literals, port 443 only) the
+# container's default-deny MCP netns is allowed to reach for that ONE bridge.
 set -euo pipefail
 
 IMAGE="ghcr.io/devwspito/safent:latest"
@@ -25,8 +37,16 @@ HOST_PORT="17517"
 CODEX_AUTH_PATH=""
 _positional_index=0
 
+usage() {
+  sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
     --codex-auth)
       [ $# -ge 2 ] || { echo "--codex-auth requires a path"; exit 1; }
       CODEX_AUTH_PATH="$2"

@@ -84,6 +84,20 @@ podman build -f ops/container/Containerfile -t safent-runtime:dev .
 NAME=safent HOST_PORT=17517 ./ops/container/run-safent.sh safent-runtime:dev
 ```
 
+**Connecting a model provider or an MCP tool:** everything runs from inside the
+UI (`Settings -> Providers` / `Herramientas`) — no container flags needed for
+either normal flow:
+
+- **OpenAI Codex / ChatGPT (suscripción):** sign in with your ChatGPT
+  subscription (device-code login) or, as a fallback, use your own OpenAI API
+  key — both live on the same "OpenAI Codex / ChatGPT" card. See
+  `./ops/container/run-safent.sh --help` for the optional `--codex-auth` flag
+  (a secondary path, only for the opt-in `codex_app_server` runtime).
+- **Safent Ads (MCP campaign tools, Google/Meta):** paste your tenant's
+  `https://` MCP URL into the "Safent Ads · campañas Google/Meta" preset —
+  that single owner-authorized URL is what the container's default-deny MCP
+  network namespace is allowed to reach for that bridge.
+
 ---
 
 ## 🏗️ Architecture
