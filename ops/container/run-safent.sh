@@ -78,6 +78,9 @@ while [ $# -gt 0 ]; do
 done
 
 NAME="${SAFENT_NAME:-safent}"
+# Volume follows the container name so a test container (SAFENT_NAME=next-smoke)
+# can never mount production's safent-data by accident. Override with SAFENT_VOLUME.
+VOLUME="${SAFENT_VOLUME:-${NAME}-data}"
 RUNTIME="$(command -v podman || command -v docker)"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SECCOMP="${SAFENT_SECCOMP:-$HERE/seccomp/safent.json}"
@@ -146,7 +149,7 @@ SAFENT_TZ_VALUE="$(host_tz)"
 #                       confinement is Landlock/seccomp/netns/uid inside, not the outer
 #                       SELinux label). No-op on AppArmor/no-LSM hosts.
 #   --shm-size=1g       Chromium needs a real /dev/shm.
-#   -v safent-data       persist /var/lib/hermes (keystore, audit, config) across
+#   -v ${NAME}-data      persist /var/lib/hermes (keystore, audit, config) across
 #                       image updates (so master.key / provider keys survive pull).
 # NOTE: NoNewPrivileges is set PER-UNIT (the hardened units), NOT container-wide —
 # a container-level no-new-privileges breaks dbus/login setuid and the boot fails.
@@ -158,7 +161,7 @@ exec "$RUNTIME" run -d --name "$NAME" --systemd=always \
   --security-opt unmask=/sys/kernel/security \
   --security-opt label=disable \
   -v /sys/kernel/security:/sys/kernel/security:ro \
-  -v safent-data:/var/lib/hermes \
+  -v "${VOLUME}:/var/lib/hermes" \
   --shm-size=1g \
   ${CODEX_AUTH_MOUNT[@]+"${CODEX_AUTH_MOUNT[@]}"} \
   "$IMAGE"
