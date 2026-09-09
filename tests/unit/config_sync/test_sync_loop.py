@@ -68,9 +68,11 @@ def _sign_bundle(
     *,
     version: int,
     tenant_id: str,
-    issued_at: str = "2026-06-26T10:00:00Z",
+    issued_at: str | None = None,
 ) -> PolicyBundle:
     """Sign the FULL envelope (P0-1) and return a PolicyBundle."""
+    if issued_at is None:
+        issued_at = _utc_iso(timedelta())  # default to "now" — never a fixed past date
     envelope = signing_bytes(
         version=version,
         tenant_id=tenant_id,

@@ -126,11 +126,13 @@ def _build_envelope(
 
 def _seed_push_mapping(
     conn: sqlite3.Connection, *, proposal_id: str, request_id: str,
-    pushed_at: str = "2026-07-04T00:00:00Z",
+    pushed_at: str | None = None,
 ) -> None:
     """Seeds the (request_id -> proposal_id) mapping `_verify_and_apply_
     decision` needs (bug #2) — mirrors what `push_pending_enterprise_
     approvals` would have persisted for a real push."""
+    if pushed_at is None:
+        pushed_at = datetime.now(tz=UTC).isoformat()  # default to "now" — never a fixed past date
     ra._ensure_remote_approval_schema(conn)
     ra._mark_pushed(
         conn, proposal_id=proposal_id, request_id=request_id, pushed_at=pushed_at,
