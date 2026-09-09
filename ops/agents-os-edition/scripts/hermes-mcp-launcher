@@ -300,6 +300,11 @@ _ALLOWED_ENV_KEYS: frozenset[str] = frozenset({
     # OPENAI_API_KEY  — clave del endpoint (secreto, nunca se loguea).
     "OPENAI_BASE_URL",
     "OPENAI_API_KEY",
+    # safent-ads companion (024, mirror of _MCP_BYOK_ENV_KEYS): ADS_BEARER
+    # (secreto, Authorization: Bearer para mcp-remote -> companion) y
+    # NODE_EXTRA_CA_CERTS (ruta a la CA privada pineada del companion).
+    "ADS_BEARER",
+    "NODE_EXTRA_CA_CERTS",
 })
 
 # Env keys forwarded into the netns-jailed transient unit via --setenv. systemd-run

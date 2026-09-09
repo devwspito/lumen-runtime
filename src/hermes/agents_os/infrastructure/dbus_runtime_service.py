@@ -1449,6 +1449,12 @@ class DbusRuntimeServiceWiring:
                 "health": "healthy",
                 "tool_count": tc,
             })
+        for entry in out:
+            status = _seeded_companion_status(
+                entry["server_id"], connected=entry["health"] == "healthy"
+            )
+            if status is not None:
+                entry["companion_status"] = status
         return out
 
     async def add_mcp_server(self, *, draft_json: str, sender_uid: int) -> dict:
@@ -5438,6 +5444,46 @@ _POLICY_OVERLAY_ALLOWED_KEYS: frozenset[str] = frozenset({"enabled", "approval"}
 _POLICY_OVERLAY_APPROVAL_VALUES: frozenset[str] = frozenset({"auto", "hitl"})
 
 
+_QUALIFIED_MCP_TOOL_MIN_PARTS = 3  # "mcp", "<slug>", "<tool>" (mcp__<slug>__<tool>)
+
+
+def _mcp_slug_of_qualified_tool(tool_name: str) -> str | None:
+    """Return the slug in a `mcp__<slug>__<tool>` qualified name (mirrors
+    McpToolSpec.qualified_name, mcp/domain/entities.py), or None if
+    *tool_name* isn't MCP-qualified."""
+    parts = tool_name.split("__")
+    if len(parts) < _QUALIFIED_MCP_TOOL_MIN_PARTS or parts[0] != "mcp":
+        return None
+    return parts[1]
+
+
+def _policy_overlay_widens_managed_remote_write(tool_name: str, entry: dict) -> bool:
+    """Owner decision (024, spec.md §5): a cloud policy_overlay may only
+    NARROW a MANAGED_REMOTE slug's tools (approval:"hitl"), never WIDEN one
+    the classifier already gates behind HITL — a cloud that could flip a
+    spend/write tool to "auto" is a confused deputy over the owner's money.
+
+    True iff *entry* sets approval:"auto" on a `mcp__<slug>__<tool>` whose
+    slug is MANAGED_REMOTE AND whose classifier verdict (name + slug alone,
+    hints are never consulted for this tier — see classify_mcp_tool) is
+    NOT already auto_executable. A tool the classifier already marks auto
+    (a read, or a slug-widened prefix like safent-ads' apply_defensive_
+    action) is unaffected — "auto" there is a no-op, not a widen.
+    """
+    if entry.get("approval") != "auto":
+        return False
+    slug = _mcp_slug_of_qualified_tool(tool_name)
+    if slug is None or slug not in _MANAGED_REMOTE_MCP_SLUGS:
+        return False
+    from hermes.mcp.domain.tool_classifier import classify_mcp_tool  # noqa: PLC0415
+    from hermes.mcp.domain.value_objects import TrustLevel  # noqa: PLC0415
+
+    classification = classify_mcp_tool(
+        tool_name, trust_level=TrustLevel.MANAGED_REMOTE, slug=slug
+    )
+    return not classification.auto_executable
+
+
 def _validate_policy_overlay_shape(policy_overlay: dict) -> str | None:
     """Reject a policy_overlay whose per-tool entries aren't the pinned shape.
 
@@ -5449,6 +5495,11 @@ def _validate_policy_overlay_shape(policy_overlay: dict) -> str | None:
     at the point untrusted D-Bus input enters the system (CWE-20). An entry
     carrying ONLY "enabled" (the pre-existing shape) validates identically
     to before this addition.
+
+    024: ALSO rejects an "auto" entry that would WIDEN a MANAGED_REMOTE
+    slug's tool past what the classifier gates (see
+    _policy_overlay_widens_managed_remote_write) — restrict-only holds for
+    money, not just for the owner's local policy.
     """
     for tool, entry in policy_overlay.items():
         if not isinstance(entry, dict):
@@ -5468,6 +5519,12 @@ def _validate_policy_overlay_shape(policy_overlay: dict) -> str | None:
             return (
                 f"policy_overlay[{tool!r}].approval debe ser uno de "
                 f"{sorted(_POLICY_OVERLAY_APPROVAL_VALUES)}"
+            )
+        if _policy_overlay_widens_managed_remote_write(tool, entry):
+            return (
+                f"policy_overlay[{tool!r}].approval='auto' ensancharía un tool "
+                "MANAGED_REMOTE que el clasificador exige HITL — solo se admite "
+                "'hitl' (estrechar) para estos tools"
             )
     return None
 
@@ -6707,6 +6764,13 @@ _MCP_BYOK_ENV_KEYS: frozenset[str] = frozenset({
     "HOME",
     "MCP_REMOTE_CONFIG_DIR",
     "XDG_CONFIG_HOME",
+    # safent-ads companion (024): declared-empty placeholders in the seeded
+    # entry, filled at connect time from hermes.shell_server.companions (see
+    # _mcp_connect) — never from a caller-supplied value (ADS_BEARER can only
+    # ever be FILLED here, the same fill-only discipline as OPENAI_API_KEY
+    # above; a caller passing a non-empty value would be ignored, not trusted).
+    "ADS_BEARER",
+    "NODE_EXTRA_CA_CERTS",
 })
 
 
@@ -6961,6 +7025,107 @@ def _import_seed_mcp_servers() -> None:
             os.replace(tmp, _MCP_SEED_MARKER)
         except Exception as exc:  # noqa: BLE001
             logger.warning("hermes.dbus.mcp_seed_marker_write_failed: %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# Companion seed importer (024) — registers _SEEDED_MCP_SLUGS at boot.
+#
+# Unlike _import_seed_mcp_servers (fixed argv baked into the IMAGE), a
+# companion's argv is resolved from hermes.shell_server.companions — a
+# HOST-provisioned, root-owned file bound in at container start (spec.md §2
+# option A). A slug is marked "imported" ONLY once its companion actually
+# resolved: an ABSENT/invalid companion is retried every boot (transient —
+# the companion container may still be starting), but a slug that succeeded
+# once never re-imports even if the owner later removes it (plan.md §1.4,
+# "no resucita si el dueño lo borra") — the SAME marker discipline as
+# _import_seed_mcp_servers, on its own file so the two never interact.
+# ---------------------------------------------------------------------------
+
+_COMPANION_SEED_MARKER = "/var/lib/hermes/instance/companion-seeds-imported.json"
+
+_COMPANION_SEED_LABELS: dict[str, str] = {
+    "safent-ads": "Safent Ads · campañas Google y Meta (preinstalado)",
+}
+
+
+def _import_seed_companion_servers() -> None:
+    """Import not-yet-imported companion-backed seeds (fail-soft per slug).
+
+    No companion this boot -> no Neus entry -> the slug's tools are simply
+    ABSENT from the catalog (FR-3: present-and-broken is never acceptable).
+    """
+    from hermes.shell_server.companions import get_companion  # noqa: PLC0415
+
+    imported = _read_companion_seed_marker()
+    existing = {e["server_id"] for e in _neus_load_entries()}
+    changed = False
+    for slug in sorted(_SEEDED_MCP_SLUGS):
+        if slug in imported:
+            continue
+        endpoint = get_companion(slug)
+        if endpoint is None:
+            continue  # not up / not provisioned yet — retry next boot
+        imported.add(slug)
+        changed = True
+        if slug in existing:
+            continue
+        try:
+            # register=False: same reason as _import_seed_mcp_servers — avoid
+            # blocking D-Bus dispatch at boot; reconnect_persisted_mcp_servers
+            # connects it right after, off the critical path.
+            _neus_write_mcp_entry(
+                slug, endpoint.argv,
+                env={"ADS_BEARER": "", "NODE_EXTRA_CA_CERTS": ""},
+                label=_COMPANION_SEED_LABELS.get(slug, slug),
+                register=False,
+            )
+            logger.info("hermes.dbus.companion_seed_imported slug=%s", slug)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.companion_seed_import_failed slug=%s: %s", slug, exc)
+
+    if changed:
+        _write_companion_seed_marker(imported)
+
+
+def _read_companion_seed_marker() -> set[str]:
+    try:
+        with open(_COMPANION_SEED_MARKER, encoding="utf-8") as fh:
+            return {str(s) for s in json.load(fh)}
+    except FileNotFoundError:
+        return set()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("hermes.dbus.companion_seed_marker_unreadable: %s", exc)
+        return set()
+
+
+def _write_companion_seed_marker(imported: set[str]) -> None:
+    try:
+        import os  # noqa: PLC0415
+
+        os.makedirs(os.path.dirname(_COMPANION_SEED_MARKER), exist_ok=True)
+        tmp = _COMPANION_SEED_MARKER + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(sorted(imported), fh)
+        os.replace(tmp, _COMPANION_SEED_MARKER)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("hermes.dbus.companion_seed_marker_write_failed: %s", exc)
+
+
+def _seeded_companion_status(server_id: str, *, connected: bool) -> str | None:
+    """Coarse companion status for list_mcp_servers (FR-2), None for a
+    non-seeded slug (no badge). "listo" needs a live MCP connection;
+    finer states ("instalado · esperando cuentas", "versión incompatible")
+    need the companion's own `/mcp/health` payload (accounts_linked /
+    contract_version) — that endpoint is a follow-up on the ads service
+    side (see this feature's implementation report), so this is
+    deliberately a 2-state MVP, never a fabricated "listo"."""
+    if server_id not in _SEEDED_MCP_SLUGS:
+        return None
+    from hermes.shell_server.companions import get_companion  # noqa: PLC0415
+
+    if get_companion(server_id) is None:
+        return "esperando_servicio"
+    return "listo" if connected else "esperando_servicio"
 
 
 # ---------------------------------------------------------------------------
@@ -7249,6 +7414,18 @@ def _mcp_id(server_id: str):
 # (R16, below) — single source, no drift between the two call sites.
 _MANAGED_REMOTE_MCP_SLUGS: frozenset[str] = frozenset({"safent-control", "safent-ads"})
 
+# Slugs whose LIFECYCLE is "seeded" — installed from the image/host at boot,
+# no owner-typed URL, no install-scan prompt (024, spec.md INV-5) — as
+# opposed to _BUILTIN_MCP_SLUGS, which is a TRUST axis (frictionless,
+# no-egress, fully vetted). The two axes are independent: "safent-ads" is
+# seeded (this set) AND MANAGED_REMOTE (_MANAGED_REMOTE_MCP_SLUGS, trust) —
+# it must NEVER be added to _BUILTIN_MCP_SLUGS (see _mcp_connect below).
+# Unlike the image-baked seed/mcp-servers.json (excel/word/powerpoint —
+# fixed argv, no host to resolve), a seeded MANAGED_REMOTE slug's argv is
+# resolved from a HOST-provisioned file (hermes.shell_server.companions) at
+# import time — see _import_seed_companion_servers().
+_SEEDED_MCP_SLUGS: frozenset[str] = frozenset({"safent-ads"})
+
 
 def _grant_mcp_egress_for_managed_remote(server_id: str) -> None:
     """R16 (2026-07-07) + item 3 (ads-vertical): grant the MCP netns egress to
@@ -7372,6 +7549,42 @@ def _apply_mcp_egress_grant(server_id: str, host: str) -> None:
     )
 
 
+def _autowire_companion_env(server_id: str, resolved_env: dict[str, str]) -> None:
+    """Fill a seeded companion's declared-but-empty ADS_BEARER/NODE_EXTRA_CA_
+    CERTS from hermes.shell_server.companions, mutating *resolved_env* in
+    place. Same fill-only discipline as the OPENAI_* auto-wire above (never
+    overwrites a non-empty value, never adds a key the entry didn't declare).
+
+    The bearer is read FRESH from the host-provisioned file on every connect
+    (never persisted into Neus's config.yaml, INV-4) so a rotated bearer
+    (`safent companion rotate`) takes effect on the next reconnect with no
+    extra plumbing. NODE_EXTRA_CA_CERTS pins node's TLS trust to the ONE
+    companion CA — with the fixed host in argv (companions.py's own
+    .safent.internal-suffix check) that is the full pin.
+    """
+    if server_id not in _SEEDED_MCP_SLUGS:
+        return
+    if "ADS_BEARER" not in resolved_env and "NODE_EXTRA_CA_CERTS" not in resolved_env:
+        return
+    try:
+        from hermes.shell_server.companions import (  # noqa: PLC0415
+            get_companion,
+            read_companion_bearer,
+        )
+
+        endpoint = get_companion(server_id)
+        if endpoint is None:
+            return
+        if not resolved_env.get("NODE_EXTRA_CA_CERTS"):
+            resolved_env["NODE_EXTRA_CA_CERTS"] = endpoint.ca_path
+        if not resolved_env.get("ADS_BEARER"):
+            bearer = read_companion_bearer(endpoint)
+            if bearer:
+                resolved_env["ADS_BEARER"] = bearer
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("hermes.dbus.mcp_companion_autowire_failed server=%s: %s", server_id, exc)
+
+
 async def _mcp_connect(
     manager,
     server_id: str,
@@ -7421,6 +7634,10 @@ async def _mcp_connect(
             logger.warning(
                 "hermes.dbus.mcp_provider_autowire_failed server=%s: %s", server_id, _e_pv
             )
+    # Auto-wire a seeded companion's CA path + bearer (024, item 2) — extracted
+    # to its own function (not inlined here) to keep this branch out of
+    # _mcp_connect's own complexity budget.
+    _autowire_companion_env(server_id, resolved_env)
     # Confianza: los MCP VETADOS del stack de fábrica (locales, sin egress, horneados por
     # nosotros) entran como BUILTIN → sus tools fluyen sin HITL (la jaula contiene; lo
     # marcado destructivo sigue gateado). Los MCP de primera parte que SÍ EGRESAN a un
@@ -7635,6 +7852,9 @@ async def reconnect_persisted_mcp_servers(manager) -> None:
     # First: land any image-baked seeds not yet registered (first boot / upgrade).
     # The loop below then re-validates + connects them like any persisted entry.
     _import_seed_mcp_servers()
+    # Then: land any companion-backed seeds (024) — SEPARATE source (host-
+    # provisioned file, not the image), same "land then reconnect below" flow.
+    _import_seed_companion_servers()
     entries = _neus_load_entries()
     if not entries:
         return
