@@ -1,0 +1,42 @@
+#!/bin/sh
+# hermes-host-firewall-engine-port — open the ENGINE-published control-plane port.
+#
+# `inet hermes_host` is an INPUT default-deny. In the CONTAINER deployment the
+# control plane is published by the container engine (run-safent.sh's
+# `-p 127.0.0.1:<port>:7517`); the engine DNATs on the HOST side, so inside this
+# netns the packet arrives from the bridge GATEWAY with no `ct status dnat` to
+# match on, and the default-deny kills it (verified: :7517 goes from 307 to a
+# hard timeout the moment the table loads).
+#
+# This is the SAME case host-input.nft already accepts STATICALLY for the two VM
+# models (QEMU user-net 10.0.2.0/24, Apple VZ 192.168.64.0/24): the guest NIC is
+# reachable only by its hypervisor. A container's bridge gateway is not a
+# constant, so it is derived at boot rather than baked.
+#
+# Scoped hard:
+#   - only inside a container (/run/.containerenv or /.dockerenv). On bare metal
+#     / the appliance qcow2 the default gateway is the LAN ROUTER, which must
+#     NOT be able to reach :7517 — there the rule is never added.
+#   - exactly one source address (the gateway), exactly one port.
+#   - appended to `input_dynamic`, never to `input`: `nft add rule` appends to
+#     the END, and `input` ends with an explicit terminal drop, so a rule added
+#     there would be dead code.
+#   - idempotent by comment, so a restart never stacks duplicates.
+set -eu
+
+PORT=7517
+COMMENT="container engine published control plane"
+
+[ -e /run/.containerenv ] || [ -e /.dockerenv ] || exit 0
+
+gw=$(ip route show default 2>/dev/null | head -n1 | cut -d' ' -f3)
+case "$gw" in
+  ''|*[!0-9.]*) exit 0 ;;   # no default route, or not a plain IPv4 literal
+esac
+
+if nft list chain inet hermes_host input_dynamic 2>/dev/null | grep -q "$COMMENT"; then
+  exit 0
+fi
+
+nft add rule inet hermes_host input_dynamic \
+  ip saddr "$gw" tcp dport "$PORT" accept comment "\"$COMMENT\""

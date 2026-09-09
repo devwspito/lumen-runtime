@@ -25,6 +25,14 @@ User=root
 Group=root
 ExecStart=/usr/sbin/nft -f /etc/nftables/hermes/host-input.nft
 ExecReload=/usr/sbin/nft -f /etc/nftables/hermes/host-input.nft
+
+# CONTAINER deployment only — see the script's own header for WHY. Inline shell
+# is avoided on purpose: systemd expands `$VAR` in Exec lines to the EMPTY string
+# for anything it does not know, which silently guts a one-liner that needs shell
+# variables. `-` prefix: a firewall that loaded but could not derive the gateway
+# must not fail the unit (it fails CLOSED — the UI is simply unreachable, loudly).
+ExecStartPost=-/usr/libexec/hermes/hermes-host-firewall-engine-port
+
 # Fail-safe: NO se hace flush al parar — el firewall permanece puesto.
 
 NoNewPrivileges=yes

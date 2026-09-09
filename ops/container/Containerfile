@@ -252,6 +252,11 @@ COPY ops/agents-os-edition/scripts/hermes-companion-nft   /usr/libexec/hermes/he
 # rootful) and never `hermes`, so the daemon (uid 880) cannot read the mount; this
 # stages a 0440 root:hermes copy on tmpfs. See the script's own docstring.
 COPY ops/agents-os-edition/scripts/hermes-companion-bearer /usr/libexec/hermes/hermes-companion-bearer
+# Engine-published control-plane accept for the host INPUT default-deny (024).
+COPY ops/agents-os-edition/scripts/hermes-host-firewall-engine-port /usr/libexec/hermes/hermes-host-firewall-engine-port
+# MCP netns -> egress proxy INPUT accept (024) — one script, called by BOTH the
+# base unit and the container drop-in that resets its ExecStart list.
+COPY ops/agents-os-edition/scripts/hermes-mcp-proxy-accept /usr/libexec/hermes/hermes-mcp-proxy-accept
 # CDP-controller confinement shim (2026-07-05 audit): replaces the /usr/bin/agent-browser
 # npm symlink so EVERY runtime agent-browser invocation applies the BROWSER_CONTROLLER
 # Landlock ruleset (denies the daemon's keystore to the controller) before execing the
@@ -476,6 +481,7 @@ RUN systemctl enable \
       hermes-exec-launcher.service \
       hermes-audit-tail.service \
       hermes-companion-egress.service \
+      hermes-host-firewall.service \
       hermes-workspace.target 2>&1 | tail -3 || true
 
 # ── Edition marker + EE service gate ─────────────────────────────────────────

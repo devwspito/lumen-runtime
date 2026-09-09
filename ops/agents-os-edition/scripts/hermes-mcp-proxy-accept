@@ -1,0 +1,49 @@
+#!/bin/sh
+# hermes-mcp-proxy-accept — host INPUT accept for the MCP netns -> egress proxy.
+#
+# The egress proxy listens on the HOST side of the MCP veth (10.200.1.1:3128),
+# so the MCP netns's connection (source 10.200.1.2) ENTERS the host netns and is
+# caught by `inet hermes_host input`'s default-deny. Without this rule npx/uvx
+# never reach their proxy and every MCP is dead.
+#
+# A SCRIPT, not an inline `ExecStart=/bin/sh -c '...'`, because that line was
+# duplicated in hermes-browser-netns.service AND in the container drop-in that
+# RESETS the unit's ExecStart list (`ExecStart=`), i.e. the only copy that ever
+# runs in the container deployment — and both copies carried the same two bugs:
+#
+#   * chain `input`: `nft add rule` APPENDS, and `input` ends with an explicit
+#     terminal drop, so the accept landed after it and was dead code.
+#   * comment quoting: systemd unquotes the Exec line before handing it to
+#     /bin/sh, which unquotes it again, so nft received an UNQUOTED multi-word
+#     comment -> "syntax error, unexpected string" -> exit 1 -> the oneshot
+#     FAILED -> hermes-runtime's confinement gate aborted the daemon.
+#
+# One file, no nested quoting, callable from both. Idempotent by comment.
+set -eu
+
+TABLE="inet hermes_host"
+CHAIN=input_dynamic
+COMMENT="mcp netns -> egress proxy"
+RULE_MATCH="ip saddr 10.200.1.2 ip daddr 10.200.1.1 tcp dport 3128"
+
+if [ "${1:-}" = "--remove" ]; then
+    handle=$(nft -a list chain $TABLE $CHAIN 2>/dev/null \
+        | grep "$COMMENT" | grep -oE 'handle [0-9]+' | grep -oE '[0-9]+' | head -n1)
+    [ -n "$handle" ] || exit 0
+    nft delete rule $TABLE $CHAIN handle "$handle" 2>/dev/null || true
+    exit 0
+fi
+
+if ! nft list table $TABLE >/dev/null 2>&1; then
+    echo "hermes-mcp-proxy-accept: tabla $TABLE ausente; ¿hermes-host-firewall.service activo? (MCP no alcanzará su proxy)" >&2
+    exit 0
+fi
+
+if nft list chain $TABLE $CHAIN 2>/dev/null | grep -q "$COMMENT"; then
+    exit 0
+fi
+
+# The quotes must be part of the TEXT nft lexes: nft joins its argv with
+# spaces and re-parses, so a shell-quoted multi-word argument still arrives
+# as five bare tokens ("syntax error, unexpected string"). Verified live.
+nft add rule $TABLE $CHAIN $RULE_MATCH accept comment "\"$COMMENT\""
