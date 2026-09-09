@@ -29,6 +29,20 @@ table inet hermes_browser_egress {
         # Respuestas a conexiones establecidas (el browser habló primero, ya permitido).
         ct state established,related accept comment "respuestas ct established"
 
+        # Companion egress (024, item 3) — MISMO fragmento que incluye la cadena
+        # forward de mcp-host.nft, a proposito. Las DOS tablas (hermes_browser_
+        # egress y hermes_mcp_egress) enganchan el MISMO hook `forward` con la
+        # MISMA prioridad en el MISMO netns (el del contenedor): nftables evalua
+        # TODAS las base chains registradas, y un `drop` es TERMINAL para el
+        # paquete — no solo para su cadena. Por eso el drop anti-pivot de ABAJO
+        # (10.0.0.0/8 contiene 10.201.0.0/24) mataba el trafico MCP→companion que
+        # hermes_mcp_egress ya habia aceptado: un flujo solo pasa si NINGUNA de
+        # las dos cadenas lo dropea. La regla incluida esta pineada a `ip saddr
+        # 10.200.1.2` (el netns del MCP), asi que el BROWSER (10.200.0.2) no gana
+        # ninguna ruta nueva — sigue sin poder alcanzar el companion ni el resto
+        # de RFC1918. Debe ir ANTES del drop de abajo: el drop es terminal.
+        include "/run/hermes/nft/companion-*-fwd.nft"
+
         # Anti-pivot RFC1918 + loopback: el browser no puede pivotar al host, LAN,
         # daemon, vLLM (127/8), shell-server, tasks.sock, ni otros namespaces.
         # Log antes de drop para auditoría (journald + audit).
