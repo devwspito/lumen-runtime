@@ -160,8 +160,8 @@ class StdioMcpClient:
 
         import anyio  # noqa: PLC0415
         from mcp.shared.message import SessionMessage  # noqa: PLC0415
-        import mcp.types as _mcp_types  # noqa: PLC0415
 
+        decode_line = _jsonrpc_line_decoder()
         read_stream_writer, read_stream = anyio.create_memory_object_stream(0)
         write_stream, write_stream_reader = anyio.create_memory_object_stream(0)
 
@@ -186,8 +186,16 @@ class StdioMcpClient:
                             if not line:
                                 continue
                             try:
-                                message = _mcp_types.JSONRPCMessage.model_validate_json(line)
+                                message = decode_line(line)
                             except Exception as exc:  # noqa: BLE001 — línea corrupta del MCP
+                                # El SDK 2.0 se TRAGA los Exception del read stream
+                                # (JsonRpcDispatcher._dispatch: logger.debug + return),
+                                # así que sin este warning una línea indescifrable se
+                                # manifiesta 120 s después como un timeout mudo.
+                                logger.warning(
+                                    "hermes.mcp.launcher_decode_error: %s: %s",
+                                    type(exc).__name__, exc,
+                                )
                                 await read_stream_writer.send(exc)
                                 continue
                             await read_stream_writer.send(SessionMessage(message))
@@ -418,6 +426,30 @@ class StdioMcpClient:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _jsonrpc_line_decoder() -> Any:
+    """Devuelve `line -> JSONRPC message` válido para el SDK MCP 1.x Y 2.x.
+
+    En el SDK 1.x `mcp.types.JSONRPCMessage` era un `RootModel` de pydantic y
+    `JSONRPCMessage.model_validate_json(line)` era el idioma correcto. En el SDK
+    2.0 pasó a ser un alias de unión PEP-604 (`types.UnionType`), que NO tiene
+    métodos de pydantic: la misma llamada revienta con AttributeError en CADA
+    línea entrante, el pump mete la excepción en el read stream, el dispatcher
+    2.0 la descarta a nivel DEBUG y el `initialize()` se queda esperando una
+    respuesta que ya había llegado — hasta el timeout.
+
+    Un `TypeAdapter` sobre la anotación funciona con ambas formas; cuando el SDK
+    publica el suyo (`jsonrpc_message_adapter`, 2.x) se reutiliza tal cual para
+    no divergir de lo que hace `stdio_client` internamente.
+    """
+    import mcp.types as mcp_types  # noqa: PLC0415
+    from pydantic import TypeAdapter  # noqa: PLC0415
+
+    adapter = getattr(mcp_types, "jsonrpc_message_adapter", None)
+    if adapter is None:
+        adapter = TypeAdapter(mcp_types.JSONRPCMessage)
+    return adapter.validate_json
 
 
 def _import_mcp() -> tuple[Any, Any]:
