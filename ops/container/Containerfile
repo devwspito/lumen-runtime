@@ -430,9 +430,17 @@ ENV XDG_CACHE_HOME=/var/lib/hermes/xdg-cache
 # exercising a connection that has no companion to reach at build time.
 RUN mkdir -p /var/lib/hermes/npm-cache /var/lib/hermes/uv-cache /var/lib/hermes/xdg-cache \
       /var/lib/hermes/mcp-home && \
+    # `--with mcp<2` (powerpoint): office-powerpoint-mcp-server importa
+    # `mcp.server.fastmcp`, que el SDK MCP 2.0 renombró a `mcp.server.mcpserver`
+    # — sin la restricción, uv resuelve mcp 2.x y el hijo muere en el import
+    # ("ModuleNotFoundError: No module named 'mcp.server.fastmcp'") antes de
+    # decir una sola línea de JSON-RPC. El spec de calentamiento tiene que ser
+    # IDÉNTICO al argv de seed/mcp-servers.json: uv cachea el entorno por sus
+    # requisitos y el arranque real es `--offline`, así que cualquier diferencia
+    # es un fallo de caché y el servidor nunca levanta.
     for spec in "excel-mcp-server stdio" \
                 "--from office-word-mcp-server word_mcp_server" \
-                "--from office-powerpoint-mcp-server ppt_mcp_server"; do \
+                "--from office-powerpoint-mcp-server --with mcp<2 ppt_mcp_server"; do \
       echo "▸ warming uvx $spec" ; \
       HOME=/var/lib/hermes/mcp-home timeout 240 uvx $spec </dev/null >/dev/null 2>&1 || true ; \
     done ; \

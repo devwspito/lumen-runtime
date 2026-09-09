@@ -12,6 +12,6 @@
   {
     "server_id": "powerpoint",
     "label": "Presentaciones · crea y edita PowerPoint (.pptx) sin clave",
-    "argv": ["uvx", "--from", "office-powerpoint-mcp-server", "ppt_mcp_server"]
+    "argv": ["uvx", "--from", "office-powerpoint-mcp-server", "--with", "mcp<2", "ppt_mcp_server"]
   }
 ]
