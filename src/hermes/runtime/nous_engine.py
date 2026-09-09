@@ -1,6 +1,6 @@
 """NousReasoningEngine: motor agentico Hermes delegando en hermes-agent (NousResearch).
 
-Adapta el Protocol ReasoningEngine sobre AIAgent de NousResearch v0.15.1.
+Adapta el Protocol ReasoningEngine sobre AIAgent de NousResearch v0.21.1 (v2026.9.7).
 
 Seams de intercepción (THREE paths, one gate each):
   GovernedAIAgent intercepta en TRES puntos:
@@ -150,6 +150,9 @@ if TYPE_CHECKING:
     )
 
 logger = logging.getLogger(__name__)
+
+# AIAgent.max_iterations default before hermes-agent 0.21 made it unlimited.
+_NOUS_LEGACY_MAX_ITERATIONS = 90
 
 # Timeout en segundos para el puente async broker.dispatch desde el hilo executor.
 # El broker devuelve PENDING_APPROVAL sin esperar al humano → timeout generoso
@@ -900,10 +903,10 @@ def _attach_artifacts(narrative: str, paths: list[Path]) -> str:
 
 
 class NousAgentNotInstalledError(ImportError):
-    """hermes-agent (NousResearch v0.15.1) no está instalado.
+    """hermes-agent (NousResearch v0.21.1) no está instalado.
 
     Instalar con:
-        pip install hermes-agent==0.15.1
+        pip install hermes-agent==0.21.1
     O en el bake del Containerfile (ver TODO devops al final del módulo).
     """
 
@@ -916,7 +919,7 @@ def _import_ai_agent() -> type:
     except ImportError as exc:
         raise NousAgentNotInstalledError(
             "hermes-agent (NousResearch) no está instalado. "
-            "Ejecuta: pip install hermes-agent==0.15.1\n"
+            "Ejecuta: pip install hermes-agent==0.21.1\n"
             "O activa el engine por defecto: HERMES_ENGINE=litellm"
         ) from exc
 
@@ -1153,8 +1156,14 @@ class GovernedAIAgent:
         tool_call_id: str | None = None,
         messages: list[Any] | None = None,
         pre_tool_block_checked: bool = False,
+        **native_kwargs: Any,
     ) -> str:
         """Gate F2/F3: clasifica la tool y enruta por READ/WRITE/UNKNOWN.
+
+        `native_kwargs`: extra keyword args the hermes-agent tool executor
+        passes since 0.21 (skip_tool_request_middleware,
+        skip_tool_execution_middleware, tool_request_middleware_trace). They
+        are opaque to the gate and forwarded verbatim to the native invoke.
 
         Orden de clasificación (fail-closed):
           1. Catálogo nativo Nous (classify_nous_tool) — herramientas del core.
@@ -1170,6 +1179,7 @@ class GovernedAIAgent:
             return self._dispatch_nous_native(
                 function_name, function_args, effective_task_id,
                 tool_call_id, messages, pre_tool_block_checked, nous_risk,
+                **native_kwargs,
             )
 
         external_spec = self._external_catalog.get(function_name)
@@ -1190,6 +1200,7 @@ class GovernedAIAgent:
         messages: list[Any] | None,
         pre_tool_block_checked: bool,
         risk: NousRisk,
+        **native_kwargs: Any,
     ) -> str:
         """Enruta una tool del catálogo nativo de Nous.
 
@@ -1214,6 +1225,7 @@ class GovernedAIAgent:
             return self._execute_read_native(
                 function_name, function_args, effective_task_id,
                 tool_call_id, messages, pre_tool_block_checked,
+                **native_kwargs,
             )
         # WRITE nativa. SECURITY (red-team 2026-06-19 — el agujero más grave): el tool
         # "terminal" nativo de Nous ejecuta subprocess EN EL PROCESO DEL DAEMON
@@ -1228,6 +1240,7 @@ class GovernedAIAgent:
         result = self._call_native_invoke(
             function_name, function_args, effective_task_id,
             tool_call_id, messages, pre_tool_block_checked,
+            **native_kwargs,
         )
         # Taint de procedencia: browser_navigate/etc. ingieren contenido web no
         # confiable → marca para que el gate eleve a HITL los WRITE subsecuentes.
@@ -1402,6 +1415,7 @@ class GovernedAIAgent:
         tool_call_id: str | None,
         messages: list[Any] | None,
         pre_tool_block_checked: bool,
+        **native_kwargs: Any,
     ) -> str:
         """Ejecuta el handler nativo de Nous para tools READ_ONLY.
 
@@ -1410,6 +1424,7 @@ class GovernedAIAgent:
         result = self._call_native_invoke(
             function_name, function_args, effective_task_id,
             tool_call_id, messages, pre_tool_block_checked,
+            **native_kwargs,
         )
         if _is_external_content_tool(function_name):
             self._read_external_content = True
@@ -1427,6 +1442,7 @@ class GovernedAIAgent:
         tool_call_id: str | None,
         messages: list[Any] | None,
         pre_tool_block_checked: bool,
+        **native_kwargs: Any,
     ) -> str:
         from agent.agent_runtime_helpers import invoke_tool  # noqa: PLC0415
         return invoke_tool(
@@ -1437,6 +1453,7 @@ class GovernedAIAgent:
             tool_call_id,
             messages,
             pre_tool_block_checked,
+            **native_kwargs,
         )
 
     def _run_caged_tool(
@@ -2941,7 +2958,7 @@ class NousReasoningEngine:
             _extra_knobs["max_tokens"] = model_config.max_tokens
         if model_config.temperature != 0.0:
             _extra_knobs["temperature"] = model_config.temperature
-        # AIAgent (Nous v0.15.1) does NOT accept a `timeout_seconds` constructor
+        # AIAgent (Nous 0.15.1 through 0.21.1) does NOT accept a `timeout_seconds` constructor
         # kwarg — passing it raises TypeError and kills the turn. Per-request LLM
         # timeouts are ENV-driven (HERMES_API_TIMEOUT / HERMES_STREAM_STALE_TIMEOUT
         # / HERMES_STREAM_READ_TIMEOUT). Forward our configured value to the env
@@ -2952,8 +2969,14 @@ class NousReasoningEngine:
         # >1 worker pool needs a per-request timeout in Nous — env is process
         # global; tracked as backlog.)
         os.environ["HERMES_API_TIMEOUT"] = str(model_config.timeout_seconds)
-        if model_config.max_iterations != 8:
-            _extra_knobs["max_iterations"] = model_config.max_iterations
+        # hermes-agent 0.21 made AIAgent's default max_iterations UNLIMITED
+        # (sys.maxsize; 0.15 capped at 90). A governed runtime keeps a ceiling:
+        # forward the operator's value, else the pre-0.21 upstream default.
+        _extra_knobs["max_iterations"] = (
+            model_config.max_iterations
+            if model_config.max_iterations != 8
+            else _NOUS_LEGACY_MAX_ITERATIONS
+        )
         # Reasoning models served WITHOUT a vLLM reasoning parser (Qwen3.x,
         # DeepSeek-R1, GLM Thinking on a plain OpenAI-compat endpoint) emit CoT
         # as BARE prose in message.content with no <think> tags, which neither
@@ -3906,6 +3929,9 @@ def _patch_memory_tool(agent: "GovernedAIAgent") -> None:
             function_args["content"] = content
         if old_text is not None:
             function_args["old_text"] = old_text
+        # hermes-agent 0.21 added `new_text` (replace) and `operations` (batch);
+        # carry every non-None extra so the approved write is complete.
+        function_args.update({k: v for k, v in kwargs.items() if v is not None})
         return agent._dispatch_write_proposal(
             function_name="memory",
             function_args=function_args,
@@ -3947,6 +3973,8 @@ def _patch_clarify_tool(agent: "GovernedAIAgent") -> None:
         function_args: dict[str, Any] = {"question": question}
         if choices is not None:
             function_args["choices"] = choices
+        # hermes-agent 0.21 added `questions` (multi-question) and `multi_select`.
+        function_args.update({k: v for k, v in kwargs.items() if v is not None})
         return agent._dispatch_write_proposal(
             function_name="clarify",
             function_args=function_args,
@@ -4310,13 +4338,13 @@ def _enrich_prompt_with_memory_snapshot(base_prompt: str, tenant_id: UUID) -> st
 # ---------------------------------------------------------------------------
 # TODO DEVOPS — bake de hermes-agent en el Containerfile
 # ---------------------------------------------------------------------------
-# El paquete hermes-agent==0.15.1 (NousResearch) NO está en PyPI estándar.
+# El paquete hermes-agent==0.21.1 (NousResearch) NO está en PyPI estándar.
 # Debe instalarse en la imagen del SO antes de que HERMES_ENGINE=nous funcione.
 #
 # En Containerfile.personal-desktop (o equivalente del bake):
 #
 #     RUN pip install --target=/usr/lib/python3.13/site-packages \
-#         hermes-agent==0.15.1
+#         hermes-agent==0.21.1
 #
 # Ver feedback_bootc_pip_usr_lib: /usr/local se borra en el primer boot;
 # usar --target=/usr/lib/python3.13/site-packages siempre en builds bootc/ostree.

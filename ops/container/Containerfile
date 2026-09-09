@@ -53,9 +53,23 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/b
 # ── Python: hermes-agent (Nous engine, NOT on PyPI) FIRST, then the wheel ─────
 # hermes-agent is a Requires-Dist of the wheel but lives only on GitHub; install
 # it from the pinned commit tarball so the wheel's dep resolves as satisfied.
-ARG HERMES_AGENT_COMMIT=475ecea3d75784d2c1d98279d63ae4e5fba5d497
-RUN python3 -m pip install --no-cache-dir \
-      "https://github.com/NousResearch/hermes-agent/archive/${HERMES_AGENT_COMMIT}.tar.gz"
+# Pin = tag v2026.9.7 (hermes-agent 0.21.1, 2026-09-07); see specs/023.
+# Since 0.21 upstream setup.py REFUSES bdist_wheel/sdist outside Nix (a wheel would
+# ship without locales/skills/plugins/optional-skills). The supported path is an
+# EDITABLE install of the source tree (build_editable is not guarded) — so extract
+# the tag tarball to /opt/hermes-agent and `pip install -e` it; the dist reports
+# 0.21.1, which satisfies the wheel's Requires-Dist. /opt is world-readable and
+# visible under ProtectSystem=strict (the units already read /opt/hermes/mcp-seed).
+# Pruned dirs are dev/research only (never referenced by agent/tools/hermes_cli).
+ARG HERMES_AGENT_COMMIT=2237be355906fbe6065ce1815711eee52b2d646e
+RUN mkdir -p /opt/hermes-agent \
+    && curl -fsSL "https://github.com/NousResearch/hermes-agent/archive/${HERMES_AGENT_COMMIT}.tar.gz" \
+       | tar -xz --strip-components=1 -C /opt/hermes-agent \
+    && rm -rf /opt/hermes-agent/tests /opt/hermes-agent/website /opt/hermes-agent/contributors \
+              /opt/hermes-agent/mcp-research-data /opt/hermes-agent/evals \
+              /opt/hermes-agent/datagen-config-examples \
+    && python3 -m pip install --no-cache-dir -e /opt/hermes-agent \
+    && python3 -c "import importlib.metadata as m; v=m.version('hermes-agent'); assert v=='0.21.1', v; print('hermes-agent', v)"
 
 # Build the hermes-runtime wheel INSIDE the container (python 3.12), so the build is
 # SELF-CONTAINED — the host's python is never used (an old macOS system python 3.9/pip
@@ -82,15 +96,19 @@ RUN cd /tmp/whlbuild \
     && python3 -m pip install --no-cache-dir \
       aiohttp composio==0.13.1 dbus-fast rfc3161ng structlog tenacity \
       cryptography playwright pytesseract selectolax \
-      mcp fastapi 'uvicorn[standard]' python-multipart PyJWT websockets httpx croniter \
+      mcp==2.0.0 fastapi 'uvicorn[standard]' python-multipart PyJWT websockets httpx croniter \
+      # ^ MCP SDK pinned to the exact version hermes-agent 0.21.1 declares in its
+      #   `mcp` extra (2.x stateless protocol). Unpinned it drifts to 2.2+.
       rich textual \
       fastembed \
       ddgs \
       # ^ keyless DuckDuckGo backend for web_search — the web-ddgs plugin does
       #   `from ddgs import DDGS`; without it web_search has NO zero-config backend
       #   (all others need an API key) so the agent falls back to the flaky browser.
-    # pydantic LAST word (determinism; matches the OS build's pin order)
-    && python3 -m pip install --no-cache-dir 'pydantic==2.10.6' 'pydantic-core==2.27.2' \
+    # pydantic LAST word (determinism). Must equal hermes-agent's exact pin: mcp 2.0
+    # requires pydantic>=2.12 and upstream documents pydantic-core segfaults under
+    # codex_responses threads on older cores. pydantic pins its own pydantic-core.
+    && python3 -m pip install --no-cache-dir 'pydantic==2.13.4' \
     && rm -rf /tmp/whlbuild /tmp/whl
 
 # ── React SPA (frontend/) — build INSIDE the container ──────────────────────
@@ -137,6 +155,7 @@ RUN python3 -c "import hermes, fastapi, uvicorn, playwright, dbus_fast, composio
       import hermes.runtime.__main__, hermes.shell_server.main, hermes.egress_proxy.__main__, \
              hermes.audit_tail_service.__main__, hermes.runtime.semantic_tool_index; \
       from run_agent import AIAgent; from hermes_cli.runtime_provider import resolve_runtime_provider; \
+      from tools.mcp_tool_config import _load_mcp_config; from tools.mcp_tool import get_mcp_status; \
       print('IMPORT SMOKE OK')"
 
 # ── Service accounts — IDENTICAL uids to the OS build ─────────────────────────
@@ -184,6 +203,10 @@ COPY ops/agents-os-edition/dbus/org.hermes.Runtime1.conf /usr/share/dbus-1/syste
 COPY ops/agents-os-edition/netns/          /etc/nftables/hermes/
 COPY ops/agents-os-edition/modules-load.d/ /etc/modules-load.d/
 COPY ops/agents-os-edition/seed/mcp-servers.json /usr/share/hermes/seed/
+# Managed-scope overlay (administrator-pinned hermes_cli config keys). Holds the
+# runtime posture on every boot regardless of the persisted config.yaml — see the
+# file header (plugins.hook_callback_timeout: 0 keeps the HITL gate unbounded).
+COPY ops/agents-os-edition/managed/config.yaml /etc/hermes/config.yaml
 # Namespace-pivot seccomp data for the browser-jail shim. The shim reads this exact
 # path; when absent it soft-degrades (no per-process CLONE_NEWUSER backstop). Baking
 # it makes the in-unit defense-in-depth real instead of relying solely on the outer

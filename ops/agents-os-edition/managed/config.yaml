@@ -1,0 +1,20 @@
+# Managed-scope overlay for hermes-agent (baked at /etc/hermes/config.yaml).
+#
+# hermes_cli merges this file ON TOP of $HERMES_HOME/config.yaml on every load
+# (hermes_cli/managed_scope.py — "administrator-pinned" keys; the user's own
+# config.yaml cannot override them and `hermes config set` refuses to edit them).
+# Baking it here means the runtime posture holds on EVERY boot, including
+# upgraded installs whose persisted config.yaml predates the setting (the
+# tmpfiles `C` seed of hermes-home/config.yaml only fires on first boot).
+#
+# plugins.hook_callback_timeout: since hermes-agent 0.21 every in-process
+# pre_tool_call plugin callback runs on a bounded worker (default 30 s) and a
+# timeout FAILS CLOSED (tool blocked, callback suppressed for 60 s). Safent's
+# pre_tool_call hook IS the HITL gate: it blocks in the agent thread until the
+# owner resolves the approval card (up to HERMES_HITL_WAIT_S = 1800 s). With
+# the cap, any approval slower than 30 s would auto-deny and freeze the next
+# 60 s of tool calls. 0 = no cap: the hook runs synchronously on the agent
+# thread, exactly as it did on 0.15 (upstream semantics, hermes_cli/plugins.py
+# _resolve_hook_callback_timeout). See specs/023-hermes-0.21-upgrade.
+plugins:
+  hook_callback_timeout: 0

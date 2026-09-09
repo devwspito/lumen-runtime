@@ -1373,8 +1373,8 @@ class DbusRuntimeServiceWiring:
         configured entry appears exactly once regardless of connection state.
         """
         try:
-            from tools.mcp_tool import (  # noqa: PLC0415
-                get_mcp_status,
+            from tools.mcp_tool import get_mcp_status  # noqa: PLC0415
+            from tools.mcp_tool_config import (  # noqa: PLC0415
                 _load_mcp_config as _neus_load_cfg,
             )
         except ImportError:
@@ -6718,9 +6718,9 @@ def _neus_load_entries() -> list[dict]:
     on any import or parse error so boot reconnect is never fatal.
     """
     try:
-        from tools.mcp_tool import _load_mcp_config as _neus_cfg  # noqa: PLC0415
+        from tools.mcp_tool_config import _load_mcp_config as _neus_cfg  # noqa: PLC0415
     except ImportError:
-        logger.warning("hermes.dbus.neus_load_entries: tools.mcp_tool unavailable")
+        logger.warning("hermes.dbus.neus_load_entries: tools.mcp_tool_config unavailable")
         return []
     try:
         neus_map: dict[str, dict] = _neus_cfg()

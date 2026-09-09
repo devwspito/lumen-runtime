@@ -15,7 +15,7 @@ dependencies = [
     "dbus-fast>=2.21",
     "aiohttp>=3.13.4",
     "composio==0.13.1",
-    "hermes-agent==0.15.1",
+    "hermes-agent==0.21.1",
 ]
 
 [project.optional-dependencies]

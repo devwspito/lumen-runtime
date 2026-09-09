@@ -9,7 +9,7 @@ Invariants pinned:
   6. _neus_argv correctly maps Neus format to Safent argv.
 
 The test module patches:
-  - tools.mcp_tool._load_mcp_config   (Neus config reader — raw dict form)
+  - tools.mcp_tool_config._load_mcp_config (Neus config reader — raw dict form; 0.21 split)
   - tools.mcp_tool.get_mcp_status     (Neus live status)
   - tools.mcp_tool.register_mcp_servers (Neus live activation)
   - hermes_cli.config.load_config / save_config (Neus persistence)
@@ -42,10 +42,13 @@ def _ensure_neus_stubs():
         sys.modules["tools"] = types.ModuleType("tools")
     if "tools.mcp_tool" not in sys.modules:
         mod = types.ModuleType("tools.mcp_tool")
-        mod._load_mcp_config = lambda: {}  # type: ignore[attr-defined]
         mod.get_mcp_status = lambda: []  # type: ignore[attr-defined]
         mod.register_mcp_servers = lambda s: []  # type: ignore[attr-defined]
         sys.modules["tools.mcp_tool"] = mod
+    if "tools.mcp_tool_config" not in sys.modules:
+        cfg_mod = types.ModuleType("tools.mcp_tool_config")
+        cfg_mod._load_mcp_config = lambda: {}  # type: ignore[attr-defined]
+        sys.modules["tools.mcp_tool_config"] = cfg_mod
     if "hermes_cli" not in sys.modules:
         sys.modules["hermes_cli"] = types.ModuleType("hermes_cli")
     if "hermes_cli.config" not in sys.modules:
@@ -101,7 +104,7 @@ class TestNeusLoadEntries:
                 "env": {"GITHUB_TOKEN": "ghp_test"},
             }
         }
-        with patch("tools.mcp_tool._load_mcp_config", return_value=neus_map):
+        with patch("tools.mcp_tool_config._load_mcp_config", return_value=neus_map):
             entries = _neus_load_entries()
 
         assert len(entries) == 1
@@ -111,20 +114,20 @@ class TestNeusLoadEntries:
         assert e["env"] == {"GITHUB_TOKEN": "ghp_test"}
 
     def test_returns_empty_on_import_error(self):
-        with patch("tools.mcp_tool._load_mcp_config", side_effect=ImportError("no mod")):
+        with patch("tools.mcp_tool_config._load_mcp_config", side_effect=ImportError("no mod")):
             # The bridge catches ImportError via its internal try/except
             pass  # import error is caught by the guard at top of _neus_load_entries
         # Simulate the guard: mock the whole import
         import importlib
-        original = sys.modules.get("tools.mcp_tool")
+        original = sys.modules.get("tools.mcp_tool_config")
         try:
-            sys.modules.pop("tools.mcp_tool", None)
+            sys.modules.pop("tools.mcp_tool_config", None)
             # Temporarily remove to simulate unavailability on next call
             result = _neus_load_entries()
             # Should return [] (tools.mcp_tool not importable path)
         finally:
             if original is not None:
-                sys.modules["tools.mcp_tool"] = original
+                sys.modules["tools.mcp_tool_config"] = original
         # Whether [] or not depends on prior stub; the key assertion is no raise
         assert isinstance(result, list)
 
@@ -247,7 +250,7 @@ class TestListMcpServersReadsNeus:
 
         with (
             patch("tools.mcp_tool.get_mcp_status", return_value=live_status),
-            patch("tools.mcp_tool._load_mcp_config", return_value=neus_cfg),
+            patch("tools.mcp_tool_config._load_mcp_config", return_value=neus_cfg),
         ):
             result = await wiring.list_mcp_servers()
 
@@ -264,7 +267,7 @@ class TestListMcpServersReadsNeus:
 
         with (
             patch("tools.mcp_tool.get_mcp_status", return_value=[]),
-            patch("tools.mcp_tool._load_mcp_config", return_value=neus_cfg),
+            patch("tools.mcp_tool_config._load_mcp_config", return_value=neus_cfg),
         ):
             result = await wiring.list_mcp_servers()
 
@@ -282,7 +285,7 @@ class TestListMcpServersReadsNeus:
 
         with (
             patch("tools.mcp_tool.get_mcp_status", return_value=live_status),
-            patch("tools.mcp_tool._load_mcp_config", return_value=neus_cfg),
+            patch("tools.mcp_tool_config._load_mcp_config", return_value=neus_cfg),
         ):
             result = await wiring.list_mcp_servers()
 
@@ -494,7 +497,7 @@ class TestAddMcpServerGateAndNeusWrite:
             patch("tools.mcp_tool.get_mcp_status", return_value=[
                 {"name": "myserver", "connected": True, "tools": 3, "transport": "stdio"}
             ]),
-            patch("tools.mcp_tool._load_mcp_config", return_value=expected_neus_cfg),
+            patch("tools.mcp_tool_config._load_mcp_config", return_value=expected_neus_cfg),
         ):
             listed = await wiring.list_mcp_servers()
 
@@ -551,7 +554,8 @@ class TestSeedImporter:
         monkeypatch.setattr(cfg_mod, "save_config", store.update, raising=False)
         tool_mod = sys.modules["tools.mcp_tool"]
         monkeypatch.setattr(
-            tool_mod, "_load_mcp_config", lambda: store.get("mcp_servers", {}), raising=False
+            sys.modules["tools.mcp_tool_config"], "_load_mcp_config",
+            lambda: store.get("mcp_servers", {}), raising=False,
         )
         monkeypatch.setattr(tool_mod, "register_mcp_servers", lambda _: [], raising=False)
         return store, marker_file

@@ -7,7 +7,8 @@ the old _HERMES_SLUG_BY_PREFIX dict in nous_engine.py.
 This adapter is the ONLY place that translates ResolvedModel into the kwargs
 expected by resolve_runtime_provider() in hermes_cli.runtime_provider.
 
-Routing logic (mirrors hermes_cli semantics, verified against 0.15.1):
+Routing logic (mirrors hermes_cli semantics, verified against 0.15.1 and re-checked
+against 0.21.1 — resolve_runtime_provider signature/return shape unchanged):
 
   REGISTERED_SLUG:
     Pass requested=hermes_cli_slug with explicit_api_key=key.
