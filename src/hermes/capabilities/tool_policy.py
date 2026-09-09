@@ -406,11 +406,46 @@ class ToolPolicyStore:
         return AgentToolPolicyView(self, agent_id, overlay)
 
 
+# Valid values for the overlay's OPTIONAL "approval" axis (see
+# resolve_approval_override / AgentToolPolicyView.approval_override below).
+_APPROVAL_OVERRIDE_VALUES: frozenset[str] = frozenset({"auto", "hitl"})
+
+
+def resolve_approval_override(overlay: dict, tool: str) -> str | None:
+    """Pure lookup: overlay[tool]['approval'] if it is a valid value, else None.
+
+    "approval" is an OPTIONAL, ADDITIVE axis on top of the pre-existing
+    {"enabled": bool} shape — a per-tool entry may carry "enabled", "approval",
+    both, or neither. Absent tool, non-dict overlay/entry, or an "approval"
+    value outside {"auto", "hitl"} all resolve to None (no override — the
+    MCP classifier's OWN auto_executable decision stands, which is the safe
+    default since "auto" only ever WIDENS via an explicit, valid entry).
+
+    Shared by AgentToolPolicyView (native/MCP tool pre-check path, below) and
+    CapabilityBroker (the actual HITL gate, capability_broker.py) so the two
+    governance layers can never interpret the SAME overlay entry differently.
+
+    SECURITY: "hitl" always narrows (safe on its own). "auto" NEVER widens
+    past a HIGH-risk / MFA-tier / DANGER-tier tool by itself — this function
+    only reports what the overlay SAYS; capability_broker._needs_hitl is what
+    enforces that a "auto" override can never bypass those tiers (F-1 / CTRL-1
+    invariant), see its docstring and TestApprovalOverrideNeverBypassesMfaTier.
+    """
+    if not isinstance(overlay, dict):
+        return None
+    entry = overlay.get(tool)
+    if not isinstance(entry, dict):
+        return None
+    approval = entry.get("approval")
+    return approval if approval in _APPROVAL_OVERRIDE_VALUES else None
+
+
 class AgentToolPolicyView:
     """Read-only per-agent overlay on top of a global ToolPolicyStore.
 
-    Shape of *overlay*: {tool_name: {"enabled": bool}} (AgentAccessScope.
-    policy_overlay).
+    Shape of *overlay*: {tool_name: {"enabled": bool, "approval": "auto"|"hitl"}}
+    (AgentAccessScope.policy_overlay) — both keys are OPTIONAL and independent;
+    an entry may carry either, both, or (degenerate) neither.
 
     Sovereignty invariant (RESTRICT-ONLY): the cloud-pushed overlay may only
     NARROW the local owner's policy, never widen it. is_enabled is the
@@ -426,6 +461,13 @@ class AgentToolPolicyView:
     they are treated as an explicit DISABLE via the overlay — compatible with
     restrict-only, since a corrupt cloud-pushed entry must never be silently
     upgraded into a permissive default, and can never widen past the owner.
+    NOTE: this means an entry that sets ONLY "approval" (no "enabled" key)
+    ALSO fails closed to disabled via is_enabled/is_owner_disabled — the two
+    axes are independent, but is_enabled's fail-closed rule is unchanged by
+    this addition (a deliberate, pre-existing invariant, see
+    TestMalformedOverlayFailsClosed.test_missing_enabled_key_fails_closed_
+    disabled). An overlay wanting BOTH an approval override AND to keep the
+    tool enabled must set "enabled": true explicitly in the same entry.
     """
 
     def __init__(self, base: ToolPolicyStore, agent_id: str, overlay: dict) -> None:
@@ -473,3 +515,12 @@ class AgentToolPolicyView:
 
     def mfa_on_dangers(self) -> bool:
         return self._base.mfa_on_dangers()
+
+    def approval_override(self, tool: str) -> str | None:
+        """This agent's overlay 'approval' override for *tool* ('auto'|'hitl'|None).
+
+        Thin delegate to the module-level resolve_approval_override — kept as
+        a method so callers that already hold a per-agent view (the native
+        pre-check path) don't need to reach into self._overlay directly.
+        """
+        return resolve_approval_override(self._overlay, tool)

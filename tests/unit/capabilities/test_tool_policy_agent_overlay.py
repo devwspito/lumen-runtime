@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import pytest
 
-from hermes.capabilities.tool_policy import Preset, ToolPolicyStore
+from hermes.capabilities.tool_policy import Preset, ToolPolicyStore, resolve_approval_override
 
 pytestmark = pytest.mark.unit
 
@@ -142,3 +142,64 @@ class TestPresetDefaultFallthrough:
         store.apply_preset(Preset.BLOQUEADO)
         view = store.for_agent(_AGENT_ID, {})
         assert view.is_owner_disabled("terminal") is True
+
+
+# ---------------------------------------------------------------------------
+# resolve_approval_override / AgentToolPolicyView.approval_override
+# (item 2, ads-vertical) — the OPTIONAL "approval" axis, independent of
+# "enabled".
+# ---------------------------------------------------------------------------
+
+
+class TestResolveApprovalOverridePureFunction:
+    def test_absent_tool_returns_none(self) -> None:
+        assert resolve_approval_override({"a": {"approval": "auto"}}, "b") is None
+
+    def test_valid_auto_returned(self) -> None:
+        overlay = {"mcp__safent-ads__propose_budget_change": {"approval": "auto"}}
+        assert (
+            resolve_approval_override(overlay, "mcp__safent-ads__propose_budget_change")
+            == "auto"
+        )
+
+    def test_valid_hitl_returned(self) -> None:
+        overlay = {"terminal": {"approval": "hitl"}}
+        assert resolve_approval_override(overlay, "terminal") == "hitl"
+
+    def test_invalid_value_returns_none(self) -> None:
+        overlay = {"terminal": {"approval": "sometimes"}}
+        assert resolve_approval_override(overlay, "terminal") is None
+
+    def test_missing_approval_key_returns_none(self) -> None:
+        overlay = {"terminal": {"enabled": True}}
+        assert resolve_approval_override(overlay, "terminal") is None
+
+    def test_non_dict_entry_returns_none(self) -> None:
+        overlay = {"terminal": "not-a-dict"}
+        assert resolve_approval_override(overlay, "terminal") is None
+
+    def test_non_dict_overlay_returns_none(self) -> None:
+        assert resolve_approval_override("not-a-dict", "terminal") is None  # type: ignore[arg-type]
+
+    def test_enabled_and_approval_coexist(self) -> None:
+        overlay = {"terminal": {"enabled": False, "approval": "auto"}}
+        assert resolve_approval_override(overlay, "terminal") == "auto"
+
+
+class TestAgentToolPolicyViewApprovalOverride:
+    def test_delegates_to_module_function(self, tmp_path) -> None:
+        store = _store(tmp_path)
+        view = store.for_agent(_AGENT_ID, {"terminal": {"approval": "hitl"}})
+        assert view.approval_override("terminal") == "hitl"
+
+    def test_absent_returns_none(self, tmp_path) -> None:
+        store = _store(tmp_path)
+        view = store.for_agent(_AGENT_ID, {})
+        assert view.approval_override("terminal") is None
+
+    def test_enabled_only_entry_leaves_approval_none(self, tmp_path) -> None:
+        """The two axes are independent: an entry that sets only "enabled"
+        carries no approval override."""
+        store = _store(tmp_path)
+        view = store.for_agent(_AGENT_ID, {"terminal": {"enabled": False}})
+        assert view.approval_override("terminal") is None

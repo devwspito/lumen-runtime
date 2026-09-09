@@ -15,8 +15,21 @@ Domain layer — pure Python, zero infra dependencies.
 Invariants:
 - scope_id/tenant_id/agent_id/updated_by are required.
 - native_tools is a frozenset[str] allow-set over native Nous tool names.
-- policy_overlay is a dict, views is a tuple[str, ...] — carried, not yet
-  resolved/enforced (no-op today; a later phase adds the resolver + router).
+- policy_overlay is a dict, views is a tuple[str, ...]. policy_overlay's
+  per-tool shape is {tool_name: {"enabled": bool, "approval": "auto"|"hitl"}}
+  — both keys OPTIONAL and independent. "enabled" is resolved by
+  tool_policy.AgentToolPolicyView (RESTRICT-ONLY: narrows the owner's global
+  policy, never widens it). "approval" (ads-vertical addition) is resolved by
+  tool_policy.resolve_approval_override + consumed by
+  capabilities.application.capability_broker._needs_hitl: "hitl" always
+  narrows (forces approval); "auto" widens ONLY for tools the classifier
+  already deems LOW risk AND that are NOT MFA-tier
+  (capabilities.tool_delicacy.is_mfa_required) — it can never bypass HIGH
+  risk or an MFA-tier/DANGER-tier tool. This dataclass performs NO shape
+  validation on policy_overlay beyond "is a dict" (see __post_init__) — the
+  D-Bus trust boundary (_validate_policy_overlay_shape) and the cloud-bundle
+  schema (config_sync.policy_document.AccessScopeSpec) are what enforce the
+  pinned per-tool shape.
 - enforced defaults to False: with no cloud policy pushed for this agent, the
   scope governs NOTHING — every native tool call passes, identical to the
   pre-Fase-2 behaviour (zero regression for every existing/local install).

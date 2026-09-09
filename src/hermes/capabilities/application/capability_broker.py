@@ -74,6 +74,7 @@ from hermes.capabilities.infrastructure.surface_adapter_dispatcher import (
     SurfaceAdapterDispatcher,
     SurfaceAdapterNotFound,
 )
+from hermes.capabilities.tool_delicacy import is_mfa_required
 from hermes.domain.proposal import ToolCallProposal
 
 if TYPE_CHECKING:
@@ -257,7 +258,12 @@ class CapabilityBroker:
         if self._autonomous_default:
             needs_hitl = effective_risk is RiskLevel.HIGH
         else:
-            needs_hitl = _needs_hitl(effective_risk, binding, autonomy_level)
+            approval_override = self._resolve_approval_override(
+                tool_name=proposal.tool_name, agent_id=consent_context.agent_id,
+            )
+            needs_hitl = _needs_hitl(
+                effective_risk, binding, autonomy_level, approval_override
+            )
         if needs_hitl:
             token_ok = await self._verify_hitl_token(
                 proposal_id=proposal.proposal_id,
@@ -760,6 +766,23 @@ class CapabilityBroker:
             )
             return "", "", frozenset()
 
+    def _resolve_approval_override(self, *, tool_name: str, agent_id: str) -> str | None:
+        """Fetch this agent's policy_overlay 'approval' override for *tool_name*.
+
+        Thin delegate to enterprise_approval_routing.resolve_tool_approval_
+        override — imported lazily like _resolve_enterprise_route's own
+        cross-module call, same layering discipline (application → its own
+        infrastructure helper, never the reverse). See that function's
+        docstring for the fail-soft-to-None discipline.
+        """
+        from hermes.capabilities.infrastructure.enterprise_approval_routing import (  # noqa: PLC0415
+            resolve_tool_approval_override,
+        )
+
+        return resolve_tool_approval_override(
+            self._access_scope_repo, self._tenant_id, tool_name, agent_id=agent_id,
+        )
+
 
 # Satisface CapabilityBrokerPort structural check.
 assert isinstance(CapabilityBroker, type)
@@ -858,6 +881,7 @@ def _needs_hitl(
     effective_risk: RiskLevel,
     binding: object,
     autonomy_level: AutonomyLevel | None = None,
+    approval_override: str | None = None,
 ) -> bool:
     """Determina si la propuesta requiere token HITL según riesgo y nivel de autonomía.
 
@@ -876,6 +900,18 @@ def _needs_hitl(
     La relajación AUTONOMOUS se acota SOLO a LOW+reversible=True. Ninguna binding
     tiene reversible=True hoy (el test C3 lo impone), así que AUTONOMOUS == BALANCED
     en el catálogo actual — de forma explícita y segura, no por casualidad.
+
+    `approval_override` — eje `approval` de AgentAccessScope.policy_overlay
+    ("auto"|"hitl"|None), resuelto por el LLAMADOR (CapabilityBroker.dispatch
+    vía _resolve_approval_override). SEGURIDAD (item 2 / ads-vertical):
+      - "hitl" SIEMPRE estrecha (auto_executable pasa a False) — seguro por
+        construcción, nunca puede saltarse nada.
+      - "auto" SOLO ensancha si effective_risk YA ES LOW (el check HIGH de
+        arriba corre PRIMERO e incondicionalmente — F-1 nunca se toca) Y el
+        tool NO es MFA-tier (tool_delicacy.is_mfa_required) — defensa en
+        profundidad para herramientas de gobernanza (install_mcp/set_policy/
+        skill_manage/...) que hipotéticamente pudieran clasificar LOW en el
+        futuro. Un overlay JAMÁS puede saltarse HIGH/DANGER/MFA-tier.
     """
     # Invariante de seguridad: HIGH siempre exige HITL, sin excepción (F-1).
     if effective_risk is RiskLevel.HIGH:
@@ -883,6 +919,12 @@ def _needs_hitl(
 
     level = autonomy_level if autonomy_level is not None else AutonomyLevel.BALANCED
     auto_executable = getattr(binding, "auto_executable", False)
+    if approval_override == "hitl":
+        auto_executable = False
+    elif approval_override == "auto" and not is_mfa_required(
+        getattr(binding, "tool_name", "")
+    ):
+        auto_executable = True
 
     # LOW + auto_executable: lectura pura — sin HITL en todos los niveles.
     if auto_executable:

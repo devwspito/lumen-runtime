@@ -5394,20 +5394,45 @@ def _validate_bounded_str_list(values: list, *, field_name: str) -> str | None:
     return None
 
 
+# Allowed per-tool keys in a policy_overlay entry — "enabled" (pre-existing) +
+# "approval" (ads-vertical addition, item 2). MUST mirror
+# hermes.config_sync.policy_document.AccessScopeSpec's own validator — two
+# independent checks on the SAME wire shape (CWE-20 belt-and-suspenders).
+_POLICY_OVERLAY_ALLOWED_KEYS: frozenset[str] = frozenset({"enabled", "approval"})
+_POLICY_OVERLAY_APPROVAL_VALUES: frozenset[str] = frozenset({"auto", "hitl"})
+
+
 def _validate_policy_overlay_shape(policy_overlay: dict) -> str | None:
-    """Reject a policy_overlay whose per-tool entries aren't dict[str, bool].
+    """Reject a policy_overlay whose per-tool entries aren't the pinned shape.
 
     Mirrors hermes.config_sync.policy_document.AccessScopeSpec.policy_overlay
-    (dict[str, dict[str, bool]]) at THIS trust boundary too (F3 review fix) —
-    a present-but-malformed entry already fails CLOSED downstream in
-    AgentToolPolicyView, but rejecting it here is belt-and-suspenders at the
-    point untrusted D-Bus input enters the system (CWE-20).
+    (dict[str, dict[str, bool|str]] with "enabled"/"approval" keys, both
+    OPTIONAL) at THIS trust boundary too (F3 review fix) — a present-but-
+    malformed entry already fails CLOSED downstream in AgentToolPolicyView /
+    resolve_approval_override, but rejecting it here is belt-and-suspenders
+    at the point untrusted D-Bus input enters the system (CWE-20). An entry
+    carrying ONLY "enabled" (the pre-existing shape) validates identically
+    to before this addition.
     """
     for tool, entry in policy_overlay.items():
         if not isinstance(entry, dict):
-            return f"policy_overlay[{tool!r}] debe ser un objeto {{'enabled': bool}}"
-        if not all(isinstance(v, bool) for v in entry.values()):
-            return f"policy_overlay[{tool!r}] debe tener valores bool"
+            return (
+                f"policy_overlay[{tool!r}] debe ser un objeto "
+                "{'enabled': bool, 'approval': str}"
+            )
+        unknown = set(entry) - _POLICY_OVERLAY_ALLOWED_KEYS
+        if unknown:
+            return f"policy_overlay[{tool!r}] tiene claves desconocidas: {sorted(unknown)}"
+        if "enabled" in entry and not isinstance(entry["enabled"], bool):
+            return f"policy_overlay[{tool!r}].enabled debe ser bool"
+        if (
+            "approval" in entry
+            and entry["approval"] not in _POLICY_OVERLAY_APPROVAL_VALUES
+        ):
+            return (
+                f"policy_overlay[{tool!r}].approval debe ser uno de "
+                f"{sorted(_POLICY_OVERLAY_APPROVAL_VALUES)}"
+            )
     return None
 
 

@@ -298,6 +298,76 @@ class TestPolicyOverlayInnerShapeRejectedF3:
         assert scope.policy_overlay == {"terminal": {"enabled": False}}
 
 
+class TestPolicyOverlayApprovalAxis:
+    """Item 2 (ads-vertical): policy_overlay's OPTIONAL "approval" key
+    ("auto"|"hitl") at the D-Bus trust boundary."""
+
+    @pytest.mark.asyncio
+    async def test_approval_auto_accepted(self, tmp_path: Path) -> None:
+        wiring, repo = _make_wiring(tmp_path)
+        result = await wiring.set_agent_access_scope(
+            agent_id="agent-a",
+            scope_json=(
+                '{"policy_overlay": {'
+                '"mcp__safent-ads__propose_budget_change": {"approval": "auto"}'
+                '}}'
+            ),
+            tenant_id=_TENANT_ID,
+            sender_uid=_OPERATOR_UID,
+        )
+        assert result["ok"] is True
+        scope = repo.get_scope("agent-a", _TENANT_ID)
+        assert scope is not None
+        assert scope.policy_overlay == {
+            "mcp__safent-ads__propose_budget_change": {"approval": "auto"}
+        }
+
+    @pytest.mark.asyncio
+    async def test_approval_hitl_combined_with_enabled_accepted(
+        self, tmp_path: Path
+    ) -> None:
+        wiring, repo = _make_wiring(tmp_path)
+        result = await wiring.set_agent_access_scope(
+            agent_id="agent-a",
+            scope_json=(
+                '{"policy_overlay": {"terminal": '
+                '{"enabled": true, "approval": "hitl"}}}'
+            ),
+            tenant_id=_TENANT_ID,
+            sender_uid=_OPERATOR_UID,
+        )
+        assert result["ok"] is True
+        scope = repo.get_scope("agent-a", _TENANT_ID)
+        assert scope is not None
+        assert scope.policy_overlay == {
+            "terminal": {"enabled": True, "approval": "hitl"}
+        }
+
+    @pytest.mark.asyncio
+    async def test_invalid_approval_value_rejected(self, tmp_path: Path) -> None:
+        wiring, repo = _make_wiring(tmp_path)
+        result = await wiring.set_agent_access_scope(
+            agent_id="agent-a",
+            scope_json='{"policy_overlay": {"terminal": {"approval": "maybe"}}}',
+            tenant_id=_TENANT_ID,
+            sender_uid=_OPERATOR_UID,
+        )
+        assert result["ok"] is False
+        assert repo.get_scope("agent-a", _TENANT_ID) is None
+
+    @pytest.mark.asyncio
+    async def test_unknown_overlay_key_rejected(self, tmp_path: Path) -> None:
+        wiring, repo = _make_wiring(tmp_path)
+        result = await wiring.set_agent_access_scope(
+            agent_id="agent-a",
+            scope_json='{"policy_overlay": {"terminal": {"execute": true}}}',
+            tenant_id=_TENANT_ID,
+            sender_uid=_OPERATOR_UID,
+        )
+        assert result["ok"] is False
+        assert repo.get_scope("agent-a", _TENANT_ID) is None
+
+
 class TestNativeToolsViewsStringLengthCapF3:
     """F3 review fix: each native_tools/views entry is capped at 128 chars —
     the list-length cap alone doesn't bound a single oversized string."""

@@ -430,6 +430,37 @@ class TestAccessScopeSpecCardinalityCaps:
             AccessScopeSpec(policy_overlay={"terminal": {"enabled": ["not", "a", "bool"]}})
 
 
+class TestAccessScopeSpecPolicyOverlayApprovalAxis:
+    """Item 2 (ads-vertical): the OPTIONAL "approval" key, additive to the
+    pre-existing "enabled" shape. Byte-compat: a bundle that never sets it
+    round-trips identically (covered by TestAgentSpecAccessScopeRoundTrip /
+    TestAccessScopeSigningVector, unmodified below)."""
+
+    def test_approval_auto_accepted(self) -> None:
+        scope = AccessScopeSpec(
+            policy_overlay={
+                "mcp__safent-ads__propose_budget_change": {"approval": "auto"}
+            }
+        )
+        assert scope.policy_overlay == {
+            "mcp__safent-ads__propose_budget_change": {"approval": "auto"}
+        }
+
+    def test_approval_hitl_combined_with_enabled_accepted(self) -> None:
+        scope = AccessScopeSpec(
+            policy_overlay={"terminal": {"enabled": True, "approval": "hitl"}}
+        )
+        assert scope.policy_overlay == {"terminal": {"enabled": True, "approval": "hitl"}}
+
+    def test_invalid_approval_value_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            AccessScopeSpec(policy_overlay={"terminal": {"approval": "sometimes"}})
+
+    def test_unknown_overlay_key_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            AccessScopeSpec(policy_overlay={"terminal": {"execute": True}})
+
+
 class TestAgentSpecAccessScopeRoundTrip:
     def _scope(self) -> AccessScopeSpec:
         return AccessScopeSpec(

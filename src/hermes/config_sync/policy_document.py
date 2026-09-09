@@ -36,7 +36,7 @@ CARDINALIY CAPS (P1-3, enforced at Pydantic parse time):
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, ClassVar
 
 from pydantic import BaseModel, Field, field_validator, model_serializer
 
@@ -60,14 +60,19 @@ class AccessScopeSpec(BaseModel):
       cerebro_unrestricted:  bool  — default True (only bites when enforced +
                                      the agent is the CEO/Cerebro)
       native_tools:          list[str] — allow-set of native tool names, SORTED
-      policy_overlay:        dict  — {tool_name: {"enabled": bool}}
+      policy_overlay:        dict  — {tool_name: {"enabled": bool, "approval":
+                                     "auto"|"hitl"}} — both keys OPTIONAL and
+                                     independent (ads-vertical addition: the
+                                     "approval" key is new and OPTIONAL — a
+                                     bundle that never sets it round-trips
+                                     byte-identically to before this addition)
       views:                 list[str] — carried; enforcement is a later phase
     """
 
     enforced: bool = False
     cerebro_unrestricted: bool = True
     native_tools: list[str] = Field(default_factory=list, max_length=256)
-    policy_overlay: dict[str, dict[str, bool]] = Field(default_factory=dict)
+    policy_overlay: dict[str, dict[str, bool | str]] = Field(default_factory=dict)
     views: list[str] = Field(default_factory=list, max_length=256)
     # Per-role governance (2026-07-05): approval tier conferred by this scope.
     # "standard" (default) → today's routing; "coordinator" → approval_router
@@ -113,11 +118,35 @@ class AccessScopeSpec(BaseModel):
         wire). MUST match the cloud mirror's _sorted_unique_integration_toolkits."""
         return sorted(set(v))
 
+    # Per-tool overlay keys: "enabled" (pre-existing) + "approval" (ads-vertical
+    # addition, item 2). Both OPTIONAL and independent. MUST match the D-Bus
+    # trust boundary's own _validate_policy_overlay_shape (dbus_runtime_
+    # service.py) — two independent checks on the SAME shape, belt-and-
+    # suspenders (CWE-20), never allowed to drift.
+    _POLICY_OVERLAY_ALLOWED_KEYS: ClassVar[frozenset[str]] = frozenset({"enabled", "approval"})
+    _POLICY_OVERLAY_APPROVAL_VALUES: ClassVar[frozenset[str]] = frozenset({"auto", "hitl"})
+
     @field_validator("policy_overlay")
     @classmethod
     def _cap_policy_overlay(cls, v: dict) -> dict:
         if len(v) > 256:
             raise ValueError(f"policy_overlay exceeds 256 keys (got {len(v)})")
+        for tool, entry in v.items():
+            unknown = set(entry) - cls._POLICY_OVERLAY_ALLOWED_KEYS
+            if unknown:
+                raise ValueError(
+                    f"policy_overlay[{tool!r}] has unknown keys: {sorted(unknown)}"
+                )
+            if "enabled" in entry and not isinstance(entry["enabled"], bool):
+                raise ValueError(f"policy_overlay[{tool!r}].enabled must be bool")
+            if (
+                "approval" in entry
+                and entry["approval"] not in cls._POLICY_OVERLAY_APPROVAL_VALUES
+            ):
+                raise ValueError(
+                    f"policy_overlay[{tool!r}].approval must be one of "
+                    f"{sorted(cls._POLICY_OVERLAY_APPROVAL_VALUES)}"
+                )
         return v
 
     @model_serializer(mode="wrap")

@@ -115,6 +115,40 @@ def resolve_agent_approval_tier(
         return "standard"
 
 
+def resolve_tool_approval_override(
+    access_scope_repo: Any, tenant_id: str, tool_name: str, agent_id: str | None = None,
+) -> str | None:
+    """Best-effort policy_overlay 'approval' override ('auto'|'hitl') for
+    *tool_name*, for the calling agent — feeds
+    `capability_broker._needs_hitl`'s approval-override input (Fase 2 Phase
+    4-ads). `agent_id` — see `_resolve_ambient_agent_id`'s docstring: the
+    broker passes its EXPLICIT `ConsentContext.agent_id`, never None (the
+    ambient thread-local fallback is for the native-danger gate only).
+
+    Fails SOFT to None (no override — the classifier's own auto_executable
+    decision stands) on ANY error: no repo wired, no ambient agent, no scope
+    row, or a lookup failure. None is always the SAFE side here: "auto" only
+    ever widens via an explicitly resolved, valid overlay entry; any failure
+    degrades to "defer to the classifier", never to a silent auto-approve.
+    """
+    try:
+        if access_scope_repo is None:
+            return None
+
+        resolved_agent_id = _resolve_ambient_agent_id(agent_id)
+        if not resolved_agent_id:
+            return None
+        scope = access_scope_repo.get_scope(resolved_agent_id, tenant_id)
+        if scope is None:
+            return None
+
+        from hermes.capabilities.tool_policy import resolve_approval_override  # noqa: PLC0415
+
+        return resolve_approval_override(scope.policy_overlay, tool_name)
+    except Exception:  # noqa: BLE001 — fail-soft: no override, never widen
+        return None
+
+
 _REMOTE_APPROVAL_FLAG_TTL_S: float = 10.0
 # TTL cache for the tenant remote-approval flag. tenant_remote_approval_enabled
 # sits on BOTH approval seams' hot path (evaluated for every HITL-required tool
