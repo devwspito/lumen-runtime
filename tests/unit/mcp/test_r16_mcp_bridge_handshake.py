@@ -393,3 +393,121 @@ class TestGrantMcpEgressForManagedRemote:
         assert json.loads(grants_path.read_text()) == {
             "domains": ["tenant.example.com"]
         }
+
+
+@pytest.fixture
+def endpoints_env(egress_env, tmp_path):
+    """Isolate the managed_remote_endpoints file on top of egress_env."""
+    db_path, grants_path = egress_env
+    endpoints_path = tmp_path / "managed-remote-endpoints.json"
+    with patch(
+        "hermes.shell_server.managed_remote_endpoints._ENDPOINTS_PATH", endpoints_path
+    ):
+        yield db_path, grants_path, endpoints_path
+
+
+class TestGrantMcpEgressSecondSourceManagedRemoteEndpoints:
+    """Item 3 (ads-vertical): the owner-authorized managed_remote_endpoints
+    setting is a SECOND, independent source for the egress-grant host —
+    required for any managed-remote slug that is NOT the paired control-plane
+    (e.g. "safent-ads", which has no instance_association row at all)."""
+
+    def test_grants_the_owner_set_endpoint_host_for_safent_ads(
+        self, endpoints_env
+    ) -> None:
+        _db_path, grants_path, endpoints_path = endpoints_env  # unpaired instance
+        from hermes.shell_server.managed_remote_endpoints import (
+            save_managed_remote_endpoint,
+        )
+
+        save_managed_remote_endpoint("safent-ads", "https://ads.tenant.ts.net/mcp")
+        from hermes.agents_os.infrastructure.dbus_runtime_service import (
+            _grant_mcp_egress_for_managed_remote,
+        )
+
+        with patch(
+            "hermes.shell_server.egress_api._push_session", return_value=True
+        ) as push:
+            _grant_mcp_egress_for_managed_remote("safent-ads")
+        assert json.loads(grants_path.read_text()) == {
+            "domains": ["ads.tenant.ts.net"]
+        }
+        push.assert_called_once()
+
+    def test_endpoint_setting_takes_precedence_over_paired_cloud_endpoint(
+        self, endpoints_env
+    ) -> None:
+        """If BOTH sources resolve for the SAME slug, the explicit
+        owner-authorized setting wins — it is the more specific source."""
+        db_path, grants_path, _endpoints_path = endpoints_env
+        _seed_association_db(db_path, cloud_endpoint="https://control.example.com")
+        from hermes.shell_server.managed_remote_endpoints import (
+            save_managed_remote_endpoint,
+        )
+
+        save_managed_remote_endpoint("safent-control", "https://override.example.com/mcp")
+        from hermes.agents_os.infrastructure.dbus_runtime_service import (
+            _grant_mcp_egress_for_managed_remote,
+        )
+
+        with patch("hermes.shell_server.egress_api._push_session", return_value=True):
+            _grant_mcp_egress_for_managed_remote("safent-control")
+        assert json.loads(grants_path.read_text()) == {
+            "domains": ["override.example.com"]
+        }
+
+    def test_falls_back_to_paired_cloud_endpoint_when_no_setting(
+        self, endpoints_env
+    ) -> None:
+        """Regression: safent-control with NO managed_remote_endpoints entry
+        behaves exactly as before item 3 — sourced from the pairing."""
+        db_path, grants_path, _endpoints_path = endpoints_env
+        _seed_association_db(db_path, cloud_endpoint="https://tenant.example.com")
+        from hermes.agents_os.infrastructure.dbus_runtime_service import (
+            _grant_mcp_egress_for_managed_remote,
+        )
+
+        with patch("hermes.shell_server.egress_api._push_session", return_value=True):
+            _grant_mcp_egress_for_managed_remote("safent-control")
+        assert json.loads(grants_path.read_text()) == {
+            "domains": ["tenant.example.com"]
+        }
+
+    def test_noop_when_neither_source_resolves(self, endpoints_env) -> None:
+        _db_path, grants_path, _endpoints_path = endpoints_env  # unpaired, no setting
+        from hermes.agents_os.infrastructure.dbus_runtime_service import (
+            _grant_mcp_egress_for_managed_remote,
+        )
+
+        _grant_mcp_egress_for_managed_remote("safent-ads")
+        assert not grants_path.exists()
+
+    def test_rejects_unsafe_endpoint_setting_ssrf(self, endpoints_env) -> None:
+        _db_path, grants_path, endpoints_path = endpoints_env
+        endpoints_path.parent.mkdir(parents=True, exist_ok=True)
+        endpoints_path.write_text(
+            json.dumps({"endpoints": {"safent-ads": "https://169.254.169.254/mcp"}})
+        )
+        from hermes.agents_os.infrastructure.dbus_runtime_service import (
+            _grant_mcp_egress_for_managed_remote,
+        )
+
+        with patch(
+            "hermes.shell_server.egress_api._push_session", return_value=True
+        ) as push:
+            _grant_mcp_egress_for_managed_remote("safent-ads")
+        assert not grants_path.exists()
+        push.assert_not_called()
+
+    def test_non_https_endpoint_setting_rejected(self, endpoints_env) -> None:
+        _db_path, grants_path, endpoints_path = endpoints_env
+        endpoints_path.parent.mkdir(parents=True, exist_ok=True)
+        endpoints_path.write_text(
+            json.dumps({"endpoints": {"safent-ads": "http://ads.tenant.ts.net/mcp"}})
+        )
+        from hermes.agents_os.infrastructure.dbus_runtime_service import (
+            _grant_mcp_egress_for_managed_remote,
+        )
+
+        _grant_mcp_egress_for_managed_remote("safent-ads")
+        assert not grants_path.exists()

@@ -1029,6 +1029,19 @@ class Runtime1ServiceInterface(ServiceInterface):
         return json.dumps(result)
 
     @method()
+    async def SetManagedRemoteEndpoint(  # noqa: N802
+        self, slug: "s", url: "s"  # noqa: F821,UP037
+    ) -> "s":  # noqa: F821,UP037
+        """Fija el `slug -> https URL` de un servidor MANAGED_REMOTE (item 3).
+        authZ operador vía sender_uid; validado (https, sin IP literal, puerto
+        443) antes de persistir. {ok} o {ok: false, error}."""
+        sender_uid = await self._resolve_current_sender_uid()
+        result = self._wiring.set_managed_remote_endpoint(
+            slug=slug, url=url, sender_uid=sender_uid
+        )
+        return json.dumps(result)
+
+    @method()
     async def SearchMcpRegistry(self, query: "s", limit: "u") -> "s":  # noqa: N802,F821,UP037
         """Busca en el MCP Registry oficial (read-only, sin authZ)."""
         result = await self._wiring.search_mcp_registry(query=query, limit=int(limit) or 20)

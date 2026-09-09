@@ -1620,6 +1620,39 @@ class DbusRuntimeServiceWiring:
         _neus_remove_mcp_entry(server_id)
         return {"ok": True}
 
+    def set_managed_remote_endpoint(
+        self, *, slug: str, url: str, sender_uid: int
+    ) -> dict:
+        """Owner-authorized `slug -> https URL` for a MANAGED_REMOTE MCP server
+        (item 3, ads-vertical). Same operator-authZ gate as add_mcp_server — the
+        owner (or a proxied caller holding a valid operator token for THIS
+        operation) is the only one who can point the egress grant at a host.
+
+        `slug` MUST already be in `_MANAGED_REMOTE_MCP_SLUGS` — setting an
+        endpoint for a slug that isn't managed-remote can never be consulted
+        by `_grant_mcp_egress_for_managed_remote` (fail loud instead of
+        silently persisting a dead setting). `url` is validated (https-only,
+        no IP literals, port 443 only) BEFORE persistence — an invalid URL is
+        never written.
+        """
+        self._authorize_and_resolve(sender_uid, operation="set_managed_remote_endpoint")
+        if slug not in _MANAGED_REMOTE_MCP_SLUGS:
+            return {
+                "ok": False,
+                "error": f"slug {slug!r} no es un servidor MANAGED_REMOTE conocido",
+            }
+        from hermes.shell_server.managed_remote_endpoints import (  # noqa: PLC0415
+            ManagedRemoteEndpointError,
+            save_managed_remote_endpoint,
+        )
+
+        try:
+            save_managed_remote_endpoint(slug, url)
+        except ManagedRemoteEndpointError as exc:
+            return {"ok": False, "error": str(exc)}
+        logger.info("hermes.dbus.managed_remote_endpoint_set slug=%s", slug)
+        return {"ok": True}
+
     async def search_mcp_registry(self, *, query: str, limit: int) -> list[dict]:
         """Busca en el MCP Registry oficial y normaliza al formato de add_mcp_server.
 
@@ -7210,16 +7243,26 @@ _MANAGED_REMOTE_MCP_SLUGS: frozenset[str] = frozenset({"safent-control", "safent
 
 
 def _grant_mcp_egress_for_managed_remote(server_id: str) -> None:
-    """R16 (2026-07-07): grant the MCP netns egress to OUR OWN paired cloud endpoint.
+    """R16 (2026-07-07) + item 3 (ads-vertical): grant the MCP netns egress to
+    OUR OWN managed-remote host — from a LOCAL, owner-controlled source only.
 
     The MCP runtime netns is default-deny (C1 PASS-2/4) — a MANAGED_REMOTE server
-    (mcp-remote bridging to safent-control) cannot resolve/reach ANY host until its
-    target is on the MCP plane's pinned allow-list. Unlike a third-party BYOK server
-    (whose vetted host is baked into _CURATED_MCP_HOSTS), the control-plane host is
-    PER-TENANT — it can only be resolved from the LOCAL, Ed25519-pairing-established
-    `instance_association.cloud_endpoint`, never from the bundle's own argv/env (that
-    would let a compromised bundle request a grant for an arbitrary host). No-op for
-    every other server_id, and a no-op (not a failure) when the instance isn't paired.
+    (mcp-remote bridging to safent-control / safent-ads) cannot resolve/reach ANY
+    host until its target is on the MCP plane's pinned allow-list. Unlike a
+    third-party BYOK server (whose vetted host is baked into _CURATED_MCP_HOSTS),
+    the managed-remote host is PER-TENANT — it can only be resolved from a LOCAL
+    source, NEVER from the bundle's own argv/env (that would let a compromised
+    bundle request a grant for an arbitrary host). No-op for every other
+    server_id, and a no-op (not a failure) when neither source resolves a host.
+
+    TWO sources, tried in order — the first that resolves wins:
+      1. `hermes.shell_server.managed_remote_endpoints` — an explicit,
+         owner-authorized `slug -> https URL` setting (item 3), gated by the
+         SAME operator-authZ D-Bus verb as `add_mcp_server` (see
+         `set_managed_remote_endpoint`). This is the ONLY source for a slug
+         that isn't the paired control-plane (e.g. "safent-ads").
+      2. The Ed25519-pairing-established `instance_association.cloud_endpoint`
+         (unchanged from R16 — "safent-control"'s host).
 
     Reuses the SAME grants file + control-socket push the owner's manual MCP-egress
     elevation API already uses (hermes.shell_server.egress_api) — no new proxy-side
@@ -7227,6 +7270,40 @@ def _grant_mcp_egress_for_managed_remote(server_id: str) -> None:
     """
     if server_id not in _MANAGED_REMOTE_MCP_SLUGS:
         return
+    host = _resolve_managed_remote_endpoint_host(server_id) or _resolve_paired_cloud_host()
+    if not host:
+        return
+    _apply_mcp_egress_grant(server_id, host)
+
+
+def _resolve_managed_remote_endpoint_host(server_id: str) -> str | None:
+    """Source 1 (item 3): the owner-authorized managed_remote_endpoints setting.
+
+    Re-validates the persisted URL here (not just at set_managed_remote_
+    endpoint write time) — defense in depth against a corrupt/stale file.
+    Returns None (never raises) on any absence/validation failure.
+    """
+    from hermes.shell_server.managed_remote_endpoints import (  # noqa: PLC0415
+        ManagedRemoteEndpointError,
+        get_managed_remote_endpoint,
+        validate_managed_remote_endpoint_url,
+    )
+
+    url = get_managed_remote_endpoint(server_id)
+    if not url:
+        return None
+    try:
+        return validate_managed_remote_endpoint_url(url)
+    except ManagedRemoteEndpointError as exc:
+        logger.warning(
+            "hermes.dbus.mcp_egress_grant_unsafe_endpoint server=%s error=%s",
+            server_id, exc,
+        )
+        return None
+
+
+def _resolve_paired_cloud_host() -> str | None:
+    """Source 2 (R16, unchanged): the Ed25519-paired cloud_endpoint's host."""
     import os as _os_eg  # noqa: PLC0415
     import sqlite3 as _sqlite3_eg  # noqa: PLC0415
     from pathlib import Path as _Path_eg  # noqa: PLC0415
@@ -7241,7 +7318,7 @@ def _grant_mcp_egress_for_managed_remote(server_id: str) -> None:
         _os_eg.environ.get("HERMES_SHELL_DB", "/var/lib/hermes/shell-state.db")
     )
     if not db_path.is_file():
-        return
+        return None
     conn = _sqlite3_eg.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
         row = conn.execute(
@@ -7249,24 +7326,24 @@ def _grant_mcp_egress_for_managed_remote(server_id: str) -> None:
             "LIMIT 1"
         ).fetchone()
     except _sqlite3_eg.Error:
-        return
+        return None
     finally:
         conn.close()
     if not row or not row[0]:
-        return
+        return None
     cloud_endpoint = str(row[0])
     try:
         _validate_cloud_endpoint(cloud_endpoint)
     except PairingError as exc:
         logger.warning(
-            "hermes.dbus.mcp_egress_grant_unsafe_endpoint server=%s error=%s",
-            server_id, exc,
+            "hermes.dbus.mcp_egress_grant_unsafe_endpoint error=%s", exc,
         )
-        return
-    host = _urlparse_eg(cloud_endpoint).hostname
-    if not host:
-        return
+        return None
+    return _urlparse_eg(cloud_endpoint).hostname or None
 
+
+def _apply_mcp_egress_grant(server_id: str, host: str) -> None:
+    """Push *host* onto the MCP plane's pinned egress allow-list (idempotent)."""
     from hermes.shell_server.egress_api import (  # noqa: PLC0415
         _MCP_GRANT_SESSION,
         _MCP_GRANTS_PATH,
