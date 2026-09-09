@@ -63,9 +63,9 @@ class SkillContentScanner:
 
     @staticmethod
     def _fetch_skill_text(identifier: str) -> str:
-        # Deferred import: tools.skills_hub is the baked Nous package (absent on the
-        # host/CI). If it's missing the except in scan() turns it into unanalyzable.
-        from tools.skills_hub import create_source_router  # noqa: PLC0415
+        # Deferred import: tools.skills_hub_search is the baked Nous package (absent on
+        # the host/CI). If it's missing the except in scan() turns it into unanalyzable.
+        from tools.skills_hub_search import create_source_router  # noqa: PLC0415
 
         bundle = None
         for src in create_source_router():

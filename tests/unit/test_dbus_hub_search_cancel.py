@@ -109,10 +109,10 @@ def test_search_returns_cancelled_when_event_set():
     fake_meta = _make_mock_meta("email-skill")
 
     # Exercise the REAL search_skills_hub to hit the cancel-event branch.
-    # Only tools.skills_hub is stubbed; the method itself must run unpatched.
-    with patch.dict("sys.modules", {"tools.skills_hub": MagicMock()}):
+    # Only tools.skills_hub_search is stubbed; the method itself must run unpatched.
+    with patch.dict("sys.modules", {"tools.skills_hub_search": MagicMock()}):
         import sys
-        hub_mod = sys.modules["tools.skills_hub"]
+        hub_mod = sys.modules["tools.skills_hub_search"]
         hub_mod.create_source_router.return_value = object()
         hub_mod.unified_search.return_value = [fake_meta]
 
@@ -134,9 +134,9 @@ def test_search_returns_results_when_not_cancelled():
 
     fake_meta = _make_mock_meta("calendar-skill")
 
-    with patch.dict("sys.modules", {"tools.skills_hub": MagicMock()}):
+    with patch.dict("sys.modules", {"tools.skills_hub_search": MagicMock()}):
         import sys
-        hub_mod = sys.modules["tools.skills_hub"]
+        hub_mod = sys.modules["tools.skills_hub_search"]
         hub_mod.create_source_router.return_value = object()
         hub_mod.unified_search.return_value = [fake_meta]
 

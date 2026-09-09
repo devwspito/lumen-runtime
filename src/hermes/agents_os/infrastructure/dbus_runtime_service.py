@@ -1373,12 +1373,12 @@ class DbusRuntimeServiceWiring:
         configured entry appears exactly once regardless of connection state.
         """
         try:
-            from tools.mcp_tool import get_mcp_status  # noqa: PLC0415
             from tools.mcp_tool_config import (  # noqa: PLC0415
                 _load_mcp_config as _neus_load_cfg,
             )
+            from tools.mcp_tool_discovery import get_mcp_status  # noqa: PLC0415
         except ImportError:
-            logger.warning("hermes.dbus.list_mcp_servers: tools.mcp_tool unavailable — []")
+            logger.warning("hermes.dbus.list_mcp_servers: tools.mcp_tool_* unavailable — []")
             return []
 
         try:
@@ -1670,7 +1670,10 @@ class DbusRuntimeServiceWiring:
         cancel_event = _hub_search_get_cancel_event(qid) if qid else None
 
         try:
-            from tools.skills_hub import create_source_router, unified_search  # noqa: PLC0415
+            from tools.skills_hub_search import (  # noqa: PLC0415
+                create_source_router,
+                unified_search,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("hermes.dbus.skills_hub_unavailable: %s", exc)
             return {"query_id": qid, "results": [], "cancelled": False}
@@ -6790,7 +6793,7 @@ def _neus_write_mcp_entry(
     # without restarting the daemon. register_mcp_servers is idempotent for
     # already-connected servers but activates the newly written entry.
     try:
-        from tools.mcp_tool import register_mcp_servers  # noqa: PLC0415
+        from tools.mcp_tool_discovery import register_mcp_servers  # noqa: PLC0415
         register_mcp_servers({server_id: entry})
     except Exception as exc:  # noqa: BLE001 — connection already happened via _mcp_connect
         logger.debug("hermes.dbus.neus_register_after_write server=%s: %s", server_id, exc)
@@ -7673,7 +7676,7 @@ def _start_hub_op(
                 # input("Confirm [y/N]") in this TTY-less thread (silent cancel) AND
                 # swallowed uninstall_skill()'s (False, msg) → the op reported "done"
                 # while the skill stayed. Call the primitive directly and FAIL LOUD.
-                from tools.skills_hub import uninstall_skill  # noqa: PLC0415
+                from tools.skills_hub_install import uninstall_skill  # noqa: PLC0415
                 success, msg = uninstall_skill(target)
                 if not success:
                     # Not in the hub lock → maybe an agent-created NATIVE skill on disk

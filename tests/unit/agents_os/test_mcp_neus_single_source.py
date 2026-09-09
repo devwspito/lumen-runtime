@@ -1,7 +1,7 @@
 """Regression tests — MCP Neus single source of truth.
 
 Invariants pinned:
-  1. list_mcp_servers reads from Neus (tools.mcp_tool) not Safent's own store.
+  1. list_mcp_servers reads from Neus (tools.mcp_tool_discovery) not Safent's own store.
   2. add_mcp_server writes to Neus after the gate passes — not to mcp-servers.json.
   3. A scan-FAIL without force stays blocked (gate is fail-closed).
   4. A scan-FAIL with owner force=True persists AND appears in list_mcp_servers.
@@ -10,8 +10,8 @@ Invariants pinned:
 
 The test module patches:
   - tools.mcp_tool_config._load_mcp_config (Neus config reader — raw dict form; 0.21 split)
-  - tools.mcp_tool.get_mcp_status     (Neus live status)
-  - tools.mcp_tool.register_mcp_servers (Neus live activation)
+  - tools.mcp_tool_discovery.get_mcp_status     (Neus live status)
+  - tools.mcp_tool_discovery.register_mcp_servers (Neus live activation)
   - hermes_cli.config.load_config / save_config (Neus persistence)
   - dbus_runtime_service._scan_install_target (inline on the wiring instance)
   - dbus_runtime_service._mcp_connect (avoids real subprocess)
@@ -33,18 +33,18 @@ import pytest
 pytestmark = pytest.mark.unit
 
 # ---------------------------------------------------------------------------
-# Minimal stubs for tools.mcp_tool and hermes_cli.config if not installed
+# Minimal stubs for tools.mcp_tool_{discovery,config} and hermes_cli.config if not installed
 # ---------------------------------------------------------------------------
 
 def _ensure_neus_stubs():
     """Inject stub modules so imports in the service don't fail in CI."""
     if "tools" not in sys.modules:
         sys.modules["tools"] = types.ModuleType("tools")
-    if "tools.mcp_tool" not in sys.modules:
-        mod = types.ModuleType("tools.mcp_tool")
+    if "tools.mcp_tool_discovery" not in sys.modules:
+        mod = types.ModuleType("tools.mcp_tool_discovery")
         mod.get_mcp_status = lambda: []  # type: ignore[attr-defined]
         mod.register_mcp_servers = lambda s: []  # type: ignore[attr-defined]
-        sys.modules["tools.mcp_tool"] = mod
+        sys.modules["tools.mcp_tool_discovery"] = mod
     if "tools.mcp_tool_config" not in sys.modules:
         cfg_mod = types.ModuleType("tools.mcp_tool_config")
         cfg_mod._load_mcp_config = lambda: {}  # type: ignore[attr-defined]
@@ -124,7 +124,7 @@ class TestNeusLoadEntries:
             sys.modules.pop("tools.mcp_tool_config", None)
             # Temporarily remove to simulate unavailability on next call
             result = _neus_load_entries()
-            # Should return [] (tools.mcp_tool not importable path)
+            # Should return [] (tools.mcp_tool_config not importable path)
         finally:
             if original is not None:
                 sys.modules["tools.mcp_tool_config"] = original
@@ -149,7 +149,7 @@ class TestNeusWriteMcpEntry:
         with (
             patch("hermes_cli.config.load_config", side_effect=fake_load),
             patch("hermes_cli.config.save_config", side_effect=fake_save),
-            patch("tools.mcp_tool.register_mcp_servers", return_value=[]),
+            patch("tools.mcp_tool_discovery.register_mcp_servers", return_value=[]),
         ):
             _neus_write_mcp_entry(
                 "github",
@@ -170,7 +170,7 @@ class TestNeusWriteMcpEntry:
         with (
             patch("hermes_cli.config.load_config", return_value={"mcp_servers": {}}),
             patch("hermes_cli.config.save_config", side_effect=lambda c: saved.update(c)),
-            patch("tools.mcp_tool.register_mcp_servers", return_value=[]),
+            patch("tools.mcp_tool_discovery.register_mcp_servers", return_value=[]),
         ):
             _neus_write_mcp_entry("github", ["npx", "-y", "@scope/pkg"])
 
@@ -184,7 +184,7 @@ class TestNeusWriteMcpEntry:
         with (
             patch("hermes_cli.config.load_config", return_value=dict(existing)),
             patch("hermes_cli.config.save_config", side_effect=lambda c: saved.update(c)),
-            patch("tools.mcp_tool.register_mcp_servers", return_value=[]),
+            patch("tools.mcp_tool_discovery.register_mcp_servers", return_value=[]),
         ):
             _neus_write_mcp_entry("github", ["npx", "-y", "@scope/new-pkg"])
 
@@ -249,7 +249,7 @@ class TestListMcpServersReadsNeus:
         neus_cfg = {"github": {"command": "npx", "args": ["-y", "@scope/pkg"]}}
 
         with (
-            patch("tools.mcp_tool.get_mcp_status", return_value=live_status),
+            patch("tools.mcp_tool_discovery.get_mcp_status", return_value=live_status),
             patch("tools.mcp_tool_config._load_mcp_config", return_value=neus_cfg),
         ):
             result = await wiring.list_mcp_servers()
@@ -266,7 +266,7 @@ class TestListMcpServersReadsNeus:
         neus_cfg = {"offline-server": {"command": "uvx", "args": ["myserver"]}}
 
         with (
-            patch("tools.mcp_tool.get_mcp_status", return_value=[]),
+            patch("tools.mcp_tool_discovery.get_mcp_status", return_value=[]),
             patch("tools.mcp_tool_config._load_mcp_config", return_value=neus_cfg),
         ):
             result = await wiring.list_mcp_servers()
@@ -284,7 +284,7 @@ class TestListMcpServersReadsNeus:
         neus_cfg = {"github": {"command": "npx", "args": ["-y", "@scope/pkg"]}}
 
         with (
-            patch("tools.mcp_tool.get_mcp_status", return_value=live_status),
+            patch("tools.mcp_tool_discovery.get_mcp_status", return_value=live_status),
             patch("tools.mcp_tool_config._load_mcp_config", return_value=neus_cfg),
         ):
             result = await wiring.list_mcp_servers()
@@ -294,7 +294,7 @@ class TestListMcpServersReadsNeus:
     @pytest.mark.asyncio
     async def test_returns_empty_when_tools_mcp_tool_unavailable(self):
         wiring = self._make_wiring()
-        with patch.dict("sys.modules", {"tools.mcp_tool": None}):  # type: ignore[dict-item]
+        with patch.dict("sys.modules", {"tools.mcp_tool_discovery": None}):  # type: ignore[dict-item]
             result = await wiring.list_mcp_servers()
         assert result == []
 
@@ -407,7 +407,7 @@ class TestAddMcpServerGateAndNeusWrite:
             ),
             patch("hermes_cli.config.load_config", return_value=dict(neus_state)),
             patch("hermes_cli.config.save_config", side_effect=lambda c: neus_state.update(c)),
-            patch("tools.mcp_tool.register_mcp_servers", return_value=[]),
+            patch("tools.mcp_tool_discovery.register_mcp_servers", return_value=[]),
         ):
             result = await wiring.add_mcp_server(draft_json=draft, sender_uid=1000)
 
@@ -448,7 +448,7 @@ class TestAddMcpServerGateAndNeusWrite:
             ),
             patch("hermes_cli.config.load_config", return_value=dict(neus_state)),
             patch("hermes_cli.config.save_config", side_effect=lambda c: neus_state.update(c)),
-            patch("tools.mcp_tool.register_mcp_servers", return_value=[]),
+            patch("tools.mcp_tool_discovery.register_mcp_servers", return_value=[]),
         ):
             result = await wiring.add_mcp_server(draft_json=draft, sender_uid=1000)
 
@@ -483,7 +483,7 @@ class TestAddMcpServerGateAndNeusWrite:
             ),
             patch("hermes_cli.config.load_config", return_value=dict(neus_state)),
             patch("hermes_cli.config.save_config", side_effect=lambda c: neus_state.update(c)),
-            patch("tools.mcp_tool.register_mcp_servers", return_value=[]),
+            patch("tools.mcp_tool_discovery.register_mcp_servers", return_value=[]),
         ):
             add_result = await wiring.add_mcp_server(draft_json=draft, sender_uid=1000)
 
@@ -494,7 +494,7 @@ class TestAddMcpServerGateAndNeusWrite:
             "myserver": neus_state["mcp_servers"]["myserver"]
         }
         with (
-            patch("tools.mcp_tool.get_mcp_status", return_value=[
+            patch("tools.mcp_tool_discovery.get_mcp_status", return_value=[
                 {"name": "myserver", "connected": True, "tools": 3, "transport": "stdio"}
             ]),
             patch("tools.mcp_tool_config._load_mcp_config", return_value=expected_neus_cfg),
@@ -552,7 +552,7 @@ class TestSeedImporter:
         cfg_mod = sys.modules["hermes_cli.config"]
         monkeypatch.setattr(cfg_mod, "load_config", lambda: store, raising=False)
         monkeypatch.setattr(cfg_mod, "save_config", store.update, raising=False)
-        tool_mod = sys.modules["tools.mcp_tool"]
+        tool_mod = sys.modules["tools.mcp_tool_discovery"]
         monkeypatch.setattr(
             sys.modules["tools.mcp_tool_config"], "_load_mcp_config",
             lambda: store.get("mcp_servers", {}), raising=False,

@@ -92,7 +92,19 @@ def _make_fake_approval_module(
     mod.check_all_command_guards = check_all_command_guards
     # _YOLO_MODE_FROZEN is False because we injected HERMES_EXEC_ASK=1 in env
     mod._YOLO_MODE_FROZEN = False
+    # hermes-agent 0.21 split the session-key accessors into tools.approval_context;
+    # approval_gateway imports set_current_session_key from there now.
+    ctx = types.ModuleType("tools.approval_context")
+    ctx.set_current_session_key = set_current_session_key
+    ctx.get_current_session_key = get_current_session_key
+    mod._context_module = ctx
     return mod
+
+
+def _install_fake_approval(monkeypatch: Any, fake_mod: types.ModuleType) -> None:
+    """Register the fake tools.approval AND its tools.approval_context sibling."""
+    monkeypatch.setitem(sys.modules, "tools.approval", fake_mod)
+    monkeypatch.setitem(sys.modules, "tools.approval_context", fake_mod._context_module)
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +153,7 @@ class TestAutoModeOn:
             disable_called=disable_calls,
         )
         monkeypatch.setitem(sys.modules, "tools", types.ModuleType("tools"))
-        monkeypatch.setitem(sys.modules, "tools.approval", fake_mod)
+        _install_fake_approval(monkeypatch, fake_mod)
 
         settings = tmp_path / "security_mode.json"
         settings.write_text(json.dumps({"auto_mode": True}))
@@ -179,7 +191,7 @@ class TestAutoModeOn:
             disable_called=disable_calls,
         )
         monkeypatch.setitem(sys.modules, "tools", types.ModuleType("tools"))
-        monkeypatch.setitem(sys.modules, "tools.approval", fake_mod)
+        _install_fake_approval(monkeypatch, fake_mod)
 
         settings = tmp_path / "security_mode.json"
         settings.write_text(json.dumps({"auto_mode": True}))
@@ -212,7 +224,7 @@ class TestAutoModeOn:
 
         fake_mod = _make_fake_approval_module(notify_cb_store=notify_cb_store)
         monkeypatch.setitem(sys.modules, "tools", types.ModuleType("tools"))
-        monkeypatch.setitem(sys.modules, "tools.approval", fake_mod)
+        _install_fake_approval(monkeypatch, fake_mod)
 
         settings = tmp_path / "security_mode.json"
         settings.write_text(json.dumps({"auto_mode": True}))
@@ -251,7 +263,7 @@ class TestAutoModeOn:
 
         fake_mod = _make_fake_approval_module()
         monkeypatch.setitem(sys.modules, "tools", types.ModuleType("tools"))
-        monkeypatch.setitem(sys.modules, "tools.approval", fake_mod)
+        _install_fake_approval(monkeypatch, fake_mod)
 
         settings = tmp_path / "security_mode.json"
         settings.write_text(json.dumps({"auto_mode": True}))
@@ -299,7 +311,7 @@ class TestAutoModeOff:
             disable_called=disable_calls,
         )
         monkeypatch.setitem(sys.modules, "tools", types.ModuleType("tools"))
-        monkeypatch.setitem(sys.modules, "tools.approval", fake_mod)
+        _install_fake_approval(monkeypatch, fake_mod)
 
         # AUTO OFF: settings file absent → defaults to False
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -325,7 +337,7 @@ class TestAutoModeOff:
 
         fake_mod = _make_fake_approval_module()
         monkeypatch.setitem(sys.modules, "tools", types.ModuleType("tools"))
-        monkeypatch.setitem(sys.modules, "tools.approval", fake_mod)
+        _install_fake_approval(monkeypatch, fake_mod)
 
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
@@ -367,7 +379,7 @@ class TestResolveApproval:
 
         fake_mod = _make_fake_approval_module(resolve_called=resolve_calls)
         monkeypatch.setitem(sys.modules, "tools", types.ModuleType("tools"))
-        monkeypatch.setitem(sys.modules, "tools.approval", fake_mod)
+        _install_fake_approval(monkeypatch, fake_mod)
 
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
@@ -391,7 +403,7 @@ class TestResolveApproval:
 
         fake_mod = _make_fake_approval_module(resolve_called=resolve_calls)
         monkeypatch.setitem(sys.modules, "tools", types.ModuleType("tools"))
-        monkeypatch.setitem(sys.modules, "tools.approval", fake_mod)
+        _install_fake_approval(monkeypatch, fake_mod)
 
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
@@ -411,7 +423,7 @@ class TestResolveApproval:
 
         fake_mod = _make_fake_approval_module(resolve_called=resolve_calls)
         monkeypatch.setitem(sys.modules, "tools", types.ModuleType("tools"))
-        monkeypatch.setitem(sys.modules, "tools.approval", fake_mod)
+        _install_fake_approval(monkeypatch, fake_mod)
 
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
@@ -430,7 +442,7 @@ class TestResolveApproval:
     def test_unknown_request_id_returns_error(self, tmp_path, monkeypatch) -> None:
         fake_mod = _make_fake_approval_module()
         monkeypatch.setitem(sys.modules, "tools", types.ModuleType("tools"))
-        monkeypatch.setitem(sys.modules, "tools.approval", fake_mod)
+        _install_fake_approval(monkeypatch, fake_mod)
 
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
