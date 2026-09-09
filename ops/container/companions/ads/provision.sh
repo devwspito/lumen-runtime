@@ -75,7 +75,10 @@ ensure_bearer() {
 write_companions_json() {
   local fingerprint
   fingerprint="sha256:$(openssl x509 -in "$STATE/tls/ca.crt" -outform der | sha256sum | cut -d' ' -f1)"
-  cat > "$STATE/companions.json" <<JSON
+  # Written to a temp name first: the live file is 0444 and (when we could
+  # chown it) root-owned, so `cat >` onto it would fail — rename in the
+  # owner-writable $STATE dir is the only re-provision path that works.
+  cat > "$STATE/companions.json.tmp" <<JSON
 {"version": 1, "companions": [{
   "slug": "safent-ads",
   "url": "https://$COMPANION_HOST:$COMPANION_PORT/mcp",
@@ -85,7 +88,23 @@ write_companions_json() {
   "ca_fingerprint": "$fingerprint",
   "bearer_ref": "file:/etc/hermes/companions/ads.bearer"}]}
 JSON
-  chmod 0644 "$STATE/companions.json"
+  # 0444 + root:root is the shape hermes.shell_server.companions accepts
+  # unconditionally. Rootless podman/docker remap us to uid 0 inside the
+  # container so the chown is cosmetic there; ROOTFUL podman does not remap
+  # at all, and without it the file arrives as uid 1000 — the loader then
+  # relies on its second branch (the `:ro` bind mount), which we always
+  # provide from run-safent.sh. Never fail provisioning over the chown: the
+  # 0444 mode + read-only mount already carry the invariant.
+  chmod 0444 "$STATE/companions.json.tmp"
+  if [ "$(id -u)" -eq 0 ]; then
+    chown 0:0 "$STATE/companions.json.tmp"
+  elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+    sudo -n chown 0:0 "$STATE/companions.json.tmp" || \
+      log "sin privilegios para chown root:root — vale igual (bind :ro + 0444)"
+  else
+    log "sin sudo no interactivo — companions.json queda 0444 de tu usuario (bind :ro lo protege)"
+  fi
+  mv -f "$STATE/companions.json.tmp" "$STATE/companions.json"
 }
 
 # ── 5. secrets/api.env for ads-api/ads-worker + up ───────────────────────────

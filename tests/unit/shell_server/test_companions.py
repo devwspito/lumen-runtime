@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import ssl
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -236,9 +237,13 @@ class TestLoadCompanionsRejectsAnomalousEntries:
 
 
 class TestFileTrust:
-    """Ownership/permission gate — exercised WITHOUT the `mount` fixture's bypass."""
+    """Ownership/permission gate — exercised WITHOUT the `mount` fixture's bypass.
 
-    def test_non_root_owned_file_is_rejected(
+    Invariant (see `_is_trustworthy_file`): no group/other write bit AND
+    (owned by uid 0 OR on a read-only mount and not owned by our own uid).
+    """
+
+    def test_non_root_owned_file_on_a_read_write_mount_is_rejected(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         path = tmp_path / "companions.json"
@@ -309,6 +314,110 @@ class TestFileTrust:
 
         monkeypatch.setattr(Path, "stat", fake_stat)
         assert load_companions(path=path) == {}  # empty companions list, but FILE trusted
+
+
+class TestFileTrustOnRootfulPodman:
+    """Rootful podman does NOT remap uids: `provision.sh`'s file arrives as the
+    installing owner's uid, not 0. It is still untamperable — the bind mount is
+    `:ro` — so the loader accepts THAT shape too (024 rootful boot).
+    """
+
+    @staticmethod
+    def _pin(
+        monkeypatch: pytest.MonkeyPatch,
+        path: Path,
+        *,
+        st_uid: int,
+        st_mode: int,
+        read_only_mount: bool,
+        geteuid: int,
+    ) -> None:
+        real_stat = Path.stat
+
+        class _FakeStat:
+            pass
+
+        _FakeStat.st_uid = st_uid  # type: ignore[attr-defined]
+        _FakeStat.st_mode = st_mode  # type: ignore[attr-defined]
+
+        def fake_stat(self: Path, *a: object, **kw: object) -> object:
+            return _FakeStat() if self == path else real_stat(self, *a, **kw)
+
+        class _FakeStatvfs:
+            f_flag = os.ST_RDONLY if read_only_mount else 0
+
+        monkeypatch.setattr(Path, "stat", fake_stat)
+        monkeypatch.setattr(companions_mod.os, "statvfs", lambda _p: _FakeStatvfs())
+        monkeypatch.setattr(companions_mod.os, "geteuid", lambda: geteuid)
+
+    def test_owner_uid_file_on_a_read_only_mount_is_accepted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = tmp_path / "companions.json"
+        path.write_text(json.dumps({"version": 1, "companions": []}))
+        self._pin(
+            monkeypatch, path,
+            st_uid=1000, st_mode=0o100444, read_only_mount=True, geteuid=880,
+        )
+        assert companions_mod._is_trustworthy_file(path) is True
+
+    def test_read_only_mount_does_not_excuse_a_group_writable_mode(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = tmp_path / "companions.json"
+        path.write_text(json.dumps({"version": 1, "companions": []}))
+        self._pin(
+            monkeypatch, path,
+            st_uid=1000, st_mode=0o100464, read_only_mount=True, geteuid=880,
+        )
+        assert companions_mod._is_trustworthy_file(path) is False
+
+    def test_file_owned_by_the_daemon_user_is_rejected_even_on_a_read_only_mount(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The daemon could chmod +w its own file if the mount were ever
+        remounted read-write — that is not a companion we trust."""
+        path = tmp_path / "companions.json"
+        path.write_text(json.dumps({"version": 1, "companions": []}))
+        self._pin(
+            monkeypatch, path,
+            st_uid=880, st_mode=0o100444, read_only_mount=True, geteuid=880,
+        )
+        assert companions_mod._is_trustworthy_file(path) is False
+
+    def test_root_owned_file_needs_no_read_only_mount(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Rootless podman/docker remap the owner to 0 — branch (a) still holds."""
+        path = tmp_path / "companions.json"
+        path.write_text(json.dumps({"version": 1, "companions": []}))
+        self._pin(
+            monkeypatch, path,
+            st_uid=0, st_mode=0o100444, read_only_mount=False, geteuid=880,
+        )
+        assert companions_mod._is_trustworthy_file(path) is True
+
+
+class TestProvisionScriptMatchesTheLoaderGate:
+    """`provision.sh` must WRITE the shape the loader accepts (024)."""
+
+    @staticmethod
+    def _provision_text() -> str:
+        return (
+            Path(__file__).resolve().parents[3]
+            / "ops/container/companions/ads/provision.sh"
+        ).read_text(encoding="utf-8")
+
+    def test_companions_json_is_written_read_only_for_everyone(self) -> None:
+        assert "chmod 0444" in self._provision_text()
+
+    def test_companions_json_ownership_is_handed_to_root_when_possible(self) -> None:
+        text = self._provision_text()
+        assert "chown 0:0" in text
+
+    def test_no_group_or_other_write_bit_is_ever_set_on_companions_json(self) -> None:
+        text = self._provision_text()
+        assert "chmod 0644 \"$STATE/companions.json\"" not in text
 
 
 class TestCompanionsHasNoWritePath:

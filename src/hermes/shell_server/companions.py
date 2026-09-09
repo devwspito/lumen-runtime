@@ -42,6 +42,7 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
+import os
 import ssl
 from dataclasses import dataclass
 from pathlib import Path
@@ -158,15 +159,46 @@ def read_companion_bearer(endpoint: CompanionEndpoint) -> str | None:
 
 
 def _is_trustworthy_file(path: Path) -> bool:
-    """uid 0, no group/other write bit — a companion file the owner/root
-    installed, never one an unprivileged/compromised process could plant."""
+    """True iff no process reachable from inside this container could have
+    written *path*.
+
+    EXACT INVARIANT — the file must carry no group/other write bit AND satisfy
+    at least one of:
+
+      (a) it is owned by uid 0 (root installed it), or
+      (b) its OWN mount is read-only (``statvfs`` ``ST_RDONLY`` — the
+          ``:ro`` bind ``run-safent.sh`` creates) AND its owner is not the
+          uid this process runs as.
+
+    (b) exists because uid 0 is not portable across engines: rootless
+    podman/docker remap the installing owner to 0 inside the container, but
+    ROOTFUL podman does not remap at all, so the very same host file that
+    ``provision.sh`` wrote as the owner arrives as uid 1000 and (a) alone
+    would reject a perfectly good install (Safent then boots with no
+    companion at all, FR-3, silently). (b) is not weaker: a read-only mount
+    cannot be written through by ANY uid in this container — including root
+    — and the owner-uid check keeps the guarantee even if that mount were
+    ever remounted read-write. What both branches deny is identical: no
+    unprivileged/compromised process in this container can plant or edit the
+    file whose ``ip`` becomes a live nftables accept rule.
+    """
     try:
         st = path.stat()
     except OSError:
         return False
-    if st.st_uid != 0:
+    if st.st_mode & 0o022:
         return False
-    return not bool(st.st_mode & 0o022)
+    if st.st_uid == 0:
+        return True
+    return _is_on_read_only_mount(path) and st.st_uid != os.geteuid()
+
+
+def _is_on_read_only_mount(path: Path) -> bool:
+    """True iff *path*'s own filesystem is mounted read-only (MS_RDONLY)."""
+    try:
+        return bool(os.statvfs(path).f_flag & os.ST_RDONLY)
+    except OSError:
+        return False
 
 
 def _validate_companion_entry(raw: object) -> CompanionEndpoint:
