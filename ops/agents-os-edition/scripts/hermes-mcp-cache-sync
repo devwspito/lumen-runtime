@@ -2,7 +2,7 @@
 # hermes-mcp-cache-sync — fill the seeded-MCP OFFLINE caches into the (writable) data
 # volume from the image-baked seed. Runs as an ExecStartPre of hermes-runtime.
 #
-# WHY: the seeded MCP servers (excel/word/powerpoint/serena) spawn with `uvx/npx
+# WHY: the seeded MCP servers (excel/word/powerpoint) spawn with `uvx/npx
 # --offline` — cache-only, no network (the cage's default-deny netns). Their caches used
 # to live under /var/lib/hermes, which the named data volume shadows, so they reached a
 # customer's FRESH volume only through podman's ONE-SHOT, first-boot-only copy-up. On a

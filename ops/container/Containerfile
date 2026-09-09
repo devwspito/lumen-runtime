@@ -378,9 +378,11 @@ ENV npm_config_cache=/var/lib/hermes/npm-cache
 ENV UV_CACHE_DIR=/var/lib/hermes/uv-cache
 ENV XDG_CACHE_HOME=/var/lib/hermes/xdg-cache
 # Warm BOTH runner caches with the EXACT seed specs (ops/.../seed/mcp-servers.json) so the
-# curated MCPs connect OFFLINE on a fresh boot (the cage denies npm/uv at runtime). npx →
-# npm-cache (@pinkpixel/mcpollinations: imagen/audio sin clave); uvx → UV_CACHE_DIR (Excel /
-# Word / PowerPoint, locales sin clave). /var/lib/hermes is volume-copied-up on first boot.
+# curated MCPs connect OFFLINE on a fresh boot (the cage denies npm/uv at runtime). Today
+# mcp-servers.json only lists uvx MCPs (Excel / Word / PowerPoint, locales sin clave), so
+# only the uvx loop below actually warms anything; the npx/npm-cache path is prepped ahead
+# of an upcoming npx MCP seed (no-op until that lands). /var/lib/hermes is volume-copied-up
+# on first boot.
 RUN mkdir -p /var/lib/hermes/npm-cache /var/lib/hermes/uv-cache /var/lib/hermes/xdg-cache \
       /var/lib/hermes/mcp-home && \
     for spec in "excel-mcp-server stdio" \
