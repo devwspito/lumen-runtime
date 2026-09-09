@@ -133,6 +133,22 @@ if [ "$NO_COMPANION" -eq 0 ]; then
   fi
 fi
 
+# AppArmor (Linux hosts only — Ubuntu/Debian ship it enforcing by default).
+# On a ROOTFUL podman run under an enforcing AppArmor, podman applies its
+# `containers-default-*` profile, and that profile denies the mount(2)/
+# proc-write set systemd needs as PID1 with CAP_SYS_ADMIN: PID1 dies before
+# it writes a single log line and the container exits 255 immediately. The
+# cage's real confinement is Landlock + seccomp + the netns jail + uid 880
+# INSIDE the container (same argument as --security-opt label=disable above
+# for SELinux) — the outer AppArmor profile adds nothing we rely on and
+# costs us the boot. Added ONLY when AppArmor is actually enabled: on macOS
+# (and inside the Fedora CoreOS VM that backs `podman machine`) this file
+# does not exist, the array stays empty, and that path is untouched.
+APPARMOR_RUN_ARGS=()
+if [ "$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null || true)" = "Y" ]; then
+  APPARMOR_RUN_ARGS=(--security-opt apparmor=unconfined)
+fi
+
 "$RUNTIME" rm -f "$NAME" >/dev/null 2>&1 || true
 
 # Timezone: the container must reason/schedule in the SAME wall-clock as the host
@@ -192,6 +208,7 @@ exec "$RUNTIME" run -d --name "$NAME" --systemd=always \
   --security-opt "seccomp=${SECCOMP}" \
   --security-opt unmask=/sys/kernel/security \
   --security-opt label=disable \
+  ${APPARMOR_RUN_ARGS[@]+"${APPARMOR_RUN_ARGS[@]}"} \
   -v /sys/kernel/security:/sys/kernel/security:ro \
   -v "${VOLUME}:/var/lib/hermes" \
   --shm-size=1g \
