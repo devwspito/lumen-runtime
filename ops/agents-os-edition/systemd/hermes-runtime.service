@@ -85,6 +85,13 @@ ExecStartPre=/usr/bin/hermes-landlock-assert
 # uvx --offline unable to resolve. Fail-soft: the script always exits 0, so a cache problem
 # never blocks the daemon/UI. '-' prefix = don't fail the unit even on a non-zero exit.
 ExecStartPre=-+/usr/libexec/hermes/hermes-mcp-cache-sync
+# Stage the companion bearer where the daemon's uid can read it (024). Runs as
+# FULL root (+) because the bind-mounted original is owned by whatever uid the
+# container engine mapped it to (0 rootless, the installing owner rootful) with
+# mode 0400 — unreadable by uid 880 either way, and unfixable from the host side
+# without exposing it to uid 886 (the agent sandbox). Fail-soft ('-' + the script
+# always exits 0): no companion, or an unreadable bearer, never blocks the daemon.
+ExecStartPre=-+/usr/libexec/hermes/hermes-companion-bearer
 ExecStart=/usr/bin/hermes-runtime --systemd-notify
 # WorkingDirectory: el Cerebro escribe ficheros relativos (write_file, terminal,
 # documentos generados) aquí por defecto. /var/lib/hermes/workspace está en

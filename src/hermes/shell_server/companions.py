@@ -56,6 +56,20 @@ _ALLOWED_SCHEME = "https"
 _HOST_SUFFIX = ".safent.internal"
 _BEARER_REF_SCHEME = "file:"
 
+# Where the root `ExecStartPre=-+` of hermes-runtime.service stages a copy of
+# each companion's bearer (see ops/agents-os-edition/scripts/hermes-companion-
+# bearer). tmpfs, 0750 root:hermes, one 0440 root:hermes file per slug. This
+# exists because the bearer's uid/gid on the read-only HOST bind mount is an
+# ENGINE artefact (0:0 rootless, 1000:1000 rootful) that is never `hermes`, so
+# the daemon (uid 880) cannot read the mount directly on every engine.
+COMPANION_RUNTIME_BEARER_DIR = "/run/hermes/companions"
+
+
+def runtime_bearer_path(slug: str) -> str:
+    """The staged-bearer path for *slug* — derived from the VALIDATED slug, never
+    from any JSON field (a tampered `bearer_ref` can never point here)."""
+    return f"{COMPANION_RUNTIME_BEARER_DIR}/{slug}.bearer"
+
 # The only companions this build knows how to seed/trust. An entry for any
 # other slug is a tampered or future-version file — rejected, not ignored
 # per-field (a slug we don't recognise gets NO partial trust).
@@ -135,20 +149,42 @@ def get_companion(slug: str, *, path: Path = _COMPANIONS_PATH) -> CompanionEndpo
     return load_companions(path=path).get(slug)
 
 
-def read_companion_bearer(endpoint: CompanionEndpoint) -> str | None:
-    """Read the bearer token *endpoint.bearer_ref* points at.
+def read_companion_bearer(
+    endpoint: CompanionEndpoint, *, prefer_runtime_copy: bool = True
+) -> str | None:
+    """Read *endpoint*'s bearer token.
+
+    Two sources, in order:
+
+      1. the root-staged copy at `runtime_bearer_path(slug)` (0440 root:hermes
+         on tmpfs) — the ONLY one the daemon's uid 880 can read on every
+         container engine, since the bind-mounted original's ownership is an
+         engine artefact (see COMPANION_RUNTIME_BEARER_DIR). Its path comes
+         from the validated slug, never from the JSON.
+      2. the `bearer_ref` file on the read-only mount itself — used by the
+         stage-in script (`prefer_runtime_copy=False`, so a rotated bearer is
+         picked up from the source, not from last boot's copy) and as the
+         fallback wherever the mount happens to be readable.
 
     Returns None (never raises) on any I/O error or an out-of-mount path —
     the bearer never appears in argv/logs/REST (INV-4); this is the ONLY
     function allowed to read its value, and only at connect time.
     """
+    if prefer_runtime_copy:
+        staged = _read_secret_file(Path(runtime_bearer_path(endpoint.slug)))
+        if staged:
+            return staged
     if not endpoint.bearer_ref.startswith(_BEARER_REF_SCHEME):
         return None
     bearer_path = Path(endpoint.bearer_ref[len(_BEARER_REF_SCHEME):])
     if not _is_within_companion_mount(bearer_path):
         return None
+    return _read_secret_file(bearer_path)
+
+
+def _read_secret_file(path: Path) -> str | None:
     try:
-        return bearer_path.read_text(encoding="utf-8").strip() or None
+        return path.read_text(encoding="utf-8").strip() or None
     except OSError:
         return None
 

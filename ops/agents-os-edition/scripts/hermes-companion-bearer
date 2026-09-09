@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+"""hermes-companion-bearer — stage the companion bearer where the daemon can read it (024).
+
+WHY A SHIM AND NOT A MODE/GROUP CHANGE ON THE HOST FILE
+------------------------------------------------------
+`read_companion_bearer` runs INSIDE hermes-runtime.service, i.e. as uid 880
+(`hermes`). The bearer it must read is a HOST file bind-mounted read-only by
+run-safent.sh, written 0400 by provision.sh. Its uid/gid inside the container
+is whatever the engine's mapping produces — 0:0 under rootless podman/docker
+(the installing owner is remapped to root), 1000:1000 under ROOTFUL podman (no
+remapping at all). NEITHER is `hermes`, and no host-side `chown`/`chmod` can
+make it so portably: gid 880 on the host is some unrelated group, and widening
+the mode to 0444 would hand the bearer to uid 886 (`hermes-sandbox`, the
+agent/MCP sandbox) — exactly the process the bearer must be kept from.
+
+So a root stage-in is the only correct shape. This runs as the FULL-privilege
+`ExecStartPre=-+` of hermes-runtime.service (the `+` prefix, same pattern as
+`_provision_bootstrap_secret` and hermes-mcp-cache-sync), reads each validated
+companion's bearer, and drops a copy on TMPFS at
+
+    /run/hermes/companions/<slug>.bearer   0440 root:hermes
+
+readable by the daemon's group and by nobody else (hermes-sandbox is not in
+group `hermes`). tmpfs => gone on reboot, re-staged from the mount every boot,
+so a rotated bearer takes effect on the next boot with no extra plumbing and
+no copy is ever persisted to disk (INV-4).
+
+Exit code is ALWAYS 0 — a companion is optional infrastructure and this must
+never block the daemon's boot (FR-3). The unit also uses `-` for the same
+reason; both belts, on purpose.
+"""
+
+from __future__ import annotations
+
+import grp
+import os
+import sys
+
+from hermes.shell_server.companions import (  # noqa: E402
+    COMPANION_RUNTIME_BEARER_DIR,
+    load_companions,
+    read_companion_bearer,
+    runtime_bearer_path,
+)
+
+_DAEMON_GROUP = "hermes"
+
+
+def main() -> int:
+    endpoints = load_companions()
+    gid = grp.getgrnam(_DAEMON_GROUP).gr_gid
+    _ensure_dir(gid)
+    staged = 0
+    for slug, endpoint in sorted(endpoints.items()):
+        # prefer_runtime_copy=False: read the read-only MOUNT, never the copy
+        # this script itself wrote on a previous boot (which would make a
+        # rotated bearer invisible until the tmpfs is cleared).
+        bearer = read_companion_bearer(endpoint, prefer_runtime_copy=False)
+        if not bearer:
+            print(f"[companion-bearer] {slug}: no bearer at its bearer_ref", file=sys.stderr)
+            continue
+        _write_secret(runtime_bearer_path(slug), bearer, gid)
+        staged += 1
+    _purge_stale(set(endpoints), gid)
+    print(f"[companion-bearer] {staged} bearer(s) staged for uid/gid {_DAEMON_GROUP}")
+    return 0
+
+
+def _ensure_dir(gid: int) -> None:
+    os.makedirs(COMPANION_RUNTIME_BEARER_DIR, exist_ok=True)
+    os.chown(COMPANION_RUNTIME_BEARER_DIR, 0, gid)
+    os.chmod(COMPANION_RUNTIME_BEARER_DIR, 0o750)
+
+
+def _write_secret(path: str, value: str, gid: int) -> None:
+    tmp = f"{path}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o400)
+    try:
+        os.write(fd, value.encode("utf-8"))
+        os.fchown(fd, 0, gid)
+        os.fchmod(fd, 0o440)
+    finally:
+        os.close(fd)
+    os.replace(tmp, path)
+
+
+def _purge_stale(live_slugs: set[str], gid: int) -> None:
+    """A companion the owner removed must not leave its bearer behind."""
+    try:
+        names = os.listdir(COMPANION_RUNTIME_BEARER_DIR)
+    except OSError:
+        return
+    for name in names:
+        if not name.endswith(".bearer"):
+            continue
+        if name[: -len(".bearer")] in live_slugs:
+            continue
+        try:
+            os.remove(os.path.join(COMPANION_RUNTIME_BEARER_DIR, name))
+        except OSError:
+            pass
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as exc:  # noqa: BLE001 — never block the daemon's boot
+        print(f"[companion-bearer] failed (non-fatal): {exc}", file=sys.stderr)
+        sys.exit(0)
