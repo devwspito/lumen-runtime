@@ -149,7 +149,7 @@ def _classify_managed_remote(
     above) — a slug absent from that table (or slug=None) gets the generic,
     read-verb-only policy, identical to before this parameter existed.
     """
-    bare = name.split("__")[-1] if "__" in name else name
+    bare = name.rsplit("__", 1)[-1]
     prefixes = _MANAGED_REMOTE_AUTO_PREFIXES.get(slug or "")
     if prefixes is not None:
         auto = bare.lower().startswith(prefixes)
