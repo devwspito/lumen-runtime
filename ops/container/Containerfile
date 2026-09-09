@@ -430,16 +430,24 @@ ENV XDG_CACHE_HOME=/var/lib/hermes/xdg-cache
 # exercising a connection that has no companion to reach at build time.
 RUN mkdir -p /var/lib/hermes/npm-cache /var/lib/hermes/uv-cache /var/lib/hermes/xdg-cache \
       /var/lib/hermes/mcp-home && \
-    # `--with mcp<2` (powerpoint): office-powerpoint-mcp-server importa
-    # `mcp.server.fastmcp`, que el SDK MCP 2.0 renombró a `mcp.server.mcpserver`
-    # — sin la restricción, uv resuelve mcp 2.x y el hijo muere en el import
-    # ("ModuleNotFoundError: No module named 'mcp.server.fastmcp'") antes de
-    # decir una sola línea de JSON-RPC. El spec de calentamiento tiene que ser
-    # IDÉNTICO al argv de seed/mcp-servers.json: uv cachea el entorno por sus
-    # requisitos y el arranque real es `--offline`, así que cualquier diferencia
-    # es un fallo de caché y el servidor nunca levanta.
-    for spec in "excel-mcp-server stdio" \
-                "--from office-word-mcp-server word_mcp_server" \
+    # RULE (every uvx seed, no exceptions): pin `mcp` explicitly with `--with`. None of
+    # these three specs may resolve their transitive `mcp` SDK from whatever PyPI serves
+    # at warm time — that's exactly what let office-powerpoint-mcp-server silently start
+    # resolving mcp 2.x one day and die on import (`ModuleNotFoundError: No module named
+    # 'mcp.server.fastmcp'`, renamed to `mcp.server.mcpserver` in 2.0) before a single
+    # line of JSON-RPC. `excel-mcp-server` (excel_mcp/server.py) imports the SAME v1-only
+    # `mcp.server.fastmcp` symbol — verified: `uv run --with mcp>=2 excel-mcp-server`
+    # reproduces the identical crash — so it carries the SAME `mcp<2` range. Word
+    # (word_document_server/main.py) uses the standalone `fastmcp` package instead and
+    # only touches raw `mcp` for `mcp.types.ToolAnnotations` (present in both SDK lines)
+    # — verified 2.x-compatible, so it gets an EXACT pin (`mcp==2.2.0`) at the version it
+    # was warmed + verified against, not an open-ended range. tests/unit/agents_os/
+    # test_seed_mcp_offline_specs.py enforces that every seed carries a `--with mcp…`
+    # pin AND that this warm spec stays token-identical to the seed's argv (uv caches the
+    # environment by its exact requirements; the real boot spawns `--offline`, so any
+    # difference between the two is a cache miss the seed can never recover from).
+    for spec in "--from excel-mcp-server --with mcp<2 excel-mcp-server stdio" \
+                "--from office-word-mcp-server --with mcp==2.2.0 word_mcp_server" \
                 "--from office-powerpoint-mcp-server --with mcp<2 ppt_mcp_server"; do \
       echo "▸ warming uvx $spec" ; \
       HOME=/var/lib/hermes/mcp-home timeout 240 uvx $spec </dev/null >/dev/null 2>&1 || true ; \

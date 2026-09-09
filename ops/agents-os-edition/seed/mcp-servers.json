@@ -2,12 +2,12 @@
   {
     "server_id": "excel",
     "label": "Hojas de cálculo · crea y edita Excel (.xlsx) sin clave",
-    "argv": ["uvx", "excel-mcp-server", "stdio"]
+    "argv": ["uvx", "--from", "excel-mcp-server", "--with", "mcp<2", "excel-mcp-server", "stdio"]
   },
   {
     "server_id": "word",
     "label": "Documentos · crea y edita Word (.docx) sin clave",
-    "argv": ["uvx", "--from", "office-word-mcp-server", "word_mcp_server"]
+    "argv": ["uvx", "--from", "office-word-mcp-server", "--with", "mcp==2.2.0", "word_mcp_server"]
   },
   {
     "server_id": "powerpoint",
