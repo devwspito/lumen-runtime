@@ -1,6 +1,6 @@
 [project]
 name = "hermes-runtime"
-version = "0.8.40"
+version = "0.8.42"
 description = "Hermes: runtime agentico LLM reutilizable. ReasoningEngine + CapturingToolHost + PII tokenization + policy layer. Reemplaza dependencia de hermes-agent NousResearch por loop propio sobre LiteLLM."
 requires-python = ">=3.12"
 license = { file = "LICENSE" }
@@ -15,7 +15,7 @@ dependencies = [
     "dbus-fast>=2.21",
     "aiohttp>=3.13.4",
     "composio==0.13.1",
-    "hermes-agent==0.15.1",
+    "hermes-agent==0.21.1",
 ]
 
 [project.optional-dependencies]

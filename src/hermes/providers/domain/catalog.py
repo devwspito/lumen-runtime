@@ -8,7 +8,9 @@ A single entry here drives ALL three engines: litellm, nous (hermes-agent),
 and NemoClaw. If a ProviderKind is missing from this table, that is a compile-
 time error caught by test_canonical_catalog_completeness.
 
-hermes_cli slug verification (as of hermes-agent 0.15.1):
+hermes_cli slug verification (as of hermes-agent 0.21.1 — re-checked at the
+0.21 upgrade, specs/023: every REGISTERED_SLUG is a PROVIDER_REGISTRY key or an
+ALIASES entry, e.g. kimi-for-coding → kimi-coding):
   REGISTERED_SLUG entries verified against hermes_cli/auth.py::PROVIDER_REGISTRY
   and hermes_cli/providers.py::HERMES_OVERLAYS + ALIASES.
   "openrouter" is not in PROVIDER_REGISTRY (by design, it is the fallback

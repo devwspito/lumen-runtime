@@ -215,7 +215,7 @@ def set_session_key_for_thread() -> None:
     Fail-soft: logs and continues if tools.approval is unavailable (CI).
     """
     try:
-        from tools.approval import set_current_session_key  # noqa: PLC0415
+        from tools.approval_context import set_current_session_key  # noqa: PLC0415
         set_current_session_key(_SESSION_KEY)
     except ImportError:
         logger.debug(
@@ -233,7 +233,7 @@ def clear_session_key_for_thread() -> None:
     Fail-soft: logs and continues.
     """
     try:
-        from tools.approval import set_current_session_key  # noqa: PLC0415
+        from tools.approval_context import set_current_session_key  # noqa: PLC0415
         set_current_session_key(None)  # type: ignore[arg-type]
     except Exception:  # noqa: BLE001
         pass
