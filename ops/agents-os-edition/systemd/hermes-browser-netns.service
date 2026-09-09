@@ -54,9 +54,10 @@ Before=hermes-egress-proxy.service hermes-browser-launcher.service
 # PartOf provocaba que cualquier parada del target (e.g., por fallo en cascade del
 # launcher) hiciera stop del netns, disparando el ciclo teardown/recreate que causa
 # la race condition (ip netns del concurrente con nft exec).
-# El netns se activa vía WantedBy; se para SOLO si el propio servicio se detiene
+# El netns se activa vía WantedBy (en [Install], la ÚNICA sección donde systemd
+# lo reconoce — aquí en [Unit] era una clave desconocida que systemd ignoraba y
+# logueaba como warning); se para SOLO si el propio servicio se detiene
 # explícitamente o si la máquina hace shutdown. Esto rompe el restart-storm.
-WantedBy=hermes-workspace.target
 
 [Service]
 Type=oneshot

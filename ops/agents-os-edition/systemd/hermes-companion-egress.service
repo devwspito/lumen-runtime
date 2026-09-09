@@ -18,7 +18,6 @@ Description=Hermes — companion egress nft fragments + /etc/hosts pin
 Documentation=file:///usr/libexec/hermes/hermes-companion-nft
 After=systemd-tmpfiles-setup.service
 Before=hermes-browser-netns.service
-WantedBy=hermes-workspace.target
 
 [Service]
 Type=oneshot
