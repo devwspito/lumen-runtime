@@ -31,8 +31,15 @@ PORT_PIN="${SAFENT_PORT:-}"
 # the tenant's cloud instead of the default https://cloud.safent.run.
 CLOUD_ENDPOINT="${SAFENT_CLOUD_ENDPOINT:-}"
 # Named volume that holds the persistent state (config, identity, skills, memory).
-# Override SAFENT_DATA_VOLUME to run more than one isolated instance on one host.
-DATA_VOLUME="${SAFENT_DATA_VOLUME:-safent-data}"
+# Derived from NAME (matches ops/container/run-safent.sh:110's own
+# VOLUME="${NAME}-data") so a second instance with its own SAFENT_NAME gets
+# its own volume automatically — the old hardcoded "safent-data" default
+# meant ANY differently-named instance silently mounted the FIRST instance's
+# volume (verificacion-paquete-linux.md §6: reproduced live, an unrelated
+# volume already existed under that exact name on a real host). Override
+# SAFENT_DATA_VOLUME directly for the rare case a name-derived default isn't
+# wanted.
+DATA_VOLUME="${SAFENT_DATA_VOLUME:-${NAME}-data}"
 # Graceful stop (item #2, spec 025 matriz): PID1 is systemd, which needs
 # SIGRTMIN+3 (not SIGTERM) to begin an orderly shutdown of every unit —
 # STOPSIGNAL SIGRTMIN+3 is baked into the image, but pinning it here too
@@ -86,9 +93,12 @@ COMPANION_HOST="ads.safent.internal"
 COMPANION_PORT="8443"
 COMPANION_IP="10.201.0.10"
 COMPANION_COMPOSE="$COMPANION_BIN_DIR/compose.yaml"
-case "${1:-}" in
-  --no-companion) NO_COMPANION=1; shift ;;
-esac
+# --no-companion itself is recognized from ANY position, not only $1 — see
+# the --porcelain filter loop below, which now also catches this flag.
+# (Previously position-locked to $1 only: the Tauri adapter always invokes
+# `<cli_path> <verb> [args] --porcelain`, verb first, so it had no way to
+# request --no-companion at all — packaging review item 4/
+# verificacion-paquete-linux.md §6.)
 
 # GUI-launched contexts hand this script a MINIMAL PATH: a launchd LaunchAgent (the
 # `safent agent` update watcher) and a Finder-launched .app both run with roughly
@@ -114,6 +124,48 @@ fi
 [ -n "$RT" ] || { echo "[x] You need podman or docker.  ->  https://podman.io/get-started" >&2; exit 1; }
 RTN="$(basename "$RT")"
 OS="$(uname -s 2>/dev/null || echo unknown)"
+
+# A bundled STATIC (musl) podman and the host's own (glibc) podman/docker,
+# run as the same uid, collide on ONE shared /dev/shm lock segment sized
+# differently by each libc's pthread_mutex_t layout — reproduced live:
+# "failed to open 2048 locks in /libpod_rootless_lock_1000: numerical
+# result out of range" (specs/028-safent-app-nativa/
+# verificacion-paquete-linux.md §"Pasada 1"). Only when the WRAPPER pins
+# its OWN podman (never for a bare terminal `podman`/`docker` a dev/owner
+# already has on PATH, whose existing storage this must never redirect):
+# point CONTAINERS_CONF at the BUNDLED, already-patched containers.conf
+# (lock_type = "file" — file locks, no shared-by-uid segment at all; see
+# stage-runtime.sh's _patch_bundled_containers_conf) sitting right beside
+# $SAFENT_PODMAN, and give the bundled podman its OWN graphroot/runroot
+# under $SAFENT_STATE_HOME — generated HERE, not baked into the bundle,
+# because that path is only known at runtime. An existing
+# CONTAINERS_CONF/CONTAINERS_STORAGE_CONF from the caller always wins.
+if [ -n "${SAFENT_PODMAN:-}" ]; then
+  _podman_bundle_dir="$(CDPATH='' cd -- "$(dirname "$SAFENT_PODMAN")" 2>/dev/null && pwd)"
+  if [ -z "${CONTAINERS_CONF:-}" ] && [ -f "$_podman_bundle_dir/containers.conf" ]; then
+    CONTAINERS_CONF="$_podman_bundle_dir/containers.conf"
+    export CONTAINERS_CONF
+  fi
+  PODMAN_STATE="$SAFENT_STATE_HOME/podman"
+  if [ -z "${CONTAINERS_STORAGE_CONF:-}" ]; then
+    mkdir -p "$PODMAN_STATE/storage" "$PODMAN_STATE/runroot" 2>/dev/null || true
+    if [ ! -f "$PODMAN_STATE/storage.conf" ]; then
+      cat > "$PODMAN_STATE/storage.conf" <<EOF
+[storage]
+driver = "overlay"
+graphroot = "$PODMAN_STATE/storage"
+runroot = "$PODMAN_STATE/runroot"
+EOF
+    fi
+    CONTAINERS_STORAGE_CONF="$PODMAN_STATE/storage.conf"
+    export CONTAINERS_STORAGE_CONF
+  fi
+  if [ -z "${TMPDIR:-}" ]; then
+    mkdir -p "$PODMAN_STATE/tmp" 2>/dev/null || true
+    TMPDIR="$PODMAN_STATE/tmp"
+    export TMPDIR
+  fi
+fi
 
 # ---- helpers ----------------------------------------------------------------
 
@@ -1815,14 +1867,18 @@ safent - control your local Safent
 EOF
 }
 
-# Filter --porcelain out of argv from ANY position (app-engine.md §1: it
-# trails the verb, e.g. `up --porcelain`) before the dispatch below reads
-# positional args. Safe to mutate "$@" mid-loop: `for x in "$@"` expands the
-# list once, up front. Never affects --no-companion, already shifted off above.
+# Filter --porcelain AND --no-companion out of argv from ANY position
+# (app-engine.md §1: --porcelain trails the verb, e.g. `up --porcelain`;
+# --no-companion has the SAME need — the Tauri adapter always invokes
+# `<cli_path> <verb> [args] --porcelain`, verb first, so a position-locked
+# "$1 only" check could never be requested by it at all) before the
+# dispatch below reads positional args. Safe to mutate "$@" mid-loop:
+# `for x in "$@"` expands the list once, up front.
 _rest_n=0
 for _a in "$@"; do
   case "$_a" in
     --porcelain) PORCELAIN=1 ;;
+    --no-companion) NO_COMPANION=1 ;;
     *)
       if [ "$_rest_n" -eq 0 ]; then set -- "$_a"; else set -- "$@" "$_a"; fi
       _rest_n=$((_rest_n + 1))

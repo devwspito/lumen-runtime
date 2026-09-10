@@ -187,6 +187,50 @@ exit 1
     }
 }
 
+/// Regression test (packaging review item 3, verificacion-paquete-linux.md
+/// §"Pasada 1"): a bundled/host podman storage-lock collision made
+/// `cmd_ensure_images` report a generic `registry_unreachable` — the CLI's
+/// OWN blanket mapping for ANY `podman pull` failure — while the real
+/// diagnosis ("failed to open 2048 locks ... numerical result out of
+/// range") sat unused in the process's own stderr. The adapter must prefer
+/// its own reclassification over the CLI's generic code+detail when stderr
+/// says something more precise.
+#[test]
+fn apply_reclassifies_a_generic_failure_when_stderr_shows_a_local_storage_lock_conflict() {
+    let script = fake_cli(
+        r#"
+if [ "$1" = "ensure-images" ]; then
+  echo '{"t":"stage","id":"pull_engine","label":"Descargando Safent","total_bytes":null}'
+  echo 'Error: failed to open 2048 locks in /libpod_rootless_lock_1000: numerical result out of range' >&2
+  echo '{"t":"failed","id":"pull_engine","code":"registry_unreachable","detail":"No se pudo descargar la imagen","retryable":true}'
+  exit 19
+fi
+exit 1
+"#,
+    );
+    let driver = EmbeddedCliDriver::new(config(script));
+    let notifier = RecordingNotifier::new();
+    let image = ImageRef::new("ghcr.io/devwspito/safent", "sha256:engine-good").unwrap();
+    let err = driver
+        .apply(
+            &RepairAction::PullEngine(image),
+            &notifier,
+            &ports::CancelSignal::new(),
+        )
+        .unwrap_err();
+    match err {
+        EngineError::Reported(cause) => {
+            assert_eq!(cause.code, FailureCode::LocalStorageConflict, "{cause:?}");
+            assert!(
+                cause.message.contains("numerical result out of range"),
+                "the real podman stderr must reach the owner, not the CLI's generic detail: {cause:?}"
+            );
+            assert!(!cause.retryable);
+        }
+        other => panic!("expected Reported(LocalStorageConflict), got {other:?}"),
+    }
+}
+
 /// The exact scenario my task brief calls out by name: the bundled CLI does
 /// not understand `--porcelain` yet (pre-T004) and prints its ordinary human
 /// text instead of NDJSON. The adapter must fail CLOSED — promptly, with a
@@ -238,6 +282,73 @@ sleep 5
         started.elapsed() < Duration::from_secs(8),
         "must not wait anywhere near the scripted sleep 5"
     );
+}
+
+/// Regression test (packaging review item 4, verificacion-paquete-linux.md
+/// §6): `up` never passed --no-companion, so `_provision_companion`
+/// attempted real network fetches + cert/network setup on EVERY bootstrap,
+/// even when this boot's own DesiredState wants no companion at all
+/// (companion_image: None, e.g. every selftest) — verified live to exceed
+/// the adapter's own 15s stall timeout.
+#[test]
+fn up_passes_no_companion_when_no_companion_image_is_desired() {
+    let script = fake_cli(
+        r#"
+if [ "$1" = "up" ]; then
+  shift
+  found=0
+  for a in "$@"; do [ "$a" = "--no-companion" ] && found=1; done
+  [ "$found" -eq 1 ] || { echo "missing --no-companion in: $*" >&2; exit 1; }
+  echo '{"t":"stage","id":"container","label":"Arrancando"}'
+  echo '{"t":"done","id":"container","ms":1}'
+  echo '{"t":"ready","endpoint_ref":"stdout-secret"}'
+  echo "http://127.0.0.1:1/?k=x" >&3
+  exit 0
+fi
+exit 1
+"#,
+    );
+    let driver = EmbeddedCliDriver::new(config(script)); // companion_image: None
+    let notifier = RecordingNotifier::new();
+    driver
+        .apply(
+            &RepairAction::CreateContainer,
+            &notifier,
+            &ports::CancelSignal::new(),
+        )
+        .expect("apply should succeed — the fake exits 1 if --no-companion is missing");
+}
+
+/// The inverse: once a companion IS desired (image set), `up` must NOT
+/// suppress its own scaffold provisioning.
+#[test]
+fn up_does_not_pass_no_companion_when_a_companion_image_is_desired() {
+    let script = fake_cli(
+        r#"
+if [ "$1" = "up" ]; then
+  shift
+  for a in "$@"; do [ "$a" = "--no-companion" ] && { echo "unexpected --no-companion in: $*" >&2; exit 1; }; done
+  echo '{"t":"stage","id":"container","label":"Arrancando"}'
+  echo '{"t":"done","id":"container","ms":1}'
+  echo '{"t":"ready","endpoint_ref":"stdout-secret"}'
+  echo "http://127.0.0.1:1/?k=x" >&3
+  exit 0
+fi
+exit 1
+"#,
+    );
+    let mut cfg = config(script);
+    cfg.companion_image =
+        Some(ImageRef::new("ghcr.io/devwspito/safent-ads", "sha256:companion-good").unwrap());
+    let driver = EmbeddedCliDriver::new(cfg);
+    let notifier = RecordingNotifier::new();
+    driver
+        .apply(
+            &RepairAction::CreateContainer,
+            &notifier,
+            &ports::CancelSignal::new(),
+        )
+        .expect("apply should succeed — the fake exits 1 if --no-companion IS present");
 }
 
 #[test]

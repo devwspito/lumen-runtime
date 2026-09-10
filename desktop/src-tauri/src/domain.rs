@@ -322,6 +322,25 @@ pub enum FailureCode {
     /// explicit "Reintentar" still works, because that is a new decision,
     /// not a retry of the one just cancelled.
     CancelledByOwner,
+    /// NOT part of the CLI's vocabulary either — synthesized by `boot.rs`
+    /// when the SAME `RepairAction` reports success (`ApplyOutcome::
+    /// Progressed`) twice in a row against UNCHANGED `HostFacts`: a
+    /// successful-but-ineffective repair is indistinguishable from a hang
+    /// to the owner, and is a DIFFERENT failure mode than
+    /// `EngineLifecycle::fail`'s existing guard, which only ever sees
+    /// `Err`s. Verified live: `cmd_stage_runtime` as a no-op (no bundled
+    /// manifest) looped ~400 times in 90s, never erroring, never
+    /// progressing — specs/028-safent-app-nativa/verificacion-paquete-linux.md.
+    RepairIneffective,
+    /// NOT part of the CLI's vocabulary — synthesized by `engine_adapter.rs`
+    /// when a `failed` event's own code is a poor match for what podman's
+    /// OWN stderr actually says. Verified live (packaging review item 3):
+    /// a bundled/system podman storage-lock collision surfaced to the
+    /// owner as `registry_unreachable` / "No se pudo descargar la imagen"
+    /// — a misleading diagnosis pointing at network connectivity for a
+    /// purely local storage problem, with the real detail (the podman
+    /// process's own stderr) captured by the adapter but never shown.
+    LocalStorageConflict,
 }
 
 impl FailureCode {
@@ -354,6 +373,8 @@ impl FailureCode {
             FailureCode::ClockSkew => "clock_skew",
             FailureCode::CliPorcelainUnsupported => "cli_porcelain_unsupported",
             FailureCode::CancelledByOwner => "cancelled_by_owner",
+            FailureCode::RepairIneffective => "repair_ineffective",
+            FailureCode::LocalStorageConflict => "local_storage_conflict",
         }
     }
 }

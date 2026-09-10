@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use crate::domain::{
     AttemptCount, BootstrapTicket, DesiredState, DomainEvent, EngineLifecycle, EnginePhase,
-    FailOutcome, FailureCause, FailureCode, RepairAction, SemVer, Stage, VersionSet,
+    FailOutcome, FailureCause, FailureCode, HostFacts, RepairAction, SemVer, Stage, VersionSet,
 };
 use crate::ports::{
     ApplyOutcome, CancelSignal, Clock, EngineDriver, EngineError, EngineProbe, Notifier,
@@ -145,6 +145,16 @@ impl BootService {
             .enter(EnginePhase::Preflight)
             .expect("Fresh -> Preflight is always legal");
 
+        // The action + facts a repair last reported SUCCESS against — not
+        // touched by the failure path, which has its own guard
+        // (`EngineLifecycle::fail`). Detects a DIFFERENT failure mode a
+        // real packaged run hit live: `cmd_stage_runtime` as a no-op
+        // returned `Ok(Progressed)` ~400 times in 90s without
+        // `runtime_staged` ever becoming true, because the packaged CLI had
+        // no manifest to actually stage — every `Err` guard in this loop
+        // was irrelevant; nothing ever failed.
+        let mut last_effective_repair: Option<(RepairAction, HostFacts)> = None;
+
         loop {
             let facts = match self.probe.observe() {
                 Ok(facts) => facts,
@@ -183,12 +193,41 @@ impl BootService {
                 return LoopOutcome::FocusExisting;
             }
 
+            // The SAME action reconcile just asked for again, against
+            // EXACTLY the facts its own last (successful!) application left
+            // behind: whatever it did had no observable effect. Routed
+            // through the SAME `handle_failure`/`lifecycle.fail()` path the
+            // error branch below uses — `EngineLifecycle`'s own invariant
+            // is that `Degraded` is reachable ONLY via `fail()` detecting a
+            // REPEAT, never a direct construction — so this gives it one
+            // more backoff-and-retry (`FailOutcome::Repairing`, in case the
+            // apply was genuinely flaky) exactly like a real error would,
+            // and only degrades on the SECOND ineffective cycle in a row.
+            if let Some((last_action, last_facts)) = &last_effective_repair {
+                if *last_action == action && *last_facts == facts {
+                    let cause = FailureCause {
+                        code: FailureCode::RepairIneffective,
+                        message: format!(
+                            "{action:?} se aplicó y no cambió nada observable en el equipo"
+                        ),
+                        retryable: false,
+                    };
+                    if let Some(outcome) =
+                        self.handle_failure(&mut lifecycle, Some(&action), cause, notifier)
+                    {
+                        return outcome;
+                    }
+                    continue;
+                }
+            }
+
             match self.apply_gated(&mut lifecycle, &action, notifier, cancel) {
                 Ok(ApplyOutcome::Progressed) => {
                     notifier.notify(&DomainEvent::RepairApplied {
                         action: action.clone(),
                     });
                     self.advance_to(&mut lifecycle, &action);
+                    last_effective_repair = Some((action, facts));
                 }
                 Ok(ApplyOutcome::Ready(ticket)) => {
                     self.advance_to(&mut lifecycle, &action);
@@ -200,6 +239,12 @@ impl BootService {
                 }
                 Err(EngineError::Cancelled) => return LoopOutcome::Cancelled { lifecycle },
                 Err(error) => {
+                    // A failure is a DIFFERENT episode than a silent no-op
+                    // success — EngineLifecycle::fail() owns detecting
+                    // repeated failures on its own attempt-count; starting
+                    // fresh here means a transient error right after an
+                    // effective repair is never confused with THIS guard.
+                    last_effective_repair = None;
                     self.notify_if_reconnecting(&mut lifecycle, &error, notifier);
                     if let Some(outcome) = self.handle_failure(
                         &mut lifecycle,
@@ -957,6 +1002,57 @@ mod tests {
         assert!(
             !clock.requested_sleeps().is_empty(),
             "must back off between attempts, not spin"
+        );
+    }
+
+    /// The real packaged-Linux bug (specs/028-safent-app-nativa/
+    /// verificacion-paquete-linux.md): `cmd_stage_runtime` as a no-op
+    /// returns SUCCESS every time (`Ok(Progressed)`) without ever changing
+    /// `runtime_staged`. Every `Err`-based guard in this loop is silent —
+    /// nothing ever fails — so unbounded `Ok(Progressed)` against unchanged
+    /// facts needs its OWN guard. Scripts `StageRuntime` to "succeed" far
+    /// more times than a fixed loop cap could excuse away as coincidence,
+    /// to prove the loop stops ITSELF, not that the script merely ran out.
+    #[test]
+    fn same_action_succeeding_repeatedly_without_changing_facts_degrades_after_one_apply() {
+        let mut fresh = converged_facts();
+        fresh.runtime_staged = false;
+        fresh.runtime_hash_ok = false;
+
+        // Facts never change (ScriptedProbe repeats its last entry forever).
+        let probe = ScriptedProbe::new(vec![Ok(fresh)]);
+        let driver = ScriptedDriver::new(vec![
+            (RepairAction::StageRuntime, Ok(ApplyOutcome::Progressed)),
+            (RepairAction::StageRuntime, Ok(ApplyOutcome::Progressed)),
+            (RepairAction::StageRuntime, Ok(ApplyOutcome::Progressed)),
+            (RepairAction::StageRuntime, Ok(ApplyOutcome::Progressed)),
+            (RepairAction::StageRuntime, Ok(ApplyOutcome::Progressed)),
+        ]);
+        let (service, _clock) = service(probe, driver);
+        let notifier = RecordingNotifier::new();
+
+        let outcome = service.run(&notifier, &CancelSignal::new());
+        match outcome {
+            LoopOutcome::Degraded { lifecycle } => {
+                assert_eq!(
+                    lifecycle.last_failure().map(|f| f.code),
+                    Some(FailureCode::RepairIneffective)
+                );
+            }
+            other => panic!("expected Degraded(RepairIneffective), got {other:?}"),
+        }
+        assert!(
+            notifier.events().iter().any(|e| matches!(
+                e,
+                DomainEvent::EngineDegraded {
+                    cause: FailureCause {
+                        code: FailureCode::RepairIneffective,
+                        ..
+                    }
+                }
+            )),
+            "{:?}",
+            notifier.events()
         );
         assert!(notifier
             .events()

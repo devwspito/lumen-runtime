@@ -39,7 +39,7 @@
 #     touches the tree, instead of only fixed by getting that far unbroken.
 set -uo pipefail
 
-_EXECUTABLE_BASENAMES="podman crun fuse-overlayfs fusermount3 passt pasta gvproxy vfkit krunkit conmon netavark aardvark-dns rootlessport catatonit"
+_EXECUTABLE_BASENAMES="podman crun fuse-overlayfs fusermount3 passt pasta gvproxy vfkit krunkit conmon netavark aardvark-dns rootlessport catatonit safent run-safent.sh provision.sh"
 
 normalize_staged_tree() {
   local dest="$1"

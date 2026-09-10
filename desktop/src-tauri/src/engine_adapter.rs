@@ -175,7 +175,21 @@ impl EngineDriver for EmbeddedCliDriver {
         notifier: &dyn Notifier,
         cancel: &CancelSignal,
     ) -> Result<ApplyOutcome, EngineError> {
-        let (verb, args) = cli_invocation_for(action)?;
+        let (verb, mut args) = cli_invocation_for(action)?;
+        // `up` always provisions the companion SCAFFOLD unconditionally
+        // (T015: "el andamiaje existe siempre") unless told not to — but
+        // when THIS boot's own DesiredState wants no companion at all
+        // (companion_image: None, e.g. every selftest / --no-companion
+        // caller), that provisioning attempt is pure unwanted work: real
+        // network fetches + cert/network setup with zero progress events
+        // for the whole `container` stage's duration, verified live to
+        // exceed this adapter's own 15s stall timeout (packaging review
+        // item 4, verificacion-paquete-linux.md §6). `--no-companion` is
+        // now recognized from ANY position in argv (safent's own filter
+        // loop, same fix) — this is the only place a Rust caller can ask.
+        if verb == "up" && self.config.companion_image.is_none() {
+            args.push("--no-companion".to_string());
+        }
         let want_secret = verb == "up";
         let mut failure: Option<FailureCause> = None;
         let mut ready = false;
@@ -242,7 +256,10 @@ impl EngineDriver for EmbeddedCliDriver {
         // app-engine.md §2: 10..39 IS that event, reported previously) — it
         // must win even though the process also exited non-zero.
         if let Some(cause) = failure {
-            return Err(EngineError::Reported(cause));
+            return Err(EngineError::Reported(reclassify_from_stderr(
+                cause,
+                &outcome.stderr_tail,
+            )));
         }
         if ready {
             let line = outcome.secret_line.ok_or(EngineError::ReadyWithoutTicket)?;
@@ -369,6 +386,36 @@ fn cli_invocation_for(action: &RepairAction) -> Result<(&'static str, Vec<String
             })
         }
     }
+}
+
+/// A `failed` event's own `code` can be a poor diagnosis of what actually
+/// happened: the CLI maps ANY `podman pull` failure to `registry_unreachable`
+/// (`cmd_ensure_images`), regardless of WHY podman actually failed — verified
+/// live (packaging review item 3, verificacion-paquete-linux.md §"Pasada 1"):
+/// a bundled/host podman storage-lock collision ("failed to open 2048 locks
+/// in /libpod_rootless_lock_1000: numerical result out of range") surfaced
+/// to the owner as "no pude conectarme para descargar", pointing at network
+/// connectivity for a purely local, already-captured-but-unused stderr
+/// detail. This is the one place both the reported cause AND the process's
+/// full stderr (`stderr_tail`, already captured for every apply()) are both
+/// in hand — reclassifies to a precise code when stderr's own text is a
+/// clearer diagnosis than the CLI's generic one; the message becomes
+/// podman's own stderr instead of the CLI's generic detail, so a real cause
+/// is never hidden. A CLI that itself starts reporting the more precise code
+/// one day makes this a no-op (the `match` below simply never fires).
+fn reclassify_from_stderr(cause: FailureCause, stderr_tail: &str) -> FailureCause {
+    let lower = stderr_tail.to_ascii_lowercase();
+    let is_local_storage_conflict = (lower.contains("numerical result out of range")
+        || lower.contains("erange"))
+        && (lower.contains("lock") || lower.contains("libpod_rootless_lock"));
+    if is_local_storage_conflict {
+        return FailureCause {
+            code: FailureCode::LocalStorageConflict,
+            message: stderr_tail.to_string(),
+            retryable: false,
+        };
+    }
+    cause
 }
 
 // ---------------------------------------------------------------------------
