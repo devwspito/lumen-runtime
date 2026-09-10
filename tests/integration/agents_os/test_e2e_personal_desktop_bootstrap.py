@@ -6,13 +6,12 @@ Demuestra el wiring completo:
   3. Wizard recorre las 7 pantallas hasta finalize().
   4. TenantBinding ACTIVE creado.
   5. AlwaysOnPolicy aplicada al SystemSupervisor (fake).
-  6. TrainingSession completa: capture × N → review → sign.
-  7. SkillCompiler emite SkillPackage firmado.
-  8. SQLiteSkillPackageRepo persiste el paquete (round-trip safe).
-  9. IntentRouter resuelve y SkillReplayer ejecuta.
-  10. AuditHashChain refleja toda la actividad (15+ entries firmadas).
-  11. AuditTailWriter cola entries pendientes para el CP.
-  12. Telemetría: OFF por defecto, flip ON requiere TOTP.
+  6. SkillCompiler compila N steps cross-domain y emite un SkillPackage firmado.
+  7. SQLiteSkillPackageRepo persiste el paquete (round-trip safe).
+  8. IntentRouter resuelve y SkillReplayer ejecuta.
+  9. AuditHashChain refleja toda la actividad (15+ entries firmadas).
+  10. AuditTailWriter cola entries pendientes para el CP.
+  11. Telemetría: OFF por defecto, flip ON requiere TOTP.
 
 NO se hacen llamadas a kernel/red/LLM real — todos los adapters usan
 fakes inyectables. Es la prueba de que la arquitectura encaja.
