@@ -9,7 +9,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { sileo } from 'sileo'
-import { Save, CheckCircle, ShieldCheck, Globe, Wifi } from 'lucide-react'
+import { Save, CheckCircle, ShieldCheck, Globe, Wifi, Terminal } from 'lucide-react'
 import { useT } from '../lib/i18n'
 import { isApprovalFresh } from '../hooks/usePendingApprovals'
 import {
@@ -31,6 +31,8 @@ import {
   getTailnetStatus,
   connectTailnet,
   disconnectTailnet,
+  getSshHosts,
+  revokeSshHost,
   getKillSwitch,
   engageKillSwitch,
   releaseKillSwitch,
@@ -45,6 +47,7 @@ import type {
   SecurityScan,
   TailnetStatus,
   TailnetPeer,
+  SshHostEntry,
 } from '../api/types'
 import ApprovalCard from '../components/ApprovalCard'
 import InboundDelegationCard from '../components/InboundDelegationCard'
@@ -1504,6 +1507,122 @@ export function TailnetSection() {
   )
 }
 
+// ── SSH allow-list (spec 022 v2 — governed SSH on the tailnet) ───────────────
+
+function formatApprovedAt(iso: string | null): string {
+  if (!iso) return 'Fecha de aprobación desconocida'
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return 'Fecha de aprobación desconocida'
+  return `Aprobado el ${d.toLocaleString('es-ES', { dateStyle: 'medium', timeStyle: 'short' })}`
+}
+
+interface SshHostRowProps {
+  entry: SshHostEntry
+  busy: boolean
+  onRequestRevoke: (host: string) => void
+}
+
+function SshHostRow({ entry, busy, onRequestRevoke }: SshHostRowProps) {
+  return (
+    <div className={s.settingsRow}>
+      <div className={s.settingsRowInfo}>
+        <code className={s.egressDomainCode}>{entry.host}</code>
+        <span className={s.settingsRowHint}>{formatApprovedAt(entry.approved_at)}</span>
+      </div>
+      <Button
+        variant="ghost"
+        size="sm"
+        disabled={busy}
+        onClick={() => onRequestRevoke(entry.host)}
+      >
+        Revocar
+      </Button>
+    </div>
+  )
+}
+
+export function SshHostsSection() {
+  const [hosts, setHosts] = useState<SshHostEntry[]>([])
+  const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [pendingRevokeHost, setPendingRevokeHost] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    try {
+      const res = await getSshHosts()
+      setHosts(res.hosts)
+      setLoadError(false)
+    } catch {
+      setLoadError(true)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { void load() }, [load])
+
+  async function handleRevokeSign(factors: MfaFactors) {
+    const host = pendingRevokeHost
+    setPendingRevokeHost(null)
+    if (!host) return
+    setBusy(true)
+    try {
+      const res = await revokeSshHost(host, factors.totp)
+      setHosts(res.hosts)
+      sileo.success({ title: `Acceso SSH revocado a «${host}»` })
+    } catch (err) {
+      sileo.error({
+        title: `No se pudo revocar «${host}»: ${err instanceof Error ? err.message : err}`,
+      })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <section className="cv-section" aria-label="Equipos con SSH aprobado">
+      <div className={s.sectionLabel}>Equipos con SSH aprobado</div>
+
+      {pendingRevokeHost && (
+        <MfaModal
+          title={`Revocar el acceso SSH a «${pendingRevokeHost}»`}
+          onSign={handleRevokeSign}
+          onCancel={() => setPendingRevokeHost(null)}
+        />
+      )}
+
+      <div className={s.sectionCard}>
+        {loading ? (
+          <div aria-busy="true" aria-label="Cargando…" className="skeleton skeleton--block" />
+        ) : loadError ? (
+          <EmptyState
+            compact
+            icon={<Terminal size={18} />}
+            title="No se pudo cargar la lista de equipos"
+            description="Inténtalo de nuevo en unos segundos."
+          />
+        ) : hosts.length === 0 ? (
+          <EmptyState
+            compact
+            icon={<Terminal size={18} />}
+            title="Ningún equipo tiene SSH aprobado todavía"
+            description="Cuando el agente pida conectarse por SSH a un equipo de tu tailnet, te lo preguntará aquí antes de hacerlo."
+          />
+        ) : (
+          <ul className="cv-list" aria-label="Equipos con SSH aprobado">
+            {hosts.map(entry => (
+              <li key={entry.host}>
+                <SshHostRow entry={entry} busy={busy} onRequestRevoke={setPendingRevokeHost} />
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </section>
+  )
+}
+
 // ── Severity badge (token-driven) ─────────────────────────────────────────────
 
 function SeverityBadge({ severity }: { severity: string }) {
@@ -1807,6 +1926,7 @@ export default function SeguridadView() {
         <GovernanceSection />
         <EgressSection />
         <TailnetSection />
+        <SshHostsSection />
         <SecurityCenterSection />
       </div>
     </>

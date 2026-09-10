@@ -33,6 +33,7 @@ import type {
   EgressMode,
   EgressModeResponse,
   TailnetStatus,
+  SshHostsResponse,
   KillSwitchStatus,
   PendingApproval,
   InboundDelegation,
@@ -762,6 +763,20 @@ export function disconnectTailnet(password: string): Promise<{ staged: boolean }
   return request<{ staged: boolean }>('/tailnet/disconnect', {
     method: 'POST',
     body: JSON.stringify({ password }),
+  })
+}
+
+/** Hosts approved for governed SSH (spec 022 v2). Fail-soft: an empty list on
+ * fetch error, never a crash (mirrors getTailnetStatus/getTailnetPeers above). */
+export function getSshHosts(): Promise<SshHostsResponse> {
+  return request<SshHostsResponse>('/tailnet/ssh-hosts').catch(() => ({ hosts: [] }))
+}
+
+/** Revoke a host's governed-SSH approval — requires the owner's TOTP. */
+export function revokeSshHost(host: string, totp: string): Promise<SshHostsResponse> {
+  return request<SshHostsResponse>(`/tailnet/ssh-hosts/${encodeURIComponent(host)}`, {
+    method: 'DELETE',
+    body: JSON.stringify({ totp }),
   })
 }
 
