@@ -1,48 +1,50 @@
 #!/usr/bin/env python3
 """sign_runtime_manifest.py — release tooling for runtime-manifest.json
-(contracts/update.md §2, T005). The daemon-side counterpart that fetches
-and verifies this file is `hermes.shell_server.runtime_manifest`.
+(contracts/update.md §2, T005/T006). The daemon-side counterpart that
+fetches and verifies this file + its `.minisig` is
+`hermes.shell_server.runtime_manifest`.
 
-Two subcommands:
-  keygen   generate a NEW Ed25519 keypair. Writes the PRIVATE key to a file
-           (0600) and prints the PUBLIC key (hex) to stdout — deploy that
-           value as SAFENT_RUNTIME_MANIFEST_PUBKEY wherever the daemon runs.
-           Run ONCE; re-running invalidates every manifest signed with the
-           previous key until every daemon's env var is rotated too.
-  sign     assemble + sign runtime-manifest.json from explicit per-arch
-           digests. Digests must already be resolved by the publish
-           pipeline's OWN registry tooling (e.g. `docker buildx imagetools
-           inspect`, T023) — this script never talks to a registry itself,
-           so it has no network dependency and is fully unit-testable.
+One subcommand:
+  sign   assemble runtime-manifest.json from explicit per-arch digests
+         (must already be resolved by the publish pipeline's OWN registry
+         tooling — e.g. `docker buildx imagetools inspect`, T023 — this
+         script never talks to a registry itself, so it stays a pure,
+         fully unit-tested function with no network dependency), then
+         optionally sign it.
 
-Key handling: the PRIVATE key never leaves the machine/CI job that runs
-`sign` — store it as a secret (mirrors TAURI_SIGNING_PRIVATE_KEY, already
-used by the desktop pipeline in agents-autonomy/.github/workflows), 0600,
-never committed. The PUBLIC key is not secret: safe to bake into the daemon
-image or pass as a plain env var. This is a SEPARATE keypair from the one
-Tauri's updater plugin uses for latest.json/minisign (see
-contracts/update.md's note on why) — do not reuse one for the other.
+Key handling (owner's decision — ONE minisign key for both this file and
+the Tauri updater's latest.json): key generation and secret-key handling
+are NOT reimplemented here — that is exactly the part a hand-rolled
+crypto-file parser should not touch. Two ways to produce the `.minisig`:
+
+  1. `--minisign-secret-key <file>` — this script shells out to the real
+     `minisign` binary (must be on PATH): `minisign -S -s <file> -m <out>
+     -x <out>.minisig`. Use an UNENCRYPTED key (`minisign -G -W`, the
+     standard convention for a CI/automation credential stored encrypted
+     at rest by the secret store instead) — stdin is closed, so a
+     password-protected key fails fast instead of hanging the job.
+  2. Omit the flag: this script writes ONLY the unsigned
+     runtime-manifest.json; the pipeline signs it itself directly with
+     `minisign -S -s <key> -m runtime-manifest.json`.
+
+The key itself is generated once with `minisign -G` and stored as a CI
+secret (mirrors TAURI_SIGNING_PRIVATE_KEY, already used by the desktop
+pipeline in agents-autonomy/.github/workflows) — never committed. The
+PUBLIC key (`ops/keys/runtime-manifest.pub`) is not secret and is checked
+into this repo.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-
-SIGNATURE_FIELD = "signature_hex"
 _REQUIRED_DIGEST_PREFIX = "sha256:"
-
-
-def canonical_bytes(payload: dict[str, object]) -> bytes:
-    """MUST match hermes.shell_server.runtime_manifest.canonical_bytes
-    exactly, or every signature this tool produces fails to verify."""
-    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    return raw.encode("ascii")
+_MINISIGN_TIMEOUT_S = 30
 
 
 def build_payload(
@@ -80,28 +82,59 @@ def _require_digest(label: str, value: str) -> None:
         )
 
 
-def sign_payload(payload: dict[str, object], private_key: Ed25519PrivateKey) -> dict[str, object]:
+def validate_payload_digests(payload: dict[str, object]) -> None:
+    engine = payload["engine"]
+    companion_all = payload["companion"]
+    assert isinstance(engine, dict)
+    assert isinstance(companion_all, dict)
+    companion = companion_all["safent-ads"]
+    assert isinstance(companion, dict)
     for label, value in (
-        ("engine linux/amd64", payload["engine"]["linux/amd64"]),  # type: ignore[index]
-        ("engine linux/arm64", payload["engine"]["linux/arm64"]),  # type: ignore[index]
-        ("companion safent-ads linux/amd64", payload["companion"]["safent-ads"]["linux/amd64"]),  # type: ignore[index]
-        ("companion safent-ads linux/arm64", payload["companion"]["safent-ads"]["linux/arm64"]),  # type: ignore[index]
+        ("engine linux/amd64", engine["linux/amd64"]),
+        ("engine linux/arm64", engine["linux/arm64"]),
+        ("companion safent-ads linux/amd64", companion["linux/amd64"]),
+        ("companion safent-ads linux/arm64", companion["linux/arm64"]),
     ):
         _require_digest(label, value)
-    signature_hex = private_key.sign(canonical_bytes(payload)).hex()
-    return {**payload, SIGNATURE_FIELD: signature_hex}
 
 
-def _cmd_keygen(args: argparse.Namespace) -> int:
-    private_key = Ed25519PrivateKey.generate()
-    out_path = Path(args.out_private)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_bytes(private_key.private_bytes_raw())
-    os.chmod(out_path, 0o600)
-    pubkey_hex = private_key.public_key().public_bytes_raw().hex()
-    print(f"[ok] private key written to {out_path} (0600) — keep secret.", file=sys.stderr)
-    print(pubkey_hex)  # stdout: the ONLY thing scripts should capture
-    return 0
+class MinisignNotAvailableError(RuntimeError):
+    """The `minisign` binary is not on PATH."""
+
+
+def sign_with_minisign(
+    manifest_path: Path, secret_key_path: Path, *, trusted_comment: str
+) -> Path:
+    """Sign `manifest_path` with the real `minisign` CLI. Returns the
+    `.minisig` path. Raises MinisignNotAvailableError or
+    subprocess.CalledProcessError — never silently produces a bad file."""
+    binary = shutil.which("minisign")
+    if binary is None:
+        raise MinisignNotAvailableError(
+            "minisign binary not found on PATH — install it, or omit "
+            "--minisign-secret-key and sign externally with the same command "
+            "this would have run: minisign -S -s <key> -m <manifest>"
+        )
+    sig_path = manifest_path.with_name(manifest_path.name + ".minisig")
+    subprocess.run(  # noqa: S603 - fixed argv, no shell, binary resolved via shutil.which
+        [
+            binary,
+            "-S",
+            "-s",
+            str(secret_key_path),
+            "-m",
+            str(manifest_path),
+            "-x",
+            str(sig_path),
+            "-t",
+            trusted_comment,
+            "-q",
+        ],
+        stdin=subprocess.DEVNULL,  # a password-protected key fails fast, never hangs
+        check=True,
+        timeout=_MINISIGN_TIMEOUT_S,
+    )
+    return sig_path
 
 
 def _cmd_sign(args: argparse.Namespace) -> int:
@@ -116,15 +149,36 @@ def _cmd_sign(args: argparse.Namespace) -> int:
         min_app_version=args.min_app_version,
     )
     try:
-        private_key = Ed25519PrivateKey.from_private_bytes(Path(args.private_key).read_bytes())
-        document = sign_payload(payload, private_key)
-    except (DigestValidationError, ValueError) as exc:
+        validate_payload_digests(payload)
+    except DigestValidationError as exc:
         print(f"[x] {exc}", file=sys.stderr)
         return 1
 
     out_path = Path(args.out)
-    out_path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
+    out_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     print(f"[ok] wrote {out_path}", file=sys.stderr)
+
+    if args.minisign_secret_key is None:
+        print(
+            "[*] Not signed — sign it yourself with: "
+            f"minisign -S -s <key> -m {out_path}",
+            file=sys.stderr,
+        )
+        return 0
+
+    trusted_comment = args.minisign_trusted_comment or f"runtime-manifest v{args.version}"
+    try:
+        sig_path = sign_with_minisign(
+            out_path, Path(args.minisign_secret_key), trusted_comment=trusted_comment
+        )
+    except (
+        MinisignNotAvailableError,
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+    ) as exc:
+        print(f"[x] signing failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"[ok] wrote {sig_path}", file=sys.stderr)
     return 0
 
 
@@ -134,11 +188,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    keygen = sub.add_parser("keygen", help="generate a new Ed25519 signing keypair")
-    keygen.add_argument("--out-private", required=True, help="path to write the PRIVATE key (0600)")
-    keygen.set_defaults(func=_cmd_keygen)
-
-    sign = sub.add_parser("sign", help="assemble + sign runtime-manifest.json")
+    sign = sub.add_parser("sign", help="assemble (+ optionally sign) runtime-manifest.json")
     sign.add_argument("--version", required=True, help="app version this manifest describes")
     sign.add_argument("--engine-amd64", required=True, help="sha256:<hex>, engine, linux/amd64")
     sign.add_argument("--engine-arm64", required=True, help="sha256:<hex>, engine, linux/arm64")
@@ -147,8 +197,16 @@ def main(argv: list[str] | None = None) -> int:
     sign.add_argument("--podman-version", required=True)
     sign.add_argument("--machine-os", required=True)
     sign.add_argument("--min-app-version", default=None, help="defaults to --version")
-    sign.add_argument("--private-key", required=True, help="path to the private key from `keygen`")
     sign.add_argument("--out", default="runtime-manifest.json")
+    sign.add_argument(
+        "--minisign-secret-key",
+        default=None,
+        help="path to an UNENCRYPTED minisign secret key (minisign -G -W); "
+        "when given, this script also produces <out>.minisig",
+    )
+    sign.add_argument(
+        "--minisign-trusted-comment", default=None, help="defaults to 'runtime-manifest v<version>'"
+    )
     sign.set_defaults(func=_cmd_sign)
 
     parsed = parser.parse_args(argv)

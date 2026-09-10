@@ -1,5 +1,5 @@
 """runtime_manifest — fetch + verify the signed `runtime-manifest.json`
-(contracts/update.md §2-3, T005).
+(contracts/update.md §2-3, T005/T006).
 
 This is what turns "there might be a new version" into a fact the daemon can
 act on: the engine/companion digests currently published, signed so a
@@ -9,31 +9,46 @@ firma valida -> sin boton"): any failure (network, malformed JSON, missing
 or invalid signature, no public key configured) returns None, and the
 caller MUST treat None as "nothing verified", never as "nothing new".
 
-Signing key: Ed25519, the SAME primitive and hex encoding
-`hermes.config_sync.signature.verify_bundle` already verifies for cloud
-policy bundles — reused here rather than introducing a second crypto
-format. This is a DELIBERATE, DOCUMENTED deviation from contracts/update.md
-where it says runtime-manifest.json is signed "con la misma clave [minisign]"
-as latest.json: minisign is a hard external requirement of the Tauri
-updater plugin for latest.json (T014/T023, out of this module's scope), but
-runtime-manifest.json is a Safent-only format with no such constraint, so it
-reuses the primitive this codebase already has instead of adding a second
-one. See contracts/update.md's own note for the full rationale. The private
-key lives ONLY in release tooling (ops/container/sign_runtime_manifest.py)
-run by the owner / the publish pipeline (T023) — this module, like every
-daemon-side consumer, holds only the PUBLIC key.
+Signing: minisign, prehashed "ED" mode (BLAKE2b-512 + Ed25519), the SAME
+key as the Tauri updater's `latest.json` (owner's decision — one key for
+both, TAURI_SIGNING_PRIVATE_KEY in agents-autonomy). Supersedes T005's
+original Ed25519-hex scheme (hermes.config_sync.signature.verify_bundle),
+which was a documented interim deviation; contracts/update.md §2 has been
+corrected back to its original text. No minisign LIBRARY exists for Python
+in this repo's dependencies, so verification is implemented directly on
+`cryptography`'s Ed25519 primitive + stdlib `hashlib.blake2b` — no new
+dependency. The wire format below is verified against the real `minisign`
+0.11 reference implementation (round-trip tests), not derived from memory
+alone.
+
+Public key: committed at `ops/keys/runtime-manifest.pub` (minisign public
+key file format), baked into the image at
+`/usr/share/hermes/keys/runtime-manifest.pub` (Containerfile). This is a
+PLACEHOLDER (all-zero key) until the agents-autonomy publish pipeline
+(T023) generates the real pair and commits the public half — see that
+file's own comment and `is_placeholder_pubkey()` below.
+`SAFENT_RUNTIME_MANIFEST_PUBKEY`, when set, overrides with literal
+`.pub`-file text — for tests only; production reads the baked file.
+
+The PRIVATE key never enters this repository or this module — it lives in
+release tooling / CI (ops/container/sign_runtime_manifest.py, or the real
+`minisign` CLI run directly by the publish pipeline).
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import platform
 import urllib.request
+from base64 import b64decode
 from dataclasses import dataclass, field
+from pathlib import Path
 
-from hermes.config_sync.signature import verify_bundle
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 logger = logging.getLogger("hermes.shell_server.runtime_manifest")
 
@@ -41,13 +56,23 @@ _MANIFEST_URL = os.environ.get(
     "SAFENT_RUNTIME_MANIFEST_URL",
     "https://raw.githubusercontent.com/devwspito/safent-runtime/main/runtime-manifest.json",
 )
-# No baked-in default. The keypair is generated once by the owner (see
-# ops/container/sign_runtime_manifest.py keygen) and the PUBLIC half is
-# deployed via this env var — absent config means every manifest is
-# unverifiable, which is the correct fail-closed default, not a bug.
-_PUBKEY_HEX = os.environ.get("SAFENT_RUNTIME_MANIFEST_PUBKEY", "")
+_MINISIG_URL = _MANIFEST_URL + ".minisig"
 
-SIGNATURE_FIELD = "signature_hex"
+# Test-only override: literal minisign .pub file text. Production always
+# reads the baked file (see _resolve_pubkey_text).
+_PUBKEY_TEXT_OVERRIDE = os.environ.get("SAFENT_RUNTIME_MANIFEST_PUBKEY", "")
+
+_BAKED_PUBKEY_PATH = Path("/usr/share/hermes/keys/runtime-manifest.pub")
+# Repo-relative fallback for running the daemon/tests directly on a host
+# checkout (no container) — src/hermes/shell_server/ -> repo root.
+_REPO_PUBKEY_PATH = Path(__file__).resolve().parents[3] / "ops" / "keys" / "runtime-manifest.pub"
+
+_MINISIGN_PUBKEY_ALG = b"Ed"
+_MINISIGN_SIG_ALG_PREHASHED = b"ED"
+_MINISIGN_PUBKEY_LEN = 42  # alg(2) + keyid(8) + pubkey(32)
+_MINISIGN_SIG_LEN = 74  # alg(2) + keyid(8) + signature(64)
+_PUBKEY_FILE_MIN_LINES = 2  # untrusted comment + base64
+_MINISIG_FILE_MIN_LINES = 4  # untrusted comment, sig, trusted comment, global sig
 
 
 @dataclass(frozen=True)
@@ -67,22 +92,140 @@ def current_arch_key() -> str:
     return f"linux/{arch}"
 
 
-def canonical_bytes(payload: dict[str, object]) -> bytes:
-    """Deterministic encoding signed/verified — same rules as
-    `hermes.config_sync.policy_document.canonical_bytes`: sorted keys, no
-    extra whitespace, ASCII-only, so both sides byte-identically agree."""
-    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    return raw.encode("ascii")
+# ---------------------------------------------------------------------------
+# minisign wire format — parsing
+# ---------------------------------------------------------------------------
 
 
-def _fetch_raw() -> dict[str, object] | None:
-    try:
-        with urllib.request.urlopen(_MANIFEST_URL, timeout=5) as r:  # noqa: S310 - fixed, non-user-controlled URL
-            parsed: object = json.loads(r.read().decode("utf-8"))
-    except Exception:  # noqa: BLE001 - network/parse is best-effort, caller fails closed
-        logger.warning("hermes.runtime_manifest.fetch_failed")
+@dataclass(frozen=True)
+class _ParsedPubkey:
+    key_id: bytes
+    public_key: bytes
+
+
+@dataclass(frozen=True)
+class _ParsedMinisig:
+    key_id: bytes
+    signature: bytes
+    trusted_comment: str
+    global_signature: bytes
+
+
+def _parse_minisign_pubkey(text: str) -> _ParsedPubkey | None:
+    lines = text.splitlines()
+    if len(lines) < _PUBKEY_FILE_MIN_LINES or not lines[0].startswith("untrusted comment:"):
         return None
-    return parsed if isinstance(parsed, dict) else None
+    try:
+        raw = b64decode(lines[1], validate=True)
+    except (ValueError, TypeError):
+        return None
+    if len(raw) != _MINISIGN_PUBKEY_LEN or raw[0:2] != _MINISIGN_PUBKEY_ALG:
+        return None
+    return _ParsedPubkey(key_id=raw[2:10], public_key=raw[10:42])
+
+
+def _parse_minisig(text: str) -> _ParsedMinisig | None:
+    lines = text.splitlines()
+    if len(lines) < _MINISIG_FILE_MIN_LINES:
+        return None
+    if not (lines[0].startswith("untrusted comment:") and lines[2].startswith("trusted comment:")):
+        return None
+    try:
+        sig_raw = b64decode(lines[1], validate=True)
+        global_sig = b64decode(lines[3], validate=True)
+    except (ValueError, TypeError):
+        return None
+    if len(sig_raw) != _MINISIGN_SIG_LEN or sig_raw[0:2] != _MINISIGN_SIG_ALG_PREHASHED:
+        return None
+    trusted_comment = lines[2][len("trusted comment:") :].lstrip(" ")
+    return _ParsedMinisig(
+        key_id=sig_raw[2:10],
+        signature=sig_raw[10:74],
+        trusted_comment=trusted_comment,
+        global_signature=global_sig,
+    )
+
+
+def is_placeholder_pubkey(pubkey_text: str) -> bool:
+    """True if `pubkey_text` is the checked-in all-zero placeholder — the
+    publish pipeline (T023) has not yet committed the real key."""
+    parsed = _parse_minisign_pubkey(pubkey_text)
+    if parsed is None:
+        return False
+    return parsed.public_key == b"\x00" * 32
+
+
+# ---------------------------------------------------------------------------
+# minisign wire format — verification
+# ---------------------------------------------------------------------------
+
+
+def verify_minisign(file_bytes: bytes, pubkey_text: str, minisig_text: str) -> bool:
+    """Verify `file_bytes` against a detached minisign signature.
+
+    Only the prehashed "ED" scheme (BLAKE2b-512 + Ed25519) is accepted —
+    legacy "Ed" (unhashed) signatures are rejected, matching what `minisign
+    -S` produces by default. Fail-closed: any parse error, algorithm
+    mismatch, key-id mismatch, or invalid signature returns False; no
+    exception ever escapes this function.
+    """
+    try:
+        pubkey = _parse_minisign_pubkey(pubkey_text)
+        minisig = _parse_minisig(minisig_text)
+        if pubkey is None or minisig is None:
+            logger.warning("hermes.runtime_manifest.minisign_parse_failed")
+            return False
+        if minisig.key_id != pubkey.key_id:
+            logger.warning("hermes.runtime_manifest.minisign_keyid_mismatch")
+            return False
+
+        verifier = Ed25519PublicKey.from_public_bytes(pubkey.public_key)
+        digest = hashlib.blake2b(file_bytes, digest_size=64).digest()
+        verifier.verify(minisig.signature, digest)
+        verifier.verify(
+            minisig.global_signature,
+            minisig.signature + minisig.trusted_comment.encode("utf-8"),
+        )
+        return True
+    except InvalidSignature:
+        logger.warning("hermes.runtime_manifest.minisign_signature_invalid")
+        return False
+    except Exception:  # noqa: BLE001 - fail-closed on ANY malformed input
+        logger.warning("hermes.runtime_manifest.minisign_verify_error")
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Fetch + assemble
+# ---------------------------------------------------------------------------
+
+
+def _resolve_pubkey_text() -> str | None:
+    if _PUBKEY_TEXT_OVERRIDE:
+        return _PUBKEY_TEXT_OVERRIDE
+    for path in (_BAKED_PUBKEY_PATH, _REPO_PUBKEY_PATH):
+        try:
+            return path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+    return None
+
+
+def _fetch_text(url: str) -> str | None:
+    try:
+        with urllib.request.urlopen(url, timeout=5) as r:  # noqa: S310 - fixed, non-user-controlled URL
+            body: bytes = r.read()
+    except Exception:  # noqa: BLE001 - network is best-effort, caller fails closed
+        return None
+    return body.decode("utf-8")
+
+
+def _fetch_raw_bytes() -> bytes | None:
+    try:
+        with urllib.request.urlopen(_MANIFEST_URL, timeout=5) as r:  # noqa: S310
+            return bytes(r.read())
+    except Exception:  # noqa: BLE001 - network is best-effort, caller fails closed
+        return None
 
 
 def _as_str_dict(value: object) -> dict[str, str]:
@@ -97,20 +240,7 @@ def _as_nested_str_dict(value: object) -> dict[str, dict[str, str]]:
     return {str(k): _as_str_dict(v) for k, v in value.items()}
 
 
-def _verify_and_parse(raw: dict[str, object]) -> RuntimeManifest | None:
-    signature_hex = raw.get(SIGNATURE_FIELD)
-    if not isinstance(signature_hex, str):
-        logger.warning("hermes.runtime_manifest.missing_signature")
-        return None
-    payload = {k: v for k, v in raw.items() if k != SIGNATURE_FIELD}
-    verified = verify_bundle(
-        payload_canonical=canonical_bytes(payload),
-        signature_hex=signature_hex,
-        pubkey_hex=_PUBKEY_HEX,
-    )
-    if not verified:
-        logger.warning("hermes.runtime_manifest.signature_invalid")
-        return None
+def _parse_payload(payload: dict[str, object]) -> RuntimeManifest | None:
     try:
         return RuntimeManifest(
             version=str(payload["version"]),
@@ -123,15 +253,44 @@ def _verify_and_parse(raw: dict[str, object]) -> RuntimeManifest | None:
         return None
 
 
-def fetch_verified_manifest() -> RuntimeManifest | None:
-    """Fetch + verify runtime-manifest.json. None on ANY failure (fail-closed)."""
-    if not _PUBKEY_HEX:
+def _usable_pubkey_text() -> str | None:
+    """The pubkey text to verify with, or None if unconfigured/placeholder."""
+    pubkey_text = _resolve_pubkey_text()
+    if pubkey_text is None:
         logger.warning("hermes.runtime_manifest.pubkey_not_configured")
         return None
-    raw = _fetch_raw()
-    if not isinstance(raw, dict):
+    if is_placeholder_pubkey(pubkey_text):
+        logger.warning("hermes.runtime_manifest.pubkey_is_placeholder")
         return None
-    return _verify_and_parse(raw)
+    return pubkey_text
+
+
+def _parse_json_dict(file_bytes: bytes) -> dict[str, object] | None:
+    try:
+        payload = json.loads(file_bytes.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        logger.warning("hermes.runtime_manifest.invalid_json")
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def fetch_verified_manifest() -> RuntimeManifest | None:
+    """Fetch + verify runtime-manifest.json (+ .minisig). None on ANY
+    failure (fail-closed) — network, missing/placeholder key, bad
+    signature, or malformed JSON."""
+    pubkey_text = _usable_pubkey_text()
+    if pubkey_text is None:
+        return None
+
+    file_bytes = _fetch_raw_bytes()
+    minisig_text = _fetch_text(_MINISIG_URL)
+    if file_bytes is None or minisig_text is None:
+        return None
+    if not verify_minisign(file_bytes, pubkey_text, minisig_text):
+        return None
+
+    payload = _parse_json_dict(file_bytes)
+    return _parse_payload(payload) if payload is not None else None
 
 
 def pieces_for_arch(manifest: RuntimeManifest, arch_key: str) -> list[dict[str, str]]:
