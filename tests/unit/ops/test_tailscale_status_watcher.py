@@ -184,10 +184,12 @@ def paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     runtime_dir.mkdir(mode=0o711)
     status_file = runtime_dir / "status.json"
     socket_path = runtime_dir / "tailscaled.sock"
+    last_attempt_file = runtime_dir / "last-attempt.json"
     monkeypatch.setattr(mod, "RUNTIME_DIR", runtime_dir)
     monkeypatch.setattr(mod, "STATUS_FILE", status_file)
     monkeypatch.setattr(mod, "TS_SOCKET", socket_path)
-    return {"runtime_dir": runtime_dir, "status_file": status_file}
+    monkeypatch.setattr(mod, "LAST_ATTEMPT_FILE", last_attempt_file)
+    return {"runtime_dir": runtime_dir, "status_file": status_file, "last_attempt_file": last_attempt_file}
 
 
 class TestRefreshOnce:
@@ -252,6 +254,80 @@ class TestRefreshOnce:
         assert "tskey" not in raw
         assert "AuthKey" not in raw
         assert "PrivateKey" not in raw
+
+
+# ---------------------------------------------------------------------------
+# last_attempt mirroring (025 hallazgo D): hermes-tailscale-control writes
+# its connect verdict to last-attempt.json (no key material); this watcher
+# folds it into status.json's own last_attempt field so `configured`/`online`
+# can mean "logged in" without losing the "a connect attempt just failed"
+# signal — see tailnet/api.py's redefinition of `configured`.
+# ---------------------------------------------------------------------------
+
+
+class TestLastAttemptMirroring:
+    def test_failed_attempt_is_mirrored_into_status_json(self, paths: dict) -> None:
+        paths["last_attempt_file"].write_text(
+            json.dumps({"at": "2026-09-10T14:03:00+00:00", "ok": False, "error_kind": "tailscale_up_failed"}),
+            encoding="utf-8",
+        )
+        fake_result = MagicMock(returncode=1, stdout=json.dumps({"BackendState": "NeedsLogin"}))
+        with patch.object(mod, "_run_status", return_value=fake_result):
+            mod.refresh_once()
+
+        payload = json.loads(paths["status_file"].read_text(encoding="utf-8"))
+        assert payload["online"] is False
+        assert payload["last_attempt"] == {
+            "at": "2026-09-10T14:03:00+00:00", "ok": False, "error_kind": "tailscale_up_failed",
+        }
+
+    def test_successful_attempt_is_mirrored_too(self, paths: dict) -> None:
+        paths["last_attempt_file"].write_text(
+            json.dumps({"at": "2026-09-10T14:05:00+00:00", "ok": True, "error_kind": None}),
+            encoding="utf-8",
+        )
+        fake_result = MagicMock(returncode=0, stdout=json.dumps({"BackendState": "Running"}))
+        with patch.object(mod, "_run_status", return_value=fake_result):
+            mod.refresh_once()
+
+        payload = json.loads(paths["status_file"].read_text(encoding="utf-8"))
+        assert payload["last_attempt"]["ok"] is True
+
+    def test_no_last_attempt_file_omits_the_field_not_a_guess(self, paths: dict) -> None:
+        fake_result = MagicMock(returncode=0, stdout=json.dumps({"BackendState": "Running"}))
+        with patch.object(mod, "_run_status", return_value=fake_result):
+            mod.refresh_once()
+
+        payload = json.loads(paths["status_file"].read_text(encoding="utf-8"))
+        assert "last_attempt" not in payload
+
+    def test_corrupt_last_attempt_file_is_ignored_fail_soft(self, paths: dict) -> None:
+        paths["last_attempt_file"].write_text("not json {{{", encoding="utf-8")
+        fake_result = MagicMock(returncode=0, stdout=json.dumps({"BackendState": "Running"}))
+        with patch.object(mod, "_run_status", return_value=fake_result):
+            wrote = mod.refresh_once()
+
+        assert wrote is True
+        payload = json.loads(paths["status_file"].read_text(encoding="utf-8"))
+        assert "last_attempt" not in payload
+
+    def test_last_attempt_never_carries_a_key_even_if_someone_sneaks_one_in(self, paths: dict) -> None:
+        """Defense in depth: even if last-attempt.json somehow contained a
+        stray key-shaped field, only the three known fields are mirrored."""
+        paths["last_attempt_file"].write_text(
+            json.dumps({
+                "at": "2026-09-10T14:03:00+00:00", "ok": False, "error_kind": "tailscale_up_failed",
+                "auth_key": "tskey-should-never-appear",
+            }),
+            encoding="utf-8",
+        )
+        fake_result = MagicMock(returncode=0, stdout=json.dumps({"BackendState": "Running"}))
+        with patch.object(mod, "_run_status", return_value=fake_result):
+            mod.refresh_once()
+
+        raw = paths["status_file"].read_text(encoding="utf-8")
+        assert "tskey" not in raw
+        assert "auth_key" not in raw
 
 
 # ---------------------------------------------------------------------------

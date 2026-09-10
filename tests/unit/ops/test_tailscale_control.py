@@ -79,6 +79,8 @@ def paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     enabled_marker = state_dir / "enabled"
     socket_path = runtime_dir / "tailscaled.sock"
     authkey_file = private_tmp_dir / "hermes-tailscale-authkey"
+    kill_switch_result_file = control_dir / "kill-switch-result.json"
+    last_attempt_file = runtime_dir / "last-attempt.json"
 
     monkeypatch.setattr(mod, "STAGE_DIR", control_dir)
     monkeypatch.setattr(mod, "STAGE_FILE", stage_file)
@@ -88,6 +90,8 @@ def paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(mod, "ENABLED_MARKER", enabled_marker)
     monkeypatch.setattr(mod, "TS_SOCKET", socket_path)
     monkeypatch.setattr(mod, "AUTHKEY_FILE", authkey_file)
+    monkeypatch.setattr(mod, "KILL_SWITCH_RESULT_FILE", kill_switch_result_file)
+    monkeypatch.setattr(mod, "LAST_ATTEMPT_FILE", last_attempt_file)
 
     return {
         "control_dir": control_dir,
@@ -96,9 +100,11 @@ def paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         "stage_file": stage_file,
         "status_file": status_file,
         "enabled_marker": enabled_marker,
+        "last_attempt_file": last_attempt_file,
         "socket_path": socket_path,
         "authkey_file": authkey_file,
         "private_tmp_dir": private_tmp_dir,
+        "kill_switch_result_file": kill_switch_result_file,
     }
 
 
@@ -182,6 +188,18 @@ class TestApplyDispatch:
         mock_pam.assert_not_called()
         mock_disconnect.assert_not_called()
 
+    def test_kill_switch_release_with_correct_password_calls_release(self, paths: dict) -> None:
+        with (
+            patch.object(mod, "_verify_password_pam", return_value=True),
+        ):
+            rc = mod._apply({"action": "kill_switch_release", "password": "correct"})
+        assert rc == 0
+
+    def test_kill_switch_release_with_wrong_password_returns_1(self, paths: dict) -> None:
+        with patch.object(mod, "_verify_password_pam", return_value=False):
+            rc = mod._apply({"action": "kill_switch_release", "password": "wrong"})
+        assert rc == 1
+
     def test_unknown_action_returns_1_without_pam(self) -> None:
         with patch.object(mod, "_verify_password_pam") as mock_pam:
             rc = mod._apply({"action": "reboot"})
@@ -248,6 +266,51 @@ class TestConnect:
 
 
 # ---------------------------------------------------------------------------
+# last_attempt (025 hallazgo D): a rejected key must NOT read as "configured"
+# — this script records its own verdict, the status watcher mirrors it.
+# ---------------------------------------------------------------------------
+
+
+class TestConnectLastAttempt:
+    def test_success_writes_ok_true_no_error_kind(self, paths: dict) -> None:
+        with patch.object(mod, "_tailscale_up_with_retry", return_value=True):
+            mod._connect({"auth_key": "tskey-abc123"})
+        result = json.loads(paths["last_attempt_file"].read_text(encoding="utf-8"))
+        assert result["ok"] is True
+        assert result["error_kind"] is None
+        assert result["at"]
+
+    def test_failure_writes_ok_false_with_error_kind(self, paths: dict) -> None:
+        with patch.object(mod, "_tailscale_up_with_retry", return_value=False):
+            mod._connect({"auth_key": "tskey-abc123"})
+        result = json.loads(paths["last_attempt_file"].read_text(encoding="utf-8"))
+        assert result["ok"] is False
+        assert result["error_kind"] == "tailscale_up_failed"
+
+    def test_last_attempt_never_contains_the_auth_key(self, paths: dict) -> None:
+        with patch.object(mod, "_tailscale_up_with_retry", return_value=False):
+            mod._connect({"auth_key": "tskey-should-never-appear-here"})
+        raw = paths["last_attempt_file"].read_text(encoding="utf-8")
+        assert "tskey" not in raw
+        assert "should-never-appear" not in raw
+
+    def test_last_attempt_file_is_0644(self, paths: dict) -> None:
+        with patch.object(mod, "_tailscale_up_with_retry", return_value=True):
+            mod._connect({"auth_key": "tskey-abc123"})
+        mode = stat.S_IMODE(paths["last_attempt_file"].stat().st_mode)
+        assert mode == 0o644
+
+    def test_a_later_success_overwrites_an_earlier_failure(self, paths: dict) -> None:
+        with patch.object(mod, "_tailscale_up_with_retry", return_value=False):
+            mod._connect({"auth_key": "tskey-first-rejected"})
+        assert json.loads(paths["last_attempt_file"].read_text(encoding="utf-8"))["ok"] is False
+
+        with patch.object(mod, "_tailscale_up_with_retry", return_value=True):
+            mod._connect({"auth_key": "tskey-second-accepted"})
+        assert json.loads(paths["last_attempt_file"].read_text(encoding="utf-8"))["ok"] is True
+
+
+# ---------------------------------------------------------------------------
 # _disconnect — PAM already verified by the time this runs; removes the
 # marker, stops tailscaled, and deletes status.json (the watcher that would
 # normally refresh it dies WITH tailscaled — BindsTo — so it never gets a
@@ -277,6 +340,54 @@ class TestDisconnect:
         ):
             ok = mod._disconnect()
         assert ok is True
+
+
+# ---------------------------------------------------------------------------
+# _kill_switch_release (025 hallazgo C): reuses THIS script's PAM gate for the
+# emergency-brake release when the owner hasn't enrolled TOTP. Verifies and
+# writes a result file — it never touches tailscale/systemctl (releasing the
+# brake is security_api.py's D-Bus call, this script only proves the password).
+# ---------------------------------------------------------------------------
+
+
+class TestKillSwitchRelease:
+    def test_correct_password_writes_ok_true_result(self, paths: dict) -> None:
+        with patch.object(mod, "_verify_password_pam", return_value=True):
+            ok = mod._kill_switch_release({"password": "correct"})
+        assert ok is True
+        result = json.loads(paths["kill_switch_result_file"].read_text(encoding="utf-8"))
+        assert result["ok"] is True
+
+    def test_wrong_password_writes_ok_false_result(self, paths: dict) -> None:
+        with patch.object(mod, "_verify_password_pam", return_value=False):
+            ok = mod._kill_switch_release({"password": "wrong"})
+        assert ok is False
+        result = json.loads(paths["kill_switch_result_file"].read_text(encoding="utf-8"))
+        assert result["ok"] is False
+
+    def test_missing_password_never_calls_pam_and_writes_ok_false(self, paths: dict) -> None:
+        with patch.object(mod, "_verify_password_pam") as mock_pam:
+            ok = mod._kill_switch_release({})
+        assert ok is False
+        mock_pam.assert_not_called()
+        result = json.loads(paths["kill_switch_result_file"].read_text(encoding="utf-8"))
+        assert result["ok"] is False
+
+    def test_result_file_is_0600(self, paths: dict) -> None:
+        with patch.object(mod, "_verify_password_pam", return_value=True):
+            mod._kill_switch_release({"password": "correct"})
+        mode = stat.S_IMODE(paths["kill_switch_result_file"].stat().st_mode)
+        assert mode == 0o600
+
+    def test_never_touches_tailscale_or_systemctl(self, paths: dict) -> None:
+        with (
+            patch.object(mod, "_verify_password_pam", return_value=True),
+            patch.object(mod, "_run_tailscale") as mock_run,
+            patch.object(mod, "_systemctl") as mock_systemctl,
+        ):
+            mod._kill_switch_release({"password": "correct"})
+        mock_run.assert_not_called()
+        mock_systemctl.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

@@ -54,6 +54,7 @@ import InboundDelegationCard from '../components/InboundDelegationCard'
 import MfaEnroll from '../components/MfaEnroll'
 import MfaModal from '../components/MfaModal'
 import type { MfaFactors } from '../components/MfaModal'
+import DevicePasswordModal from '../components/DevicePasswordModal'
 import { Button } from '../components/ui/Button'
 import { PageHeader } from '../components/ui/PageHeader'
 import { EmptyState } from '../components/ui/EmptyState'
@@ -1390,11 +1391,20 @@ function TailnetDisconnectForm({ busy, onDisconnect }: TailnetDisconnectFormProp
   )
 }
 
-type TailnetUiState = 'not_configured' | 'connecting' | 'connected'
+// 025 hallazgo D: `configured` now means LOGGED IN (== online, see
+// tailnet/api.py's _read_status) — it can no longer stand in for "an attempt
+// is in flight". `last_attempt` (mirrored from the root helper's own verdict
+// via the status watcher, contracts.md §2) is what tells 'connecting'
+// (staged, no verdict yet) apart from 'failed' (verdict: key rejected) —
+// a rejected key must never read as 'connected'.
+type TailnetUiState = 'not_configured' | 'connecting' | 'failed' | 'connected'
 
 function tailnetUiState(status: TailnetStatus | null): TailnetUiState {
-  if (!status?.configured) return 'not_configured'
-  return status.online ? 'connected' : 'connecting'
+  if (!status) return 'not_configured'
+  if (status.online) return 'connected'
+  if (status.last_attempt?.ok === false) return 'failed'
+  if (status.last_attempt) return 'connecting'
+  return 'not_configured'
 }
 
 const TAILNET_POLL_INTERVAL_MS = 5000
@@ -1443,6 +1453,10 @@ export function TailnetSection() {
   }
 
   const uiState = tailnetUiState(status)
+  // Only a genuinely established session (or one actively establishing) has
+  // anything to show a MagicDNS suffix / peer list / disconnect form for —
+  // 'failed' means the key was rejected, there is nothing connected to leave.
+  const showsSessionInfo = uiState === 'connecting' || uiState === 'connected'
 
   return (
     <section className="cv-section">
@@ -1454,17 +1468,22 @@ export function TailnetSection() {
           </div>
         ) : (
           <>
-            <p className={s['sectionCard__intro']}>
+            <p
+              className={s['sectionCard__intro']}
+              style={uiState === 'failed' ? { color: 'var(--color-danger)' } : undefined}
+              role={uiState === 'failed' ? 'alert' : undefined}
+            >
               {uiState === 'not_configured' && 'Conecta este agente a la tailnet del dueño para que alcance servicios internos gobernados.'}
               {uiState === 'connecting' && 'Conectando…'}
+              {uiState === 'failed' && 'Clave rechazada — revisa la clave e inténtalo de nuevo.'}
               {uiState === 'connected' && `Conectado como ${status?.node_name} en ${status?.tailnet}`}
             </p>
 
-            {uiState === 'not_configured' && (
+            {(uiState === 'not_configured' || uiState === 'failed') && (
               <TailnetConnectForm busy={busy} onConnect={handleConnect} />
             )}
 
-            {uiState !== 'not_configured' && status?.magicdns_suffix && (
+            {showsSessionInfo && status?.magicdns_suffix && (
               <>
                 <div className={s.subLabel} style={{ marginTop: 'var(--space-4)' }}>
                   Sufijo MagicDNS
@@ -1495,7 +1514,7 @@ export function TailnetSection() {
               </>
             )}
 
-            {uiState !== 'not_configured' && (
+            {showsSessionInfo && (
               <div style={{ marginTop: 'var(--space-4)' }}>
                 <TailnetDisconnectForm busy={busy} onDisconnect={handleDisconnect} />
               </div>
@@ -1804,12 +1823,17 @@ function SecurityCenterSection() {
  * bearer (one click, it's a brake); releasing is a sovereign action gated by
  * MfaModal/TOTP, same pattern as EgressSection's mode toggle above.
  */
-function KillSwitchSection() {
+export function KillSwitchSection() {
   const t = useT()
   const [status, setStatus] = useState<KillSwitchStatus | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [confirmRelease, setConfirmRelease] = useState(false)
+  // 025 hallazgo C: release needs TOTP when MFA is enrolled, the device
+  // password otherwise (sovereign fallback — a brake engaged before the
+  // owner ever enrolled TOTP used to have NO release path at all). null
+  // while loading = don't show the wrong dialog for a beat.
+  const [mfaEnrolled, setMfaEnrolled] = useState<boolean | null>(null)
 
   const load = useCallback(async () => {
     const res = await getKillSwitch()
@@ -1818,6 +1842,9 @@ function KillSwitchSection() {
   }, [])
 
   useEffect(() => { void load() }, [load])
+  useEffect(() => {
+    mfaStatus().then(s => setMfaEnrolled(!!s.enrolled)).catch(() => setMfaEnrolled(false))
+  }, [])
 
   async function handleEngage() {
     setBusy(true)
@@ -1832,11 +1859,11 @@ function KillSwitchSection() {
     }
   }
 
-  async function handleReleaseSign(factors: MfaFactors) {
+  async function handleReleaseWith(proof: { totp: string } | { devicePassword: string }) {
     setConfirmRelease(false)
     setBusy(true)
     try {
-      await releaseKillSwitch(factors.totp)
+      await releaseKillSwitch(proof)
       sileo.success({ title: tNew(t, 'seg.killswitch.released.ok', 'Freno de emergencia liberado') })
       await load()
     } catch (err) {
@@ -1847,15 +1874,30 @@ function KillSwitchSection() {
   }
 
   const engaged = !!status?.engaged
+  const releaseLabel = mfaEnrolled === false
+    ? tNew(t, 'seg.killswitch.release.password', 'Liberar (requiere contraseña del dispositivo)')
+    : tNew(t, 'seg.killswitch.release', 'Liberar (requiere TOTP)')
 
   return (
     <section className="cv-section" aria-label={tNew(t, 'seg.killswitch.label', 'Freno de emergencia')}>
       <div className={s.sectionLabel}>{tNew(t, 'seg.killswitch.label', 'Freno de emergencia')}</div>
 
-      {confirmRelease && (
+      {confirmRelease && mfaEnrolled === false && (
+        <DevicePasswordModal
+          title={tNew(t, 'seg.killswitch.release.title', 'Liberar el freno de emergencia')}
+          description={tNew(
+            t,
+            'seg.killswitch.release.password_hint',
+            'El MFA no está configurado en esta instancia — libera el freno con la contraseña de tu dispositivo.',
+          )}
+          onSign={password => { void handleReleaseWith({ devicePassword: password }) }}
+          onCancel={() => setConfirmRelease(false)}
+        />
+      )}
+      {confirmRelease && mfaEnrolled !== false && (
         <MfaModal
           title={tNew(t, 'seg.killswitch.release.title', 'Liberar el freno de emergencia')}
-          onSign={handleReleaseSign}
+          onSign={factors => { void handleReleaseWith({ totp: factors.totp }) }}
           onCancel={() => setConfirmRelease(false)}
         />
       )}
@@ -1881,7 +1923,7 @@ function KillSwitchSection() {
               </span>
             </div>
             <Button variant="secondary" size="sm" loading={busy} onClick={() => setConfirmRelease(true)}>
-              {tNew(t, 'seg.killswitch.release', 'Liberar (requiere TOTP)')}
+              {releaseLabel}
             </Button>
           </div>
         ) : (

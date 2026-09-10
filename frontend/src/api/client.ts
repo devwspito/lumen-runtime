@@ -48,6 +48,7 @@ import type {
   UnreadCountResponse,
   InstallScanResponse,
   SecurityDecisionPayload,
+  SecurityDecisionResponse,
   SkillDetails,
   UsageSummary,
   UsageByAgent,
@@ -323,10 +324,17 @@ export function listHubSkills(): Promise<HubSkillResult[]> {
   return request<HubSkillResult[]>('/skills/hub').catch(() => [])
 }
 
-export function installSkill(identifier: string, force = false): Promise<HubInstallResponse> {
+export function installSkill(
+  identifier: string,
+  force = false,
+  reauthGrant?: string,
+): Promise<HubInstallResponse> {
   return request<HubInstallResponse>('/skills/hub/install', {
     method: 'POST',
     body: JSON.stringify({ identifier, force }),
+    // Re-auth grant travels as a header, never in the body — see
+    // POST /security/decisions' reauth_grant (owner_mfa_gate.py).
+    ...(reauthGrant ? { headers: { 'X-Owner-Reauth-Grant': reauthGrant } } : {}),
   })
 }
 
@@ -633,8 +641,10 @@ export function scanInstall(kind: 'mcp' | 'skill', identifier: string): Promise<
   })
 }
 
-export function recordSecurityDecision(payload: SecurityDecisionPayload): Promise<unknown> {
-  return request<unknown>('/security/decisions', {
+export function recordSecurityDecision(
+  payload: SecurityDecisionPayload,
+): Promise<SecurityDecisionResponse> {
+  return request<SecurityDecisionResponse>('/security/decisions', {
     method: 'POST',
     body: JSON.stringify(payload),
     timeoutMs: 30_000,
@@ -738,6 +748,7 @@ const TAILNET_UNCONFIGURED: TailnetStatus = {
   magicdns_suffix: null,
   tailnet: null,
   peers: [],
+  last_attempt: null,
 }
 
 /** Current tailnet status. Falls back to "not configured" on any fetch error
@@ -795,11 +806,20 @@ export function engageKillSwitch(reason: string): Promise<unknown> {
   })
 }
 
-/** Release the brake — requires the owner's TOTP (sovereign action). */
-export function releaseKillSwitch(totp: string): Promise<unknown> {
+/**
+ * Release the brake — requires owner proof: the TOTP when MFA is enrolled,
+ * or (025 hallazgo C) the device password when it isn't — same PAM
+ * root-helper path as disconnectTailnet. Pass whichever proof applies; the
+ * caller decides based on getMfaStatus().enrolled.
+ */
+export function releaseKillSwitch(proof: { totp: string } | { devicePassword: string }): Promise<unknown> {
+  const body =
+    'totp' in proof
+      ? { engaged: false, totp: proof.totp }
+      : { engaged: false, device_password: proof.devicePassword }
   return request<unknown>('/security/kill-switch', {
     method: 'POST',
-    body: JSON.stringify({ engaged: false, totp }),
+    body: JSON.stringify(body),
   })
 }
 

@@ -74,6 +74,15 @@ TS_SOCKET = Path(os.environ.get("HERMES_TAILSCALE_SOCKET", str(RUNTIME_DIR / "ta
 STATUS_FILE = RUNTIME_DIR / "status.json"
 ENABLED_MARKER = STATE_DIR / "enabled"
 
+# 025 hallazgo D: a rejected auth_key made `tailscale up` fail 5/5 yet
+# GET /tailnet still reported configured:true, because status.json (written
+# by the low-privilege watcher, NOT this script) exists regardless of login
+# outcome. This script records its OWN connect verdict here — no key
+# material, ever — the watcher mirrors it into status.json's last_attempt
+# field on its next tick (single-writer discipline: this script must NOT
+# touch status.json itself).
+LAST_ATTEMPT_FILE = RUNTIME_DIR / "last-attempt.json"
+
 # Private tmp location the helper itself controls (contracts.md §3.1 step 2) —
 # under PrivateTmp=yes this /tmp is a fresh, isolated mount, invisible to every
 # other process on the host (root included) once the unit exits. NEVER
@@ -89,7 +98,20 @@ _TAILSCALED_UNIT = "hermes-tailscaled.service"
 LOGIN_USER = "hermes-user"
 
 _EXPECTED_FILE_MODE = 0o600
-_KNOWN_ACTIONS = frozenset({"connect", "disconnect"})
+_KNOWN_ACTIONS = frozenset({"connect", "disconnect", "kill_switch_release"})
+
+# kill_switch_release (025 hallazgo C): the emergency-brake release needs the
+# SAME device-password PAM gate as disconnect, but for an owner who hasn't
+# enrolled TOTP — the shell-server (NoNewPrivileges=yes, no /etc/shadow
+# access) still cannot verify PAM itself. Reuses THIS script's staging dir
+# and _verify_password_pam (no new root helper, no shared module across
+# root-privileged scripts — same "each script carries its own copy" rule).
+# Unlike connect/disconnect, the caller (security_api.py) needs a SYNCHRONOUS
+# yes/no to decide whether to call the daemon's resume() D-Bus verb and
+# return 200/403 — so this action writes a result marker instead of acting
+# itself (releasing the kill switch is a D-Bus verb, not a root/systemctl
+# action this script is positioned to perform).
+KILL_SWITCH_RESULT_FILE = STAGE_DIR / "kill-switch-result.json"
 _AUTH_KEY_MAX_LEN = 512
 
 # `tailscale up` races the .path -> .service start of tailscaled: retry with
@@ -204,6 +226,26 @@ def _write_enabled_marker() -> None:
     tmp.write_text("1\n", encoding="utf-8")
     os.chmod(tmp, 0o644)
     tmp.rename(ENABLED_MARKER)
+
+
+def _write_last_attempt(*, ok: bool, error_kind: str | None) -> None:
+    """Record this connect attempt's verdict for the status watcher to mirror
+    into status.json (025 hallazgo D). NEVER the auth_key — `at`/`ok`/
+    `error_kind` only. 0644 (world-readable, no secret) so the low-privilege
+    watcher — a DIFFERENT uid — can read it back.
+    """
+    from datetime import UTC, datetime  # noqa: PLC0415
+
+    payload = json.dumps({
+        "at": datetime.now(tz=UTC).isoformat(),
+        "ok": ok,
+        "error_kind": error_kind,
+    })
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = LAST_ATTEMPT_FILE.with_suffix(".tmp")
+    tmp.write_text(payload, encoding="utf-8")
+    os.chmod(tmp, 0o644)
+    tmp.rename(LAST_ATTEMPT_FILE)
 
 
 # --------------------------------------------------------------------------
@@ -353,8 +395,10 @@ def _connect(staged: dict) -> bool:
         _shred(AUTHKEY_FILE)
     if ok:
         logger.info("tailnet connect: tailscale up succeeded")
+        _write_last_attempt(ok=True, error_kind=None)
     else:
         logger.warning("tailnet connect: tailscale up failed after retries")
+        _write_last_attempt(ok=False, error_kind="tailscale_up_failed")
     return ok
 
 
@@ -369,6 +413,41 @@ def _disconnect() -> bool:
     STATUS_FILE.unlink(missing_ok=True)
     if ok:
         logger.info("tailnet disconnect: stopped %s", _TAILSCALED_UNIT)
+    return ok
+
+
+def _write_kill_switch_result(*, ok: bool) -> None:
+    """Write the PAM verdict for security_api.py's release handler to poll.
+
+    0600, chowned to hermes (the shell-server's uid) — this process runs as
+    root, so the file it creates defaults to root:root, unreadable by the
+    poller otherwise. No secret in this file, only the boolean verdict.
+    """
+    payload = json.dumps({"ok": ok, "at": time.time()})
+    tmp = KILL_SWITCH_RESULT_FILE.with_suffix(".tmp")
+    tmp.write_text(payload, encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    try:
+        os.chown(tmp, _hermes_uid(), -1)
+    except (OSError, KeyError):
+        pass
+    tmp.rename(KILL_SWITCH_RESULT_FILE)
+
+
+def _kill_switch_release(staged: dict) -> bool:
+    """PAM-verify the owner's device password for a kill-switch release when
+    MFA isn't enrolled (025 hallazgo C) — same gate as disconnect, but the
+    outcome is a result FILE, not a systemctl action: releasing the brake is
+    a D-Bus verb (request_resume) only the shell-server can call, this
+    script only proves the password.
+    """
+    password = staged.get("password", "")
+    ok = isinstance(password, str) and bool(password) and _verify_password_pam(LOGIN_USER, password)
+    if ok:
+        logger.info("kill_switch_release: PAM verification passed")
+    else:
+        logger.warning("kill_switch_release: PAM verification FAILED for user '%s'", LOGIN_USER)
+    _write_kill_switch_result(ok=ok)
     return ok
 
 
@@ -390,6 +469,9 @@ def _apply(staged: dict) -> int:
         # No password gate: a valid Tailscale auth_key IS the authorization
         # (contracts.md §3.1/§6 — POST /connect body is {auth_key} only).
         return 0 if _connect(staged) else 1
+
+    if action == "kill_switch_release":
+        return 0 if _kill_switch_release(staged) else 1
 
     # disconnect mutates state away from a tailnet the owner is actively on —
     # same device-password PAM gate as hermes-remote-access-control.

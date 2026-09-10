@@ -84,6 +84,7 @@ _UNCONFIGURED_STATUS: dict = {
     "magicdns_suffix": None,
     "tailnet": None,
     "peers": [],
+    "last_attempt": None,
 }
 
 # Shared rate-limiter instance — one per server process (mirrors remote-access).
@@ -108,13 +109,27 @@ class TailnetPeer(BaseModel):
     online: bool
 
 
+class TailnetLastAttempt(BaseModel):
+    """Verdict of the most recent connect attempt (025 hallazgo D) — no key
+    material, ever. Written by hermes-tailscale-control, mirrored into
+    status.json by hermes-tailscale-status-watcher (contracts.md §2)."""
+
+    at: str
+    ok: bool
+    error_kind: str | None
+
+
 class TailnetStatusResponse(BaseModel):
+    # `configured` means LOGGED IN (== online) — see _read_status. Kept as a
+    # separate field for backward-compat with existing readers that only
+    # check `configured`; it is never true while `online` is false.
     configured: bool
     online: bool
     node_name: str | None
     magicdns_suffix: str | None
     tailnet: str | None
     peers: list[TailnetPeer]
+    last_attempt: TailnetLastAttempt | None = None
 
 
 class TailnetActionResponse(BaseModel):
@@ -144,6 +159,17 @@ class RevokeSshHostRequest(BaseModel):
 
 
 def _read_status(status_path: Path) -> dict:
+    """Read status.json into the wire shape. Fail-closed to "not configured"
+    on any read/parse error (never invents online/configured on a bad read).
+
+    025 hallazgo D: `configured` used to mean "status.json exists" — but the
+    watcher writes this file as soon as tailscaled STARTS, whether or not
+    `tailscale up` ever logged in (a rejected key left `online: false`
+    forever, yet the file existed, so a caller saw configured:true — a false
+    success). `configured` now means the SAME thing `online` does: reported
+    "logged in" by the status watcher (contracts.md §2). Kept as a distinct
+    field only for callers that historically checked `configured` alone.
+    """
     try:
         data = json.loads(status_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -151,18 +177,34 @@ def _read_status(status_path: Path) -> dict:
     if not isinstance(data, dict):
         return dict(_UNCONFIGURED_STATUS)
 
+    online = bool(data.get("online", False))
     return {
-        "configured": True,
-        "online": bool(data.get("online", False)),
+        "configured": online,
+        "online": online,
         "node_name": _as_str_or_none(data.get("node_name")),
         "magicdns_suffix": _as_str_or_none(data.get("magicdns_suffix")),
         "tailnet": _as_str_or_none(data.get("tailnet")),
         "peers": _parse_peers(data.get("peers")),
+        "last_attempt": _parse_last_attempt(data.get("last_attempt")),
     }
 
 
 def _as_str_or_none(value: object) -> str | None:
     return value if isinstance(value, str) and value.strip() else None
+
+
+def _parse_last_attempt(raw: object) -> dict | None:
+    """Validate the watcher-mirrored last_attempt shape. Fail-soft: any
+    missing/wrong-typed field -> None (never surfaces a half-formed verdict).
+    """
+    if not isinstance(raw, dict):
+        return None
+    at = raw.get("at")
+    ok = raw.get("ok")
+    if not isinstance(at, str) or not isinstance(ok, bool):
+        return None
+    error_kind = raw.get("error_kind")
+    return {"at": at, "ok": ok, "error_kind": error_kind if isinstance(error_kind, str) else None}
 
 
 def _parse_peers(raw: object) -> list[dict]:

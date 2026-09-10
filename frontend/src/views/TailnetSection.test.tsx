@@ -28,15 +28,21 @@ const UNCONFIGURED: TailnetStatus = {
   magicdns_suffix: null,
   tailnet: null,
   peers: [],
+  last_attempt: null,
 }
 
+// 025 hallazgo D: `configured` now means LOGGED IN (== online) — a node
+// that's mid-reconnect (a PAST connect succeeded, tailscaled is catching up)
+// is `configured: false` too; last_attempt.ok !== false is what still says
+// "connecting", not "failed" or "never tried".
 const CONNECTING: TailnetStatus = {
-  configured: true,
+  configured: false,
   online: false,
   node_name: 'safent-agent',
   magicdns_suffix: 'tail1234.ts.net',
   tailnet: 'acme.ts.net',
   peers: [],
+  last_attempt: { at: '2026-09-10T14:03:00+00:00', ok: true, error_kind: null },
 }
 
 const CONNECTED: TailnetStatus = {
@@ -49,6 +55,20 @@ const CONNECTED: TailnetStatus = {
     { name: 'laptop', online: true },
     { name: 'server', online: false },
   ],
+  last_attempt: { at: '2026-09-10T14:03:00+00:00', ok: true, error_kind: null },
+}
+
+// Regression fixture (matriz 10-sep, hallazgo D): `tailscale up` failed 5/5
+// on a rejected key, yet status.json still exists (the watcher writes it as
+// soon as tailscaled STARTS, independent of login outcome).
+const REJECTED: TailnetStatus = {
+  configured: false,
+  online: false,
+  node_name: '2846102aaf5a',
+  magicdns_suffix: '',
+  tailnet: '',
+  peers: [],
+  last_attempt: { at: '2026-09-10T14:03:00+00:00', ok: false, error_kind: 'tailscale_up_failed' },
 }
 
 function findInput(container: HTMLElement, testLabel: string): HTMLInputElement {
@@ -226,6 +246,46 @@ describe('TailnetSection', () => {
 
     expect(disconnectTailnet).toHaveBeenCalledWith('mi-contraseña-del-dispositivo')
     expect(sileoSuccess).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows "Clave rechazada" instead of success when the last connect attempt failed', async () => {
+    getTailnetStatus.mockResolvedValue(REJECTED)
+
+    act(() => {
+      root.render(React.createElement(TailnetSection))
+    })
+    await flush()
+
+    expect(container.textContent).toContain('Clave rechazada')
+    expect(container.textContent).not.toContain('Conectado')
+    expect(container.textContent).not.toContain('Conectando')
+  })
+
+  it('re-shows the paste-key form after a rejected key so the owner can retry', async () => {
+    getTailnetStatus.mockResolvedValue(REJECTED)
+
+    act(() => {
+      root.render(React.createElement(TailnetSection))
+    })
+    await flush()
+
+    const input = findInput(container, 'Clave de autenticación de la tailnet')
+    expect(input.value).toBe('')
+    expect(container.textContent).toContain('Conectar')
+  })
+
+  it('does not show a disconnect form or MagicDNS info after a rejected key', async () => {
+    getTailnetStatus.mockResolvedValue(REJECTED)
+
+    act(() => {
+      root.render(React.createElement(TailnetSection))
+    })
+    await flush()
+
+    expect(
+      container.querySelector('[aria-label="Contraseña del dispositivo para desconectar la tailnet"]'),
+    ).toBeNull()
+    expect(container.textContent).not.toContain('Sufijo MagicDNS')
   })
 
   it('does not render the disconnect form when not configured', async () => {

@@ -116,6 +116,7 @@ class TestGetStatus:
             "magicdns_suffix": None,
             "tailnet": None,
             "peers": [],
+            "last_attempt": None,
         }
 
     def test_configured_maps_status_fields(
@@ -197,6 +198,112 @@ class TestGetStatus:
         r = client.get("/api/v1/tailnet")
         assert "auth_key" not in r.text
         assert "tskey" not in r.text
+
+
+# ---------------------------------------------------------------------------
+# Regression (025 hallazgo D): a rejected auth_key made `tailscale up` fail
+# 5/5, yet status.json still existed (the watcher writes it as soon as
+# tailscaled STARTS, independent of login outcome) — so `configured` used to
+# read True. `configured` now means "logged in" (== online), and last_attempt
+# lets the UI show "clave rechazada" instead of claiming success.
+# ---------------------------------------------------------------------------
+
+
+class TestLastAttemptAndConfiguredMeansLoggedIn:
+    def test_status_json_exists_but_never_logged_in_is_not_configured(
+        self, client: TestClient, status_path: Path,
+    ) -> None:
+        """Exactly the matrix R26 scenario: the watcher wrote a status
+        document (tailscaled started) but online is false — a rejected key
+        must NOT read as configured:true."""
+        status_path.parent.mkdir(parents=True, exist_ok=True)
+        status_path.write_text(
+            json.dumps({
+                "node_name": "2846102aaf5a", "magicdns_suffix": "", "tailnet": "",
+                "online": False, "peers": [],
+                "last_attempt": {
+                    "at": "2026-09-10T14:03:00+00:00", "ok": False, "error_kind": "tailscale_up_failed",
+                },
+            })
+        )
+
+        r = client.get("/api/v1/tailnet")
+
+        body = r.json()
+        assert body["configured"] is False
+        assert body["online"] is False
+        assert body["last_attempt"] == {
+            "at": "2026-09-10T14:03:00+00:00", "ok": False, "error_kind": "tailscale_up_failed",
+        }
+
+    def test_successful_last_attempt_is_surfaced_alongside_online_true(
+        self, client: TestClient, status_path: Path,
+    ) -> None:
+        status_path.parent.mkdir(parents=True, exist_ok=True)
+        status_path.write_text(
+            json.dumps({
+                "node_name": "safent-agent", "magicdns_suffix": "tail1234.ts.net",
+                "tailnet": "acme.ts.net", "online": True, "peers": [],
+                "last_attempt": {"at": "2026-09-10T14:05:00+00:00", "ok": True, "error_kind": None},
+            })
+        )
+
+        r = client.get("/api/v1/tailnet")
+
+        body = r.json()
+        assert body["configured"] is True
+        assert body["last_attempt"]["ok"] is True
+
+    def test_missing_last_attempt_is_null_not_an_error(
+        self, client: TestClient, status_path: Path,
+    ) -> None:
+        status_path.parent.mkdir(parents=True, exist_ok=True)
+        status_path.write_text(
+            json.dumps({
+                "node_name": "safent-agent", "magicdns_suffix": "tail1234.ts.net",
+                "tailnet": "acme.ts.net", "online": True, "peers": [],
+            })
+        )
+
+        r = client.get("/api/v1/tailnet")
+
+        assert r.json()["last_attempt"] is None
+
+    def test_malformed_last_attempt_is_dropped_not_surfaced(
+        self, client: TestClient, status_path: Path,
+    ) -> None:
+        status_path.parent.mkdir(parents=True, exist_ok=True)
+        status_path.write_text(
+            json.dumps({
+                "node_name": "safent-agent", "magicdns_suffix": "", "tailnet": "",
+                "online": False, "peers": [],
+                "last_attempt": {"ok": "not-a-bool"},  # missing 'at', wrong type
+            })
+        )
+
+        r = client.get("/api/v1/tailnet")
+
+        assert r.json()["last_attempt"] is None
+
+    def test_last_attempt_response_never_contains_a_key(
+        self, client: TestClient, status_path: Path,
+    ) -> None:
+        status_path.parent.mkdir(parents=True, exist_ok=True)
+        status_path.write_text(
+            json.dumps({
+                "node_name": "safent-agent", "magicdns_suffix": "", "tailnet": "",
+                "online": False, "peers": [],
+                "last_attempt": {
+                    "at": "2026-09-10T14:03:00+00:00", "ok": False,
+                    "error_kind": "tailscale_up_failed",
+                },
+            })
+        )
+
+        r = client.get("/api/v1/tailnet")
+
+        assert "tskey" not in r.text
+        assert "auth_key" not in r.text
 
 
 # ---------------------------------------------------------------------------
