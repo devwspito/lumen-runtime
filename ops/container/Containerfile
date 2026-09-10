@@ -104,6 +104,19 @@ RUN cd /tmp/whlbuild \
       mcp==2.0.0 fastapi 'uvicorn[standard]' python-multipart PyJWT websockets httpx croniter \
       # ^ MCP SDK pinned to the exact version hermes-agent 0.21.1 declares in its
       #   `mcp` extra (2.x stateless protocol). Unpinned it drifts to 2.2+.
+      anthropic==0.87.0 boto3==1.42.89 azure-identity==1.25.3 google-auth==2.55.1 \
+      # ^ Provider SDKs hermes-agent 0.21.1 declares as OPTIONAL extras
+      #   ([anthropic]/[bedrock]/[azure-identity]/[vertex] in its pyproject.toml,
+      #   lazy-installed at first use via tools/lazy_deps.py) but that first use
+      #   can never succeed HERE: /usr/lib/hermes-agent is read-only under
+      #   ProtectSystem=strict and the daemon has no route to pip at runtime.
+      #   Safent's UI offers ALL of anthropic/bedrock/azure-foundry/vertex as
+      #   native providers (hermes_cli.auth.PROVIDER_REGISTRY, mirrored verbatim
+      #   — see list_native_providers), so picking one and chatting hit
+      #   `ImportError: The 'anthropic' package is required` (spec 025 hallazgo
+      #   #2) instead of a working chat. Pins MUST equal hermes-agent's own
+      #   extras exactly (test_provider_sdk_imports.py enforces this + fails CI
+      #   if a future provider gains the same lazy-SDK gate without a pin here).
       rich textual \
       fastembed \
       ddgs \
