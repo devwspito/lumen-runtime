@@ -177,3 +177,64 @@ departamentos poblados, `GET /instance/features` → `edition:"community"`.
 | SSH-01 | **PASS** | `podman exec … which ssh && ssh -V` | `/usr/bin/ssh`, `OpenSSH_9.6p1 Ubuntu-3ubuntu13.19` — el `openssh-client` del follow-up de `ssh-v2.md` ya está horneado |
 | SSH-02 | **PASS — el GAP está cerrado** | dentro de la jaula: `build_capability_tool_specs(broker=…, consent_context=…)` y `GET /api/v1/policies` | el esquema de tools del LLM trae **24** capacidades e incluye `tailnet_ssh`, `tailnet_file_get`, `tailnet_file_put`; el catálogo de políticas (88 tools, preset `equilibrado`) también las lista. Ya no es cierto que "el agente no puede invocarlo" |
 | SSH-03 | **PASS — el GAP está cerrado** | `GET /api/v1/tailnet/ssh-hosts`; `DELETE /api/v1/tailnet/ssh-hosts/{host}` | `{"hosts":[]}` 200; el DELETE valida el TOTP (`totp:""` → **422** `string_too_short`) y la UI lo consume (`client.ts:795-802`, `SshHostsSection`) |
+
+## §9 Coste (COST)
+
+| id | resultado | cómo | evidencia |
+|---|---|---|---|
+| COST-01 | **PASS** | `GET /api/v1/usage/summary?period=7d\|30d\|mtd` | los tres devuelven su periodo; tras los turnos de §10: `{"period":"7d","cycles":7,"self_hosted_cycles":7,"top_models":[{"model":"gemini/gemini-2.5-…"}]}`. Matiz: un `period` inválido (`day`) no da 422, se coerciona en silencio a `30d` |
+| COST-02 | **PASS** | `GET /usage/by-agent?period=7d` | `{"agents":[{"agent_id":"default","name":"CEO","cycles":7,…}]}` |
+| COST-03 | **PASS** | `GET /usage/timeseries?period=7d&dimension=cost` | 200 con `points` (vacío mientras el coste es 0 — claves placeholder) |
+| COST-04 | **PASS** | `GET /chat/conversations/{id}/usage` | 200 con los ciclos y **el modelo real usado**: `{"model":"gemini/gemini-2.5-flash","cost_usd":0.0,…}` — esta ruta fue la que permitió comprobar el enrutado de §10 |
+
+## §10 Modelo de IA / Proveedores (PROV)
+
+| id | resultado | cómo | evidencia |
+|---|---|---|---|
+| PROV-01 | **PASS** | `GET /api/v1/providers/native` | **51** ids (`nous`, `openai-codex`, `openai-api`, `xai-oauth`, `qwen-oauth`, `gemini`, `zai`, `lmstudio`, `copilot`…) |
+| PROV-02 | **FALLA** (SDKs sí, modelo no) | el cuerpo **exacto** de la UI: `configureNativeProvider({provider_id, api_key})` (`ProvidersView.tsx:536-538`, sin `model` ni `set_active`) → `POST /providers/{id}/activate` → turno de chat | SDKs presentes (`anthropic 0.87.0`, `openai 2.24.0`, `boto3`) — la mitad del hallazgo #2 sigue cerrada. **Pero** al no mandar `model`, `native_providers.json` guarda `""` y `_write_hermes_model_config` deja `config.yaml` con `model.provider: anthropic` y **sin `model.default`**; el primer turno muere con `HermesModelNotConfiguredError: HERMES_MODEL no está definido`. Confirmado dentro de la jaula (`cat /var/lib/hermes/hermes-home/config.yaml`). Sólo mandando `model` a mano por API (`{"provider_id":"gemini","model":"gemini-2.5-flash","set_active":true}` → 201 `{"ok":true}`) queda utilizable |
+| PROV-03 | **FALLA** | `POST /api/v1/providers/anthropic/test` (id nativo, el que manda la UI: `testProvider(created.provider_id)`) | **200** `{"ok":false,"error":"daemon_unavailable"}` — `test_provider` hace `UUID(provider_id)` (`dbus_runtime_service.py:6528+`) y un id nativo no lo es. Como la UI activa **sólo si `r.ok === true`** (`ProvidersView.tsx:545-556`), conectar un proveedor nativo desde la tarjeta **siempre** acaba en "conexión fallida", aun con clave válida. Además el `{ok:false}` viaja bajo HTTP 200 |
+| PROV-04 | **PASS** (parte a: no pisa el activo) | `POST /providers/native {"provider_id":"gemini",…,"set_active":true}` → `{"provider_id":"anthropic",…,"set_active":false}` → `GET /providers/native/active` | el activo sigue siendo `gemini` (`default_model: gemini-2.5-flash`, `is_active:true`). También: `set_active:true` **sin** `model` responde **201 con `{"ok":false,"error":"model requerido para activar"}`** (un `{ok:false}` bajo 2xx, el anti-patrón que el resto de la API ya no usa) |
+| PROV-05 | **FALLA (regresión parcial frente a R5)** | activar `anthropic` (200, `config.yaml` = `provider: anthropic` + `default: claude-sonnet-4-5`, `GET /providers/native/active` = anthropic) y lanzar turnos a distintos retardos, mirando `GET /chat/conversations/{id}/usage` | activación 16:55:36 → turno a **+2 s** = `gemini/gemini-2.5-flash` (el proveedor VIEJO); turno a **+71 s** = `anthropic/claude-sonnet-4-5` (journal: `provider=anthropic model=claude-sonnet-4-5 … HTTP 401: invalid x-api-key`). Repetido al revés: activar gemini y turno a **+35 s** → ya gemini. El cambio es efectivo sin reiniciar, pero **no en el turno inmediatamente siguiente**: hay una ventana de ~30 s en la que el motor sigue sirviendo con el proveedor anterior, justo lo que R5 daba por cerrado ("mismo segundo") |
+| PROV-06 | **PASS** | `DELETE /api/v1/providers/{uuid}` | **204** sobre el proveedor custom creado en PROV-10 |
+| PROV-07 | **PASS** (hasta el login) | `POST /api/v1/providers/openai-codex/oauth/start` | 200 `{"flow":"device_code","user_code":"5LL1-MBLGR","verification_url":"https://auth.openai.com/codex/device","expires_in":900,"poll_interval":5}`; completar el login es `[DUEÑO]` |
+| PROV-08 | **[DUEÑO]** | esperar los 900 s del device code | no ejecutado: consume el flujo OAuth de la cuenta del dueño |
+| PROV-09 | **PASS** (código) | `ProvidersView.tsx:97-104,565-568` | detecta `{ok:false,error:"oauth_required"}` y ofrece `providers.oauth.fallback_notice` |
+| PROV-10 | **PASS** | `POST /api/v1/providers` sin y con `default_model` | sin él → **422** `Field required`; con él → **201** `{"provider_id":"05e9afae-…","kind":"openai_compatible","default_model":"qwen"}` |
+| PROV-11 | **[DUEÑO]** | requiere instancia emparejada | — |
+| PROV-12 | **PASS** | `podman restart matriz-final-1` | `/healthz` 200 a los **3 s** (restart 9 s), mismo bearer; sobreviven proveedor activo (`gemini`), `egress deny`, MFA, las 2 skills, el cron y los MCP. Matiz: `safent-ads` vuelve `disconnected`/`tool_count 0` durante ~1 min y se recupera solo (`healthy`, 61, `listo`) |
+
+## §11 Memoria (MEM)
+
+| id | resultado | cómo | evidencia |
+|---|---|---|---|
+| MEM-01 | **PASS** | `GET /api/v1/memory` | `[]` 200 — sin turnos con modelo real no hay hechos que recordar |
+| MEM-02 | **PASS** | `GET /memory/search?q=safent` y sin `q` | con `q` → 200 `[]`; sin `q` → **422** |
+| MEM-03 | **PASS** (camino negativo) | `GET /memory/noexiste:0` | **404** `{"code":"not_found"}` |
+| MEM-04 | **[DUEÑO]** | necesita una entrada real | `PUT` sobre id inexistente → 400 `update_failed` |
+| MEM-05 | **[DUEÑO]** | guard de PII/inyección | el `PUT` con `DNI 12345678Z` + tarjeta de prueba muere antes en `entry not found`; sin entrada real no se alcanza el guard |
+| MEM-06 | **FALLA (menor)** | `DELETE /api/v1/memory/noexiste:0` | **200** sobre un id que no existe (mientras `GET` da 404 y `PUT` 400): borrar algo inexistente se reporta como éxito |
+
+## §12 Archivos (FILES)
+
+| id | resultado | cómo | evidencia |
+|---|---|---|---|
+| FILES-01 | **PASS** | `GET /api/v1/workspace/files` | 200, árbol con `name/kind/path/size/modified` |
+| FILES-02 | **PASS** | `GET /workspace/files?path=.` | 200 con el listado del subdirectorio |
+| FILES-03 | **PASS** | `POST /workspace/files` multipart | **201** `{"name":"f1.txt","path":"/var/lib/hermes/workspace/f1.txt","size":47}` |
+| FILES-04 | **PASS** | tres `POST` secuenciales (lo que hace la UI, `ok += 1` por fichero) | 201/201/201 y los tres en la lista; con nombre repetido desambigua (`m3 (1).txt`). Los tres en **una sola** petición multipart sólo guardan el último — el endpoint acepta un `file` por llamada |
+| FILES-05 | **PASS** | `GET /workspace/download?path=f1.txt` | 200 y `md5sum` idéntico al original (`6c94dee50ed20e7f62419535a0039faf`) |
+| FILES-06 | **PASS** | `GET /workspace/download` sin `path` | **422** |
+
+## §13 Anuncios (ADS) — incluye las superficies nuevas de la spec 026
+
+| id | resultado | cómo | evidencia |
+|---|---|---|---|
+| ADS-01 | **PASS** | ver §Recreación final (`--no-companion`) | fila resuelta al final |
+| ADS-02 | **FALLA (bloqueante de US1 / SC-002)** | `POST /api/v1/ads/bridge/session` (bearer) → `GET /ads/` con la cookie | la cookie se emite bien (`set-cookie: ads_bridge=65b4218d…; HttpOnly; Max-Age=2592000; Path=/ads; SameSite=strict`) y el cuerpo dice `{"status":"unavailable","reason":"no_accounts"}`, pero **`GET /ads/` responde 503** `{"error":{"code":"ADS_SESSION_UNAVAILABLE"}}`. Causa raíz confirmada en vivo: `busctl … MintCompanionOwnerAssertion s "safent-ads"` (como uid `hermes`) → `Call failed: SSO private key at /etc/hermes/companions/ads-sso.key could not be loaded (PermissionError)`. El bind es `-r-------- root root` y el daemon corre como `User=hermes` (uid 880). El **bearer** del companion sí tiene su stage-in root (`ops/agents-os-edition/scripts/hermes-companion-bearer` → `/run/hermes/companions/safent-ads.bearer` `0440 root:hermes`, journal `1 bearer(s) staged`), pero **la clave SSO de 026 no tiene equivalente**: se lee directa del montaje. Ningún `POST /api/v1/auth/exchange` llega jamás al companion (`podman logs safent-ads-ads-api-1`: sólo `/mcp` y `/api/v1/health`). Mismo patrón que el bug histórico de `leaf.key` en `fresh-install-verification.md` |
+| ADS-03 | **[DUEÑO]** | OAuth de Google Ads / Meta Ads dentro del panel | además, hoy inalcanzable por ADS-02 |
+| ADS-04 | **[DUEÑO]** | requiere modelo real + cuentas conectadas | — |
+| ADS-05 | **PASS** (código) | `AdsView.tsx:47-92` | estados honestos por `reason` (`ads.state.<reason>.title/desc` + reintento + CTA) y fallback `ads.iframe.fallback` con enlace de apertura directa |
+| **026 · entrada "Ads" en el sidebar** | **PASS** | `Layout.tsx:448,572` (`useAdsAvailability` + `<AdsNavItem>`) y `GET /api/v1/mcp` | la entrada es **incondicional** (ya no depende de `useAdsPanelOrigin`) y el hook resuelve `loading → ready \| unavailable(reason)`. Con el companion arriba, `companion_status` pasa de ausente a `listo` en ~5 s desde el arranque; `GetCompanionHealth` devuelve `{"state":"no_accounts","reachable":true,"http_status":200,"contract_version":"1.0.0","accounts_linked":{"google":false,"meta":false}}` — estado honesto, no pantalla vacía |
+| **026 · `/ads/` mismo origen, cero inicios de sesión (SC-002)** | **FALLA** | 20 aperturas no llegan a intentarse: la primera ya da 503 | por ADS-02. Lo que **sí** cumple el puente: sin cookie → **401**; `/ads/mcp` → **403**; `/ads/api/v1/auth/login` y `/ads/api/v1/auth/totp` → **403** (nada de formulario de acceso embebido); ninguna respuesta reenvía `Set-Cookie: ads_session` al navegador (0 coincidencias) |
+| **026 · `GET /api/v1/cockpit` por el puente** | **FALLA** | `GET /ads/api/v1/cockpit` con la cookie de puente | **503** `{"error":{"code":"ADS_SESSION_UNAVAILABLE"}}` — misma causa raíz (la petición nunca sale hacia el companion) |
