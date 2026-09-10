@@ -296,6 +296,16 @@ _INTERNAL_ENV_KEYS: frozenset[str] = frozenset({
     "XDG_DATA_HOME",
     "XDG_CACHE_HOME",
     "TMPDIR",
+    # Security review 2026-09-10 (H-1 follow-up): the new UV_ deny PREFIX
+    # below would otherwise ALSO catch this one — it was never actually
+    # reachable before either (never in the pre-MCP-05 _ALLOWED_ENV_KEYS
+    # despite stdio_mcp_client._build_mcp_env's own docstring claiming
+    # "Must be in this allowlist or the unit's value never reaches the
+    # subprocess"), a latent gap this closes for real: it is DAEMON-set
+    # (stdio_mcp_client._build_mcp_env reads it from the daemon's own
+    # os.environ, never owner/caller input) and belongs here, not on any
+    # caller-facing allow/deny list.
+    "UV_LINK_MODE",
 })
 
 # MCP-05 (spec 025 matriz): mirrors dbus_runtime_service._validate_mcp_env's
@@ -309,12 +319,36 @@ _INTERNAL_ENV_KEYS: frozenset[str] = frozenset({
 # rationale per denied name/prefix (duplicated on purpose: each root-
 # privileged script carries its own copy, never a shared import across that
 # boundary).
+#
+# Security review 2026-09-10 (H-1, verdict SHIP WITH FIXES on
+# 4030b54..f7a3a2d): _BYOK_ENV_DENY_EXACT_CORE / _BYOK_ENV_DENY_PREFIXES
+# below MUST stay byte-identical to dbus_runtime_service's
+# _MCP_ENV_DENY_EXACT_CORE / _MCP_ENV_DENY_PREFIXES_CORE — see that
+# module's own comment for the full per-name/per-prefix rationale;
+# tests/unit/agents_os/test_validate_mcp_env.py::
+# TestDenyListParityWithTheLauncher parses both literals and asserts they
+# match.
 _BYOK_ENV_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{2,63}$")
-_BYOK_ENV_DENY_EXACT: frozenset[str] = frozenset({
-    "PATH", "HOME", "NODE_OPTIONS",
+_BYOK_ENV_DENY_EXACT_CORE: frozenset[str] = frozenset({
+    "PATH", "NODE_OPTIONS", "NODE_PATH", "ELECTRON_RUN_AS_NODE",
+    "UV_OFFLINE",
+    "NODE_TLS_REJECT_UNAUTHORIZED", "NODE_EXTRA_CA_CERTS",
+    "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+    "BASH_ENV", "ENV", "SHELLOPTS", "PS4", "IFS",
+    "PERL5OPT", "PERL5LIB", "RUBYOPT", "RUBYLIB",
+    "GODEBUG", "GOFLAGS", "CLASSPATH", "JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS",
+    "NIX_LD", "MALLOC_CONF", "GCONV_PATH", "LOCPATH",
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "FTP_PROXY",
+    "TERMINFO", "TERMINFO_DIRS", "TMPDIR", "TEMP", "TMP",
 })
-_BYOK_ENV_DENY_PREFIXES: tuple[str, ...] = ("LD_", "PYTHON", "HERMES_", "SSL_CERT_")
+_BYOK_ENV_DENY_PREFIXES: tuple[str, ...] = (
+    "LD_", "PYTHON", "HERMES_", "SSL_CERT_",
+    "NODE_", "GIT_", "UV_", "PIP_", "NPM_CONFIG_", "XDG_", "DYLD_",
+    "JAVA_", "JDK_", "_JAVA", "SAFENT_", "DOTNET_",
+)
+# HOME: launcher-only addition (R16 asymmetry — see dbus_runtime_service's
+# own comment on why the daemon does NOT deny it).
+_BYOK_ENV_DENY_EXACT: frozenset[str] = _BYOK_ENV_DENY_EXACT_CORE | frozenset({"HOME"})
 
 # R16 asymmetry, preserved on purpose: dbus_runtime_service._validate_mcp_env
 # accepts these two (so a MANAGED_REMOTE/OAuth-bridge draft carrying them
@@ -327,6 +361,16 @@ _NEVER_FORWARDED_KEYS: frozenset[str] = frozenset({
     "MCP_REMOTE_CONFIG_DIR", "XDG_CONFIG_HOME",
 })
 
+# The ONE exception to the shared NODE_ deny prefix above: the safent-ads
+# companion bridge's own CA pin. dbus_runtime_service._autowire_companion_env
+# fills NODE_EXTRA_CA_CERTS from hermes.shell_server.companions at CONNECT
+# time (trusted, daemon-controlled — the daemon's OWN gate denies a CALLER-
+# supplied value, see its _MCP_ENV_DENY_EXACT's own comment on making that
+# fill-only for real) — by the time it reaches THIS gate it is always the
+# daemon-injected companion CA path, never caller input, so it must still be
+# forwarded or every seeded companion MCP loses its TLS pin.
+_LAUNCHER_ALLOW_DESPITE_DENY: frozenset[str] = frozenset({"NODE_EXTRA_CA_CERTS"})
+
 
 def _is_allowed_env_key(key: str) -> bool:
     """True iff *key* may be overridden by the caller's spawn request — the
@@ -334,6 +378,8 @@ def _is_allowed_env_key(key: str) -> bool:
     a BYOK-shaped name that is not on the deny-list nor in
     _NEVER_FORWARDED_KEYS (R16 asymmetry — see that set's own comment)."""
     if key in _INTERNAL_ENV_KEYS:
+        return True
+    if key in _LAUNCHER_ALLOW_DESPITE_DENY:
         return True
     if key in _NEVER_FORWARDED_KEYS:
         return False

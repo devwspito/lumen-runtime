@@ -7136,34 +7136,104 @@ def _prefetch_git_mcp(server_id: str, git_spec: str) -> None:
 # new server ships.
 _MCP_ENV_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{2,63}$")
 
-# Exact names a caller must never be able to set — each one either re-points
-# a resource the launcher/daemon ALREADY pins correctly for every MCP child
-# (PATH, NODE_OPTIONS — see hermes-mcp-launcher's own _ALWAYS_FORWARDED_ENV_KEYS
-# comment) or is a network interception knob (the http(s)_proxy family — a
-# BYOK secret's own traffic could be MITM'd through it).
+# Security review 2026-09-10 (H-1, verdict SHIP WITH FIXES on 4030b54..f7a3a2d):
+# a reimplementation of both BYOK gates enumerated ~70 dangerous env names and
+# found ~50 passing both — TLS-trust overrides for every runtime OTHER than
+# OpenSSL (NODE_EXTRA_CA_CERTS, NODE_TLS_REJECT_UNAUTHORIZED, REQUESTS_CA_
+# BUNDLE, CURL_CA_BUNDLE), interpreter/shell hijack knobs the PYTHON*/LD_*
+# entries never generalised to (BASH_ENV, PERL5OPT, RUBYOPT, NODE_PATH,
+# ELECTRON_RUN_AS_NODE, JAVA_TOOL_OPTIONS, GODEBUG, ...), and this product's
+# own package-manager/registry knobs (GIT_*, UV_*, PIP_*, NPM_CONFIG_*).
 #
-# HOME is deliberately NOT here (R16, test_r16_mcp_bridge_handshake.py::
-# TestByokEnvKeysAcceptOAuthBridgeVars): the cloud's McpSpec.env for a
-# MANAGED_REMOTE/OAuth-bridge server (mcp-remote) legitimately carries HOME —
-# rejecting it HERE would hard-fail the entire add_mcp_server draft before it
-# ever reaches scan/prefetch/connect (R16's original root cause #1), not just
-# leave HOME unused. It is still NEVER honoured as an override: the launcher
-# (hermes-mcp-launcher._is_allowed_env_key) denies it independently and
-# always forwards its OWN HOME instead (_ALWAYS_FORWARDED_ENV_KEYS) — the
-# same two-gate split this whole module's docstring already describes for
-# every other BYOK key, just with the accept/forward decision on opposite
-# sides for this one name.
-_MCP_ENV_DENY_EXACT: frozenset[str] = frozenset({
-    "PATH", "NODE_OPTIONS",
+# _MCP_ENV_DENY_EXACT_CORE / _MCP_ENV_DENY_PREFIXES_CORE are the SHARED
+# source of truth — hermes-mcp-launcher's own _BYOK_ENV_DENY_EXACT_CORE /
+# _BYOK_ENV_DENY_PREFIXES MUST stay byte-identical (duplicated on purpose,
+# no runtime cross-import across that root-privilege boundary — see that
+# script's own note); tests/unit/agents_os/test_validate_mcp_env.py::
+# TestDenyListParityWithTheLauncher parses both literals and asserts they
+# match, so the two can never silently drift again the way the original
+# fixed allowlist did (MCP-05).
+#
+# Exact names — each one either re-points a resource the launcher/daemon
+# ALREADY pins correctly for every MCP child (PATH, NODE_OPTIONS — see
+# hermes-mcp-launcher's own _ALWAYS_FORWARDED_ENV_KEYS comment), defeats a
+# defense-in-depth layer (UV_OFFLINE — MEDIUM finding, forces uv/uvx's
+# OWN internal resolution back online even though the --offline argv
+# injection still covers argv[0]), is a TLS-trust override (the NODE_*/
+# REQUESTS_CA_BUNDLE/CURL_CA_BUNDLE family — MITM of the MCP child's own
+# outbound TLS), an interpreter/shell startup hijack (BASH_ENV, ENV,
+# SHELLOPTS, PS4, IFS, PERL5OPT/PERL5LIB, RUBYOPT/RUBYLIB, GODEBUG/GOFLAGS,
+# CLASSPATH, NIX_LD, MALLOC_CONF, GCONV_PATH, LOCPATH), or a network
+# interception knob (the http(s)_proxy family).
+#
+# TERMINFO/TERMINFO_DIRS/TMPDIR/TEMP/TMP: no legitimate BYOK secret is ANY
+# of these; TMPDIR doubles as defense-in-depth for the launcher's own
+# _INTERNAL_ENV_KEYS (that daemon-set exact match is checked BEFORE this
+# deny-list there, so it is unaffected).
+_MCP_ENV_DENY_EXACT_CORE: frozenset[str] = frozenset({
+    "PATH", "NODE_OPTIONS", "NODE_PATH", "ELECTRON_RUN_AS_NODE",
+    "UV_OFFLINE",
+    "NODE_TLS_REJECT_UNAUTHORIZED", "NODE_EXTRA_CA_CERTS",
+    "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+    "BASH_ENV", "ENV", "SHELLOPTS", "PS4", "IFS",
+    "PERL5OPT", "PERL5LIB", "RUBYOPT", "RUBYLIB",
+    "GODEBUG", "GOFLAGS", "CLASSPATH", "JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS",
+    "NIX_LD", "MALLOC_CONF", "GCONV_PATH", "LOCPATH",
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "FTP_PROXY",
+    "TERMINFO", "TERMINFO_DIRS", "TMPDIR", "TEMP", "TMP",
 })
-# Prefixes a caller must never be able to set: LD_* (dynamic linker — library
-# injection/preload into whatever the launcher execs), PYTHON* (interpreter
-# path/startup hijack), HERMES_* (impersonates the daemon's OWN config
-# surface — every Environment= this product's units set is HERMES_* or one
-# of the exact names above), SSL_CERT_* (TLS trust store override — a way to
-# MITM an MCP server's own outbound TLS).
-_MCP_ENV_DENY_PREFIXES: tuple[str, ...] = ("LD_", "PYTHON", "HERMES_", "SSL_CERT_")
+# Prefixes — LD_* (dynamic linker — library injection/preload into whatever
+# the launcher execs), PYTHON* (interpreter path/startup hijack), HERMES_*
+# (impersonates the daemon's OWN config surface — every Environment= this
+# product's units set is HERMES_* or one of the exact names above),
+# SSL_CERT_* (OpenSSL trust store override), NODE_*/GIT_*/UV_*/PIP_*/
+# NPM_CONFIG_*/JAVA_*/JDK_*/_JAVA/DOTNET_ (the same class of runtime/package-
+# manager hijack as the exact names above, generalised to every variable a
+# given tool family recognises — e.g. GIT_SSH_COMMAND, PIP_INDEX_URL,
+# NPM_CONFIG_REGISTRY), XDG_*/DYLD_* (loader/base-dir redirection),
+# SAFENT_* (this product's own CLI/provisioning surface, never BYOK input).
+_MCP_ENV_DENY_PREFIXES_CORE: tuple[str, ...] = (
+    "LD_", "PYTHON", "HERMES_", "SSL_CERT_",
+    "NODE_", "GIT_", "UV_", "PIP_", "NPM_CONFIG_", "XDG_", "DYLD_",
+    "JAVA_", "JDK_", "_JAVA", "SAFENT_", "DOTNET_",
+)
+
+# HOME is deliberately NOT in the core deny set (R16, test_r16_mcp_bridge_
+# handshake.py::TestByokEnvKeysAcceptOAuthBridgeVars): the cloud's
+# McpSpec.env for a MANAGED_REMOTE/OAuth-bridge server (mcp-remote)
+# legitimately carries HOME — rejecting it HERE would hard-fail the entire
+# add_mcp_server draft before it ever reaches scan/prefetch/connect (R16's
+# original root cause #1), not just leave HOME unused. It is still NEVER
+# honoured as an override: the launcher (hermes-mcp-launcher._is_allowed_
+# env_key) denies it independently and always forwards its OWN HOME instead
+# (_ALWAYS_FORWARDED_ENV_KEYS).
+#
+# ADS_BEARER is the daemon-only inverse of that same split (H-1 follow-up,
+# "make NODE_EXTRA_CA_CERTS fill-only like ADS_BEARER" — this module's own
+# prior comment claimed ADS_BEARER was already ignored-if-caller-supplied,
+# which _autowire_companion_env's `if not resolved_env.get(...)` fill-only-
+# when-EMPTY check does not actually enforce; denying both HERE makes that
+# claim true instead of just documented): _autowire_companion_env fills
+# ADS_BEARER/NODE_EXTRA_CA_CERTS from hermes.shell_server.companions at
+# CONNECT time (trusted, daemon-controlled, never persisted — INV-4).
+# Denying them at THIS caller-facing gate means the only way either key ever
+# gets a value is that fill step, never a caller-supplied add_mcp_server
+# draft. NODE_EXTRA_CA_CERTS is already covered by the shared NODE_ prefix
+# above; ADS_BEARER needs its own entry (no shared prefix covers it) and is
+# intentionally NOT added to the launcher's deny-list — the launcher MUST
+# still forward the daemon-injected value once autowire has filled it (see
+# hermes-mcp-launcher's own _LAUNCHER_ALLOW_DESPITE_DENY for the NODE_
+# prefix's own equivalent carve-out).
+_MCP_ENV_DENY_EXACT: frozenset[str] = _MCP_ENV_DENY_EXACT_CORE | frozenset({"ADS_BEARER"})
+_MCP_ENV_DENY_PREFIXES: tuple[str, ...] = _MCP_ENV_DENY_PREFIXES_CORE
+
+# The new XDG_ deny prefix would otherwise ALSO catch XDG_CONFIG_HOME, which
+# R16 (test_r16_mcp_bridge_handshake.py::TestByokEnvKeysAcceptOAuthBridgeVars)
+# already accepts here for the exact same reason HOME does: a MANAGED_REMOTE/
+# OAuth-bridge draft's McpSpec.env legitimately carries it and rejecting it
+# would hard-fail add_mcp_server before scan/prefetch/connect. Same asymmetry
+# as HOME — the launcher still never forwards it (_NEVER_FORWARDED_KEYS).
+_MCP_ENV_ALLOW_DESPITE_DENY: frozenset[str] = frozenset({"XDG_CONFIG_HOME"})
 
 
 def _is_denied_mcp_env_key(key: str) -> bool:
@@ -7172,6 +7242,8 @@ def _is_denied_mcp_env_key(key: str) -> bool:
     exploiting some future loosening of that pattern (defense in depth —
     matches this module's own fail-closed-on-both-sides style)."""
     upper = key.upper()
+    if upper in _MCP_ENV_ALLOW_DESPITE_DENY:
+        return False
     return upper in _MCP_ENV_DENY_EXACT or upper.startswith(_MCP_ENV_DENY_PREFIXES)
 
 

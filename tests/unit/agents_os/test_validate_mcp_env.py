@@ -20,11 +20,142 @@ got a raw 400 `clave de env no permitida` back. Covers:
 
 from __future__ import annotations
 
+import importlib.machinery
+import importlib.util
+from pathlib import Path
+
 import pytest
 
-from hermes.agents_os.infrastructure.dbus_runtime_service import _validate_mcp_env
+from hermes.agents_os.infrastructure.dbus_runtime_service import (
+    _MCP_ENV_DENY_EXACT_CORE,
+    _MCP_ENV_DENY_PREFIXES_CORE,
+    _validate_mcp_env,
+)
 
 pytestmark = pytest.mark.unit
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_LAUNCHER_SCRIPT = _REPO_ROOT / "ops/agents-os-edition/scripts/hermes-mcp-launcher"
+
+# Security review 2026-09-10 (H-1): every one of these must be denied by
+# BOTH gates. Union of the coordinator's explicit list and the review's own
+# reimplementation-and-enumerate finding (~50 names that passed before this
+# fix); values are the exact/prefix-expanded names actually exercised.
+#
+# Deliberately EXCLUDED here (each has its own dedicated test elsewhere,
+# not a gap): NODE_EXTRA_CA_CERTS and ADS_BEARER are denied at the DAEMON
+# (TestAdsCompanionSecretsAreFillOnly) but the LAUNCHER must still forward
+# them once the daemon has injected the trusted value (companion-bridge
+# carve-outs — TestLauncherOnlyCarveOuts below); TMPDIR/XDG_DATA_HOME are
+# denied at the DAEMON but allowed at the LAUNCHER via _INTERNAL_ENV_KEYS
+# (daemon-SET, trusted, never reachable from caller input because the
+# daemon gate already denies a caller-supplied one upstream).
+_H1_DANGEROUS_NAMES = [
+    # code-execution / interpreter / shell hijack
+    "NODE_PATH", "ELECTRON_RUN_AS_NODE", "BASH_ENV", "ENV", "SHELLOPTS", "PS4", "IFS",
+    "PERL5OPT", "PERL5LIB", "RUBYOPT", "RUBYLIB", "GODEBUG", "GOFLAGS", "CLASSPATH",
+    "JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "NIX_LD", "MALLOC_CONF", "GCONV_PATH",
+    "LOCPATH", "UV_OFFLINE",
+    # TLS-trust / MITM
+    "NODE_TLS_REJECT_UNAUTHORIZED",
+    "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+    # proxy family
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "FTP_PROXY",
+    # tmp/terminal identity
+    "TERMINFO", "TERMINFO_DIRS", "TEMP", "TMP",
+    # prefix family — one representative name per prefix, matching the
+    # coordinator's own exploit examples
+    "GIT_SSH_COMMAND", "GIT_SSL_CAINFO", "GIT_EXTERNAL_DIFF", "GIT_CONFIG_COUNT",
+    "UV_INDEX_URL", "UV_DEFAULT_INDEX", "UV_PYTHON",
+    "PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL",
+    "NPM_CONFIG_REGISTRY", "NPM_CONFIG_PREFIX",
+    "XDG_RUNTIME_DIR",
+    "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH",
+    "JAVA_HOME", "JDK_HOME", "_JAVA_OPTIONS",
+    "SAFENT_ADS_IMAGE", "SAFENT_STATE",
+    "DOTNET_STARTUP_HOOKS",
+]
+
+
+def _load_launcher_module():
+    loader = importlib.machinery.SourceFileLoader(
+        "hermes_mcp_launcher_h1_test", str(_LAUNCHER_SCRIPT)
+    )
+    spec = importlib.util.spec_from_file_location(
+        "hermes_mcp_launcher_h1_test", _LAUNCHER_SCRIPT, loader=loader
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class TestH1DenyListCoversTheReviewsFullNameSet:
+    """Security review 2026-09-10, verdict SHIP WITH FIXES — H-1's own
+    reimplementation of both gates found ~50 names that passed both. Every
+    one of them must now be denied by BOTH the daemon and the launcher."""
+
+    @pytest.mark.parametrize("key", _H1_DANGEROUS_NAMES)
+    def test_denied_at_the_daemon(self, key: str) -> None:
+        with pytest.raises(ValueError, match="clave de env no permitida"):
+            _validate_mcp_env({key: "value"})
+
+    @pytest.mark.parametrize("key", _H1_DANGEROUS_NAMES)
+    def test_denied_at_the_launcher(self, key: str) -> None:
+        module = _load_launcher_module()
+        assert module._is_allowed_env_key(key) is False, key
+
+    def test_brave_api_key_the_mcp_05_driver_still_passes_both_gates(self) -> None:
+        assert _validate_mcp_env({"BRAVE_API_KEY": "br-xxx"}) == {"BRAVE_API_KEY": "br-xxx"}
+        module = _load_launcher_module()
+        assert module._is_allowed_env_key("BRAVE_API_KEY") is True
+
+
+class TestLauncherOnlyCarveOuts:
+    """The 4 names deliberately excluded from _H1_DANGEROUS_NAMES above —
+    each one denied at the DAEMON (so a caller can never supply it) but
+    still allowed through the LAUNCHER's own gate, because by the time
+    anything reaches the launcher it can only be the daemon's OWN trusted
+    value, never caller input."""
+
+    def test_node_extra_ca_certs_denied_at_daemon_but_forwarded_by_launcher(self) -> None:
+        with pytest.raises(ValueError, match="clave de env no permitida"):
+            _validate_mcp_env({"NODE_EXTRA_CA_CERTS": "x"})
+        module = _load_launcher_module()
+        assert module._is_allowed_env_key("NODE_EXTRA_CA_CERTS") is True
+
+    def test_ads_bearer_denied_at_daemon_but_forwarded_by_launcher(self) -> None:
+        with pytest.raises(ValueError, match="clave de env no permitida"):
+            _validate_mcp_env({"ADS_BEARER": "x"})
+        module = _load_launcher_module()
+        assert module._is_allowed_env_key("ADS_BEARER") is True
+
+    @pytest.mark.parametrize("key", ["TMPDIR", "XDG_DATA_HOME"])
+    def test_daemon_internal_cache_dirs_denied_at_daemon_but_allowed_at_launcher(
+        self, key: str
+    ) -> None:
+        with pytest.raises(ValueError, match="clave de env no permitida"):
+            _validate_mcp_env({key: "x"})
+        module = _load_launcher_module()
+        assert module._is_allowed_env_key(key) is True
+        assert key in module._INTERNAL_ENV_KEYS
+
+
+class TestDenyListParityWithTheLauncher:
+    """The two gates are deliberately duplicated (no runtime cross-import
+    across the root-privilege boundary — see both files' own comments), so
+    nothing enforces they stay in sync except a test. This is that test:
+    the CORE deny set (everything except the few documented, one-name
+    asymmetries — HOME, ADS_BEARER, XDG_CONFIG_HOME/MCP_REMOTE_CONFIG_DIR,
+    NODE_EXTRA_CA_CERTS's launcher carve-out) must be byte-identical."""
+
+    def test_deny_exact_core_matches(self) -> None:
+        module = _load_launcher_module()
+        assert module._BYOK_ENV_DENY_EXACT_CORE == _MCP_ENV_DENY_EXACT_CORE
+
+    def test_deny_prefixes_match(self) -> None:
+        module = _load_launcher_module()
+        assert module._BYOK_ENV_DENY_PREFIXES == _MCP_ENV_DENY_PREFIXES_CORE
 
 
 class TestPreviouslyRejectedButPlausibleKeysAreNowAccepted:
@@ -44,18 +175,38 @@ class TestPreviouslyRejectedButPlausibleKeysAreNowAccepted:
 
     def test_the_old_curated_pack_still_validates_unchanged(self) -> None:
         """The fixed set this replaces is now just a SUBSET of what the
-        pattern accepts — nothing that used to work should stop working."""
+        pattern accepts — nothing that used to work should stop working.
+        ADS_BEARER/NODE_EXTRA_CA_CERTS are EXCLUDED here on purpose (security
+        review H-1 follow-up): they are now fill-only, see
+        TestAdsCompanionSecretsAreFillOnly below."""
         result = _validate_mcp_env(
             {
                 "REPLICATE_API_TOKEN": "r1",
                 "CONTEXT7_API_KEY": "c1",
                 "OPENAI_BASE_URL": "http://vllm.local",
                 "OPENAI_API_KEY": "sk-1",
-                "ADS_BEARER": "b1",
-                "NODE_EXTRA_CA_CERTS": "/etc/ca.pem",
             }
         )
-        assert len(result) == 6
+        assert len(result) == 4
+
+
+class TestAdsCompanionSecretsAreFillOnly:
+    """Security review 2026-09-10 (H-1 follow-up): the module's own prior
+    comment claimed "a caller passing a non-empty value would be ignored,
+    not trusted" for ADS_BEARER — _autowire_companion_env's `if not
+    resolved_env.get(...)` fill-only-when-EMPTY check did not actually
+    enforce that (a non-empty caller value was never overwritten). Denying
+    both at THIS caller-facing gate makes the claim true: the only way
+    either key ever gets a value is _autowire_companion_env's own fill step
+    at connect time, never a caller-supplied add_mcp_server draft."""
+
+    def test_ads_bearer_denied(self) -> None:
+        with pytest.raises(ValueError, match="clave de env no permitida"):
+            _validate_mcp_env({"ADS_BEARER": "attacker-supplied"})
+
+    def test_node_extra_ca_certs_denied(self) -> None:
+        with pytest.raises(ValueError, match="clave de env no permitida"):
+            _validate_mcp_env({"NODE_EXTRA_CA_CERTS": "/tmp/attacker-ca.pem"})
 
 
 class TestDenyListStillRejectsDangerousNames:
