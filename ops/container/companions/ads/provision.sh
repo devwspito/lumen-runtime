@@ -20,9 +20,8 @@
 #   companions.json the file Safent's own daemon reads (read-only bind)
 #
 # vendor.env (OPTIONAL, owner-created by hand, 0600, never generated here):
-# Safent's OWN Google Ads MCC / Meta app credentials, merged into
+# Safent's OWN Google Cloud OAuth / Meta app credentials, merged into
 # broker.env on every re-provision (never overwritten if already merged):
-#   GOOGLE_ADS_DEVELOPER_TOKEN=...
 #   GOOGLE_ADS_CLIENT_ID=...
 #   GOOGLE_ADS_CLIENT_SECRET=...
 #   GOOGLE_ADS_LOGIN_CUSTOMER_ID=...
@@ -227,9 +226,9 @@ EOF
   merge_vendor_credentials
 }
 
-# Vendor (Safent's own Google MCC / Meta app) credentials: owner-provided,
+# Vendor (Safent's own Google Cloud OAuth / Meta app) credentials: owner-provided,
 # never generated here. $STATE/vendor.env is written BY HAND by the owner
-# (0600, GOOGLE_ADS_*/META_* lines only) — if present, its lines are merged
+# (0600, only the explicitly supported keys below) — if present, its lines are merged
 # into broker.env, skipping any key that is already there, so re-running
 # provisioning after the owner adds the file picks it up without ever
 # duplicating or overwriting a line.
@@ -239,7 +238,7 @@ merge_vendor_credentials() {
   local line key
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
-      GOOGLE_ADS_*=*|META_*=*) ;;
+      GOOGLE_ADS_CLIENT_ID=*|GOOGLE_ADS_CLIENT_SECRET=*|GOOGLE_ADS_LOGIN_CUSTOMER_ID=*|META_APP_ID=*|META_APP_SECRET=*) ;;
       *) continue ;;
     esac
     key="${line%%=*}"
