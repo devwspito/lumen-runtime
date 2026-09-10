@@ -9,7 +9,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { sileo } from 'sileo'
-import { Save, CheckCircle, ShieldCheck, Globe } from 'lucide-react'
+import { Save, CheckCircle, ShieldCheck, Globe, Wifi } from 'lucide-react'
 import { useT } from '../lib/i18n'
 import { isApprovalFresh } from '../hooks/usePendingApprovals'
 import {
@@ -28,6 +28,9 @@ import {
   blockEgressDomain,
   unblockEgressDomain,
   recordInstallDecision,
+  getTailnetStatus,
+  connectTailnet,
+  disconnectTailnet,
 } from '../api/client'
 import type { EgressMode, EgressModeResponse } from '../api/types'
 import type {
@@ -37,6 +40,8 @@ import type {
   PoliciesResponse,
   PolicyCatalogEntry,
   SecurityScan,
+  TailnetStatus,
+  TailnetPeer,
 } from '../api/types'
 import ApprovalCard from '../components/ApprovalCard'
 import InboundDelegationCard from '../components/InboundDelegationCard'
@@ -1285,6 +1290,217 @@ function EgressSection() {
   )
 }
 
+// ── Tailnet section (spec 022 — governed tailnet egress) ─────────────────────
+
+function TailnetPeerRow({ peer }: { peer: TailnetPeer }) {
+  return (
+    <div className={s.egressDomainRow}>
+      <code className={s.egressDomainCode}>{peer.name}</code>
+      <span className={s.settingsRowHint}>{peer.online ? 'En línea' : 'Sin conexión'}</span>
+    </div>
+  )
+}
+
+interface TailnetConnectFormProps {
+  busy: boolean
+  onConnect: (authKey: string) => Promise<void>
+}
+
+function TailnetConnectForm({ busy, onConnect }: TailnetConnectFormProps) {
+  const [authKey, setAuthKey] = useState('')
+
+  async function handleSubmit() {
+    const key = authKey.trim()
+    if (!key) return
+    await onConnect(key)
+    setAuthKey('')
+  }
+
+  return (
+    <div className={s.domainInputRow}>
+      <input
+        id="tailnet-authkey-input"
+        className="cv-input"
+        type="password"
+        placeholder="tskey-auth-…"
+        autoComplete="off"
+        spellCheck={false}
+        value={authKey}
+        onChange={e => setAuthKey(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Enter') { void handleSubmit() } }}
+        disabled={busy}
+        aria-label="Clave de autenticación de la tailnet"
+      />
+      <Button
+        variant="primary"
+        onClick={() => { void handleSubmit() }}
+        type="button"
+        disabled={busy || !authKey.trim()}
+      >
+        Conectar
+      </Button>
+    </div>
+  )
+}
+
+interface TailnetDisconnectFormProps {
+  busy: boolean
+  onDisconnect: (password: string) => Promise<void>
+}
+
+function TailnetDisconnectForm({ busy, onDisconnect }: TailnetDisconnectFormProps) {
+  const [password, setPassword] = useState('')
+
+  async function handleSubmit() {
+    if (!password) return
+    await onDisconnect(password)
+    setPassword('')
+  }
+
+  return (
+    <div className={s.domainInputRow}>
+      <input
+        id="tailnet-disconnect-password-input"
+        className="cv-input"
+        type="password"
+        placeholder="Contraseña del dispositivo"
+        autoComplete="current-password"
+        spellCheck={false}
+        value={password}
+        onChange={e => setPassword(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Enter') { void handleSubmit() } }}
+        disabled={busy}
+        aria-label="Contraseña del dispositivo para desconectar la tailnet"
+      />
+      <Button
+        variant="ghost"
+        onClick={() => { void handleSubmit() }}
+        type="button"
+        disabled={busy || !password}
+      >
+        Desconectar
+      </Button>
+    </div>
+  )
+}
+
+type TailnetUiState = 'not_configured' | 'connecting' | 'connected'
+
+function tailnetUiState(status: TailnetStatus | null): TailnetUiState {
+  if (!status?.configured) return 'not_configured'
+  return status.online ? 'connected' : 'connecting'
+}
+
+const TAILNET_POLL_INTERVAL_MS = 5000
+
+export function TailnetSection() {
+  const [status, setStatus] = useState<TailnetStatus | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+
+  const load = useCallback(async () => {
+    const res = await getTailnetStatus()
+    setStatus(res)
+    setLoading(false)
+  }, [])
+
+  useEffect(() => {
+    void load()
+    const timer = setInterval(() => { void load() }, TAILNET_POLL_INTERVAL_MS)
+    return () => clearInterval(timer)
+  }, [load])
+
+  async function handleConnect(authKey: string) {
+    setBusy(true)
+    try {
+      await connectTailnet(authKey)
+      sileo.success({ title: 'Conexión a la tailnet en curso' })
+      await load()
+    } catch (err) {
+      sileo.error({ title: `No se pudo conectar: ${err instanceof Error ? err.message : err}` })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function handleDisconnect(password: string) {
+    setBusy(true)
+    try {
+      await disconnectTailnet(password)
+      sileo.success({ title: 'Desconexión de la tailnet en curso' })
+      await load()
+    } catch (err) {
+      sileo.error({ title: `No se pudo desconectar: ${err instanceof Error ? err.message : err}` })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const uiState = tailnetUiState(status)
+
+  return (
+    <section className="cv-section">
+      <div className={s.sectionLabel}>Tailnet</div>
+      <div className={s.sectionCard}>
+        {loading ? (
+          <div aria-busy="true" aria-label="Cargando…" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
+            <div className="skeleton skeleton--block" />
+          </div>
+        ) : (
+          <>
+            <p className={s['sectionCard__intro']}>
+              {uiState === 'not_configured' && 'Conecta este agente a la tailnet del dueño para que alcance servicios internos gobernados.'}
+              {uiState === 'connecting' && 'Conectando…'}
+              {uiState === 'connected' && `Conectado como ${status?.node_name} en ${status?.tailnet}`}
+            </p>
+
+            {uiState === 'not_configured' && (
+              <TailnetConnectForm busy={busy} onConnect={handleConnect} />
+            )}
+
+            {uiState !== 'not_configured' && status?.magicdns_suffix && (
+              <>
+                <div className={s.subLabel} style={{ marginTop: 'var(--space-4)' }}>
+                  Sufijo MagicDNS
+                </div>
+                <code className={s.egressDomainCode}>{status.magicdns_suffix}</code>
+                <p className={s['sectionCard__intro']} style={{ marginTop: 'var(--space-2)' }}>
+                  Los hosts de la tailnet se conceden como cualquier dominio en Egress.
+                </p>
+              </>
+            )}
+
+            {uiState === 'connected' && (
+              <>
+                <div className={s.subLabel} style={{ marginTop: 'var(--space-4)' }}>
+                  Dispositivos
+                </div>
+                {status && status.peers.length === 0 ? (
+                  <EmptyState compact icon={<Wifi size={18} />} title="Sin otros dispositivos en la tailnet" />
+                ) : (
+                  <ul className="cv-list" aria-label="Dispositivos de la tailnet">
+                    {status?.peers.map(peer => (
+                      <li key={peer.name}>
+                        <TailnetPeerRow peer={peer} />
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </>
+            )}
+
+            {uiState !== 'not_configured' && (
+              <div style={{ marginTop: 'var(--space-4)' }}>
+                <TailnetDisconnectForm busy={busy} onDisconnect={handleDisconnect} />
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </section>
+  )
+}
+
 // ── Severity badge (token-driven) ─────────────────────────────────────────────
 
 function SeverityBadge({ severity }: { severity: string }) {
@@ -1481,6 +1697,7 @@ export default function SeguridadView() {
         <InboundDelegationsSection />
         <GovernanceSection />
         <EgressSection />
+        <TailnetSection />
         <SecurityCenterSection />
       </div>
     </>

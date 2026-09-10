@@ -41,13 +41,59 @@ Tailscale SaaS only as a disclosed convenience tier (Tailscale Inc. = coordinati
 cannot read WireGuard traffic). Vendor holds no key/admin.
 
 ## Files
-ADD: systemd `hermes-tailscaled.{service,path}`, `hermes-tailscale-control.{service,path}`;
-`scripts/hermes-tailscale-control`; `src/hermes/egress_proxy/infrastructure/tailnet_connector.py`;
-`src/hermes/shell_server/tailnet/api.py`; SeguridadView card; tmpfiles dirs.
-CHANGE: Containerfile (pinned tailscaled bake + user + enable units, mirror trivy `:271`);
-`egress_proxy/infrastructure/proxy_handler.py` (upstream selector at the two dial sites);
-`egress_proxy/__main__.py` (build router from suffix file); `egress_proxy/application/ports.py`
-(UpstreamConnector port); `shell_server/main.py` (mount router). NOT run-safent.sh.
+
+**Done (egress lane, `tailnet-egress` branch):**
+- ADD `src/hermes/egress_proxy/infrastructure/tailnet_connector.py` —
+  `MagicDnsSuffixSource` (status.json reader, mtime-cached, fail-closed),
+  `TailnetUpstreamConnector` (CONNECT framing to `127.0.0.1:1055`),
+  `UpstreamRouter` (suffix-based selector, implements the same port as its
+  two delegates).
+- ADD `src/hermes/shell_server/tailnet/api.py` + `__init__.py` — `GET
+  /api/v1/tailnet`, `GET /api/v1/tailnet/peers`, `POST
+  /api/v1/tailnet/connect`, `POST /api/v1/tailnet/disconnect`.
+- ADD `specs/022-tailnet-connectivity/contracts.md` — the ops↔egress handoff
+  contract (status.json schema + required tmpfiles permission fix,
+  `/run/hermes/tailscale-control/request.json` schema, loopback proxy
+  protocol, API contract).
+- ADD tests: `tests/unit/egress_proxy/test_tailnet_connector.py` (25 —
+  suffix cache/invalidation, host-suffix matching, CONNECT framing,
+  typed-error failures), `tests/unit/egress_proxy/test_tailnet_routing_integration.py`
+  (2 — end-to-end `ProxyConnectionHandler` + `UpstreamRouter` against a fake
+  loopback CONNECT proxy: suffix-matched host routes to it, non-suffix host
+  never touches it), `tests/unit/shell_server/test_tailnet_api.py` (21),
+  `frontend/src/views/TailnetSection.test.tsx` (8).
+- CHANGE `egress_proxy/application/ports.py` — added `UpstreamConnector`
+  port, `UpstreamConnectError`/`UpstreamInternalAddressError`.
+- CHANGE `egress_proxy/infrastructure/proxy_handler.py` — added
+  `DirectUpstreamConnector` (wraps the pre-existing direct-dial path
+  unchanged); `ProxyConnectionHandler` takes an injectable
+  `upstream_connector` (defaults to `DirectUpstreamConnector`, so the 97
+  pre-existing tests pass unmodified); the two CONNECT dial sites
+  (SNI-enforced + open-logged) now call `self._upstream.connect(...)`
+  instead of resolving/dialing inline. The plain-HTTP dial site is
+  untouched (v1 scope = HTTPS/TLS only).
+- CHANGE `egress_proxy/__main__.py` — builds the `UpstreamRouter` from
+  `HERMES_TAILNET_STATUS_PATH` (default `/run/hermes/tailscale/status.json`)
+  and injects it into the handler.
+- CHANGE `shell_server/main.py` — mounts `create_tailnet_router(vault=vault)`.
+- CHANGE `frontend/src/api/types.ts` + `client.ts` — `TailnetStatus`/`TailnetPeer`
+  types, `getTailnetStatus`/`getTailnetPeers`/`connectTailnet`/`disconnectTailnet`.
+- CHANGE `frontend/src/views/SeguridadView.tsx` — new `TailnetSection` card
+  (state: no configurado / conectando / conectado como `node_name` en
+  `tailnet`; paste auth-key form; device-password disconnect; MagicDNS
+  suffix + "se conceden como cualquier dominio en Egress"; peers list).
+
+**Owed (ops lane, `tailnet-ops` branch — see contracts.md §7):** systemd
+`hermes-tailscale-control.{service,path}`; `scripts/hermes-tailscale-control`
+(root helper: reads/shreds the staged request, PAM-verifies disconnect,
+runs `tailscale up`/`down`); the status watcher that writes `status.json`;
+the tmpfiles permission fix on `/run/hermes/tailscale` (0700→0711, §2 of
+contracts.md — status.json is otherwise unreachable by the shell-server and
+the egress-proxy, both different uids). `hermes-tailscaled.{service,path}`
+and the Containerfile bake already landed on `tailnet-022-base`.
+
+NOT touched: `run-safent.sh`, `ops/**`, `scripts/**`,
+`src/hermes/tailnet_ssh/**` (other lanes' territory).
 
 ## MUST verify before publish
 1. tailscaled comes up in userspace mode on a fresh image (no /dev/net/tun, no cap added).
