@@ -56,6 +56,24 @@ services:
       start_period: 10s
     security_opt: ["no-new-privileges:true"]
 
+  # Migraciones: paso explicito de una sola vez antes de ads-api/ads-worker
+  # (verificacion fresca T214: la BD nueva no tenia alembic_version y el
+  # worker fallaba cada ciclo). Misma imagen, mismo uid, solo la URL de BD.
+  ads-migrate:
+    image: ${SAFENT_ADS_IMAGE:-safent-ads:local}
+    user: "10001:10001"
+    command: alembic upgrade head
+    environment:
+      ADS_DATABASE_URL: postgresql+asyncpg://ads:${ADS_POSTGRES_PASSWORD}@ads-db/ads
+    networks:
+      - safent-companions
+    depends_on:
+      ads-db:
+        condition: service_healthy
+    restart: "no"
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+
   ads-api:
     image: ${SAFENT_ADS_IMAGE:-safent-ads:local}
     restart: unless-stopped
@@ -92,6 +110,8 @@ services:
     depends_on:
       ads-db:
         condition: service_healthy
+      ads-migrate:
+        condition: service_completed_successfully
     # Self-check inside the container: 127.0.0.1 is the same process (the
     # server listens on 0.0.0.0), so this never crosses the runtime's
     # daddr+dport rule. The leaf is issued for SAN DNS:ads.safent.internal,
@@ -135,6 +155,8 @@ services:
     depends_on:
       ads-db:
         condition: service_healthy
+      ads-migrate:
+        condition: service_completed_successfully
     security_opt: ["no-new-privileges:true"]
     cap_drop: ["ALL"]
     deploy:
