@@ -370,6 +370,165 @@ class TestSecondRunIsIdempotent:
         assert broker_env_after_merge.count("META_APP_ID=") == 1
 
 
+class TestScaffoldMode:
+    """028 T015 — `provision.sh --scaffold`: network + TLS + bearer +
+    companions.json only, local and image-independent. Safent's own
+    container always gets a valid companions.json bind-mount source from
+    its FIRST boot, even before `safent companion install` ever runs — so
+    installing the companion later never recreates Safent."""
+
+    def test_scaffold_never_pulls_or_runs_the_ads_image(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        state_dir = tmp_path / "state"
+        podman_log = tmp_path / "podman.log"
+        result = subprocess.run(
+            ["bash", str(_PROVISION_SH), "--scaffold"],
+            env={
+                **os.environ,
+                "PATH": f"{fake_bin_dir}:{os.environ.get('PATH', '')}",
+                "SAFENT_COMPANION_STATE": str(state_dir),
+                "SAFENT_ADS_IMAGE": "safent-ads:test-fake",
+                "FAKE_PODMAN_LOG": str(podman_log),
+            },
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        log = podman_log.read_text()
+        assert "pull" not in log
+        assert "compose" not in log
+        assert "gen_keys" not in log
+
+    def test_scaffold_writes_a_companions_json_shape_the_daemon_loader_accepts(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """Cross-boundary proof: the SAME companions.json scaffold mode
+        writes has the exact shape `hermes.shell_server.companions`'s
+        field-level validation (`_validate_companion_entry`) accepts —
+        never a placeholder shape it would reject. The file-OWNERSHIP trust
+        boundary itself (`_is_trustworthy_file`: root-owned or on a `:ro`
+        bind) is a SEPARATE, already-covered concern (test_companions.py) —
+        this script only ever runs as the host user, never as the
+        container's root, so simulating that mount here would test the
+        wrong layer.
+        """
+        state_dir = tmp_path / "state"
+        result = subprocess.run(
+            ["bash", str(_PROVISION_SH), "--scaffold"],
+            env={
+                **os.environ,
+                "PATH": f"{fake_bin_dir}:{os.environ.get('PATH', '')}",
+                "SAFENT_COMPANION_STATE": str(state_dir),
+                "SAFENT_ADS_IMAGE": "safent-ads:test-fake",
+                "FAKE_PODMAN_LOG": str(tmp_path / "podman.log"),
+            },
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, result.stderr
+
+        import hashlib as _hashlib  # noqa: PLC0415
+        import json as _json  # noqa: PLC0415
+        import ssl as _ssl  # noqa: PLC0415
+
+        from hermes.shell_server.companions import _validate_ip, _validate_url  # noqa: PLC0415
+
+        doc = _json.loads((state_dir / "companions.json").read_text())
+        assert doc["version"] == 1
+        entry = doc["companions"][0]
+        assert entry["slug"] == "safent-ads"
+        assert _validate_url(entry["url"]) == "ads.safent.internal"
+        assert _validate_ip(entry["ip"]) == "10.201.0.10"
+        assert entry["port"] == 8443
+        assert entry["ca_path"] == "/etc/hermes/companions/ads-ca.crt"
+        assert entry["bearer_ref"] == "file:/etc/hermes/companions/ads.bearer"
+        # ca_fingerprint is re-derived from the REAL scaffolded CA (host-side
+        # path) the exact same way _validate_ca_fingerprint does against the
+        # container-side mount -- proves the value is not stale/fabricated.
+        pem = (state_dir / "tls" / "ca.crt").read_text()
+        der = _ssl.PEM_cert_to_DER_cert(pem)
+        assert entry["ca_fingerprint"] == f"sha256:{_hashlib.sha256(der).hexdigest()}"
+
+    def test_scaffold_leaves_the_sso_key_as_an_empty_placeholder(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        state_dir = tmp_path / "state"
+        result = subprocess.run(
+            ["bash", str(_PROVISION_SH), "--scaffold"],
+            env={
+                **os.environ,
+                "PATH": f"{fake_bin_dir}:{os.environ.get('PATH', '')}",
+                "SAFENT_COMPANION_STATE": str(state_dir),
+                "SAFENT_ADS_IMAGE": "safent-ads:test-fake",
+                "FAKE_PODMAN_LOG": str(tmp_path / "podman.log"),
+            },
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, result.stderr
+        key_path = state_dir / "sso" / "ads-sso.key"
+        assert key_path.read_bytes() == b""
+        assert _mode(key_path) == 0o400
+
+    def test_scaffold_generates_a_real_non_empty_bearer(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """The bearer is image-independent (openssl rand) — scaffold mode
+        generates the REAL value immediately, unlike the SSO key."""
+        state_dir = tmp_path / "state"
+        result = subprocess.run(
+            ["bash", str(_PROVISION_SH), "--scaffold"],
+            env={
+                **os.environ,
+                "PATH": f"{fake_bin_dir}:{os.environ.get('PATH', '')}",
+                "SAFENT_COMPANION_STATE": str(state_dir),
+                "SAFENT_ADS_IMAGE": "safent-ads:test-fake",
+                "FAKE_PODMAN_LOG": str(tmp_path / "podman.log"),
+            },
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, result.stderr
+        bearer = (state_dir / "bearer").read_text().strip()
+        assert len(bearer) == 64  # openssl rand -hex 32
+        assert _mode(state_dir / "bearer") == 0o400
+
+    def test_a_later_full_run_generates_the_real_sso_key_over_the_placeholder(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """T016's `safent companion install` runs provision.sh WITHOUT
+        --scaffold on top of an existing scaffold — the empty placeholder
+        must not block the real keypair from being generated (the `-s`,
+        not `-f`, check in ensure_sso_keypair)."""
+        state_dir = tmp_path / "state"
+        podman_log = tmp_path / "podman.log"
+        env = {
+            **os.environ,
+            "PATH": f"{fake_bin_dir}:{os.environ.get('PATH', '')}",
+            "SAFENT_COMPANION_STATE": str(state_dir),
+            "SAFENT_ADS_IMAGE": "safent-ads:test-fake",
+            "FAKE_PODMAN_LOG": str(podman_log),
+        }
+        scaffold = subprocess.run(
+            ["bash", str(_PROVISION_SH), "--scaffold"],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+        assert scaffold.returncode == 0, scaffold.stderr
+        assert (state_dir / "sso" / "ads-sso.key").read_bytes() == b""
+
+        full = subprocess.run(
+            ["bash", str(_PROVISION_SH)], env=env, capture_output=True, text=True, timeout=60,
+        )
+        assert full.returncode == 0, full.stderr
+        assert (state_dir / "sso" / "ads-sso.key").read_bytes() != b""
+        assert _mode(state_dir / "sso" / "ads-sso.key") == 0o400
+
+
 class TestComposeConfigRenders:
     """`podman compose config` / `docker compose config` with a dummy state
     — proves compose.yaml's variable interpolation and bind mounts resolve

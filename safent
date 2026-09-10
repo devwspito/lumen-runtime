@@ -60,6 +60,16 @@ CLI_URL="${SAFENT_CLI_URL:-https://raw.githubusercontent.com/devwspito/safent-ru
 # seccomp profile below (image > raw GitHub > cache), so there is exactly
 # ONE implementation of provisioning, never a copy embedded in this CLI.
 COMPANION_STATE="${SAFENT_COMPANION_STATE:-$SAFENT_STATE_HOME/companions/ads}"
+# Exported (not just a local shell var): provision.sh runs as a SEPARATE
+# process and only ever reads SAFENT_COMPANION_STATE itself — it has no idea
+# SAFENT_STATE_HOME exists. Without this export, a caller that sets
+# SAFENT_STATE_HOME but not SAFENT_COMPANION_STATE (the desktop app's own
+# sandboxed profile dir, app-engine.md §1) gets a silent split-brain: this
+# CLI computes COMPANION_STATE/the bind-mount paths from SAFENT_STATE_HOME,
+# while provision.sh independently falls back to $HOME/.safent/companions/ads
+# and writes there instead — the binds then point at a directory nothing
+# ever populated.
+export SAFENT_COMPANION_STATE="$COMPANION_STATE"
 COMPANION_BIN_DIR="$SAFENT_STATE_HOME/companions/ads/bin"
 COMPANION_RAW_BASE="${SAFENT_COMPANION_URL_BASE:-https://raw.githubusercontent.com/devwspito/safent-runtime/main/ops/container/companions/ads}"
 COMPANION_RUN_ARGS=""
@@ -202,12 +212,19 @@ _fetch_companion_file() {
   return 1
 }
 
-# Provision the safent-ads companion (024) BEFORE _run: companions.json has
+# Scaffold the safent-ads companion (024) BEFORE _run: companions.json has
 # to exist for the read-only bind _run adds. Mirrors run-safent.sh's own
 # companion phase exactly — same provision.sh, fetched rather than shipped a
 # second time in this CLI. NEVER fatal to Safent's own boot (FR-3): any
 # failure here just leaves COMPANION_RUN_ARGS empty and _run starts without
 # --network/the companion binds, same as --no-companion.
+#
+# --scaffold (028 T015): network + TLS + bearer + companions.json only —
+# local, image-independent, always fast. The companion's actual SERVICE
+# (image pull, secrets, compose up) is now a SEPARATE, explicit step
+# (`safent companion install|repair`, T016), never bundled into every
+# Safent start — so installing Anuncios later never has to recreate this
+# container: the bind-mount sources scaffolded here already exist.
 _provision_companion() {
   COMPANION_RUN_ARGS=""
   [ "$NO_COMPANION" -eq 0 ] || return 0
@@ -218,10 +235,10 @@ _provision_companion() {
       return 0
     }
   done
-  if "$COMPANION_BIN_DIR/provision.sh"; then
+  if "$COMPANION_BIN_DIR/provision.sh" --scaffold >&2; then
     COMPANION_RUN_ARGS="--network safent-companions -v ${COMPANION_STATE}/companions.json:/etc/hermes/companions.json:ro -v ${COMPANION_STATE}/tls/ca.crt:/etc/hermes/companions/ads-ca.crt:ro -v ${COMPANION_STATE}/bearer:/etc/hermes/companions/ads.bearer:ro -v ${COMPANION_STATE}/sso/ads-sso.key:/etc/hermes/companions/ads-sso.key:ro"
   else
-    echo "[!] Companion provisioning failed — starting Safent without it (FR-3)." >&2
+    echo "[!] Companion scaffolding failed — starting Safent without it (FR-3)." >&2
   fi
 }
 
