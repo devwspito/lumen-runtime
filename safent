@@ -40,6 +40,11 @@ CLOUD_ENDPOINT="${SAFENT_CLOUD_ENDPOINT:-}"
 # SAFENT_DATA_VOLUME directly for the rare case a name-derived default isn't
 # wanted.
 DATA_VOLUME="${SAFENT_DATA_VOLUME:-${NAME}-data}"
+# macOS-only: the podman machine THIS instance creates/uses, never the
+# owner's own (MAC-05, verificacion-mac-1.md — see cmd_ensure_machine).
+# Derived from NAME for the same reason DATA_VOLUME is: a second instance
+# gets its own machine automatically instead of colliding on one name.
+MACHINE_NAME="${SAFENT_MACHINE_NAME:-${NAME}-engine}"
 # Graceful stop (item #2, spec 025 matriz): PID1 is systemd, which needs
 # SIGRTMIN+3 (not SIGTERM) to begin an orderly shutdown of every unit —
 # STOPSIGNAL SIGRTMIN+3 is baked into the image, but pinning it here too
@@ -1785,12 +1790,37 @@ cmd_ensure_machine() {
     _stage_done
     return 0
   fi
-  name="$("$RT" machine list -q 2>/dev/null | head -1)"
-  if [ -z "$name" ]; then
-    "$RT" machine init --rootful --cpus 4 --memory 8192 --disk-size 60 >&2 \
-      || _die_porcelain machine_create_failed "No se pudo crear la maquina" true
-    name="$("$RT" machine list -q 2>/dev/null | head -1)"
+
+  # MAC-05 (verificacion-mac-1.md): NEVER take "whichever machine podman
+  # happens to list first" — that adopted the OWNER's own live machine
+  # (their podman-machine-default, started by their OWN podman) on a real
+  # Mac. This instance only ever targets its OWN name (MACHINE_NAME) and
+  # ignores every other machine, full stop — no adoption of anything this
+  # app did not itself create.
+  _mj="$SAFENT_STATE_HOME/machine.json"
+  name=""
+  if [ -f "$_mj" ]; then
+    _recorded_name="$(_manifest_field "$_mj" name)"
+    if [ -n "$_recorded_name" ] && "$RT" machine inspect "$_recorded_name" >/dev/null 2>&1; then
+      name="$_recorded_name"
+    fi
   fi
+
+  if [ -z "$name" ]; then
+    name="$MACHINE_NAME"
+    if ! "$RT" machine inspect "$name" >/dev/null 2>&1; then
+      "$RT" machine init "$name" --rootful --cpus 4 --memory 8192 --disk-size 60 >&2 \
+        || _die_porcelain machine_create_failed "No se pudo crear la maquina" true
+    fi
+    # Written (or re-written) every time we settle on OUR OWN name — never
+    # "true" here: this CLI no longer has an adoption path for a machine it
+    # did not itself create/name, so there is nothing to mark adopted=true
+    # for. `_uninstall_machine_if_ours`/`_machines_json` read this exact
+    # shape (name, adopted).
+    mkdir -p "$SAFENT_STATE_HOME" 2>/dev/null || true
+    printf '{"name":"%s","adopted":false}\n' "$(_json_str "$name")" > "$_mj" 2>/dev/null || true
+  fi
+
   rootful="$("$RT" machine inspect "$name" --format '{{.Rootful}}' 2>/dev/null | head -1)"
   [ "$rootful" = "true" ] || _die_porcelain machine_create_failed "La maquina existente es rootless" false
   "$RT" machine start "$name" >&2 2>/dev/null || "$RT" info >/dev/null 2>&1 \

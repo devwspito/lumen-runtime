@@ -105,6 +105,49 @@ case "$1" in
   rm|start|stop)
     exit 0
     ;;
+  machine)
+    shift  # drop "machine"; $1 is now list/inspect/init/start/...
+    sub="$1"; shift
+    case "$sub" in
+      list)
+        # cmd_ensure_machine only ever calls `machine list -q`; state is a
+        # plain newline-separated list of existing machine names, mutated
+        # by `init` below (MAC-05, verificacion-mac-1.md tests).
+        [ -n "${FAKE_MACHINES_STATE:-}" ] && [ -f "$FAKE_MACHINES_STATE" ] && cat "$FAKE_MACHINES_STATE"
+        exit 0
+        ;;
+      inspect)
+        mname="$1"; shift
+        exists=false
+        if [ -n "${FAKE_MACHINES_STATE:-}" ] && [ -f "$FAKE_MACHINES_STATE" ] \
+           && grep -qx "$mname" "$FAKE_MACHINES_STATE"; then
+          exists=true
+        fi
+        if [ "${1:-}" = "--format" ]; then
+          [ "$exists" = "true" ] || exit 1
+          case "$2" in
+            '{{.Rootful}}') echo "${FAKE_MACHINE_ROOTFUL:-true}" ;;
+            '{{.State}}') echo "${FAKE_MACHINE_STATE:-running}" ;;
+          esac
+          exit 0
+        fi
+        [ "$exists" = "true" ] && exit 0 || exit 1
+        ;;
+      init)
+        [ "${FAKE_MACHINE_INIT_FAILS:-false}" = "true" ] && exit 1
+        mname="$1"
+        [ -n "${FAKE_MACHINES_STATE:-}" ] && echo "$mname" >> "$FAKE_MACHINES_STATE"
+        exit 0
+        ;;
+      start)
+        [ "${FAKE_MACHINE_START_FAILS:-false}" = "true" ] && exit 1
+        exit 0
+        ;;
+      *)
+        exit 0
+        ;;
+    esac
+    ;;
   *)
     exit 0
     ;;
@@ -385,6 +428,99 @@ class TestEnsureMachineOnLinuxIsANoOp:
         assert result.returncode == 0
         assert result.stdout == ""
         assert "[ok]" in result.stderr
+
+
+_FAKE_UNAME = """#!/bin/sh
+case "$1" in
+  -s) echo Darwin ;;
+  -m) echo arm64 ;;
+  *) echo Darwin ;;
+esac
+"""
+
+
+def _fake_darwin(fake_bin_dir: Path) -> None:
+    """`cmd_ensure_machine`'s macOS branch is gated on `uname -s` (safent's
+    own `OS="$(uname -s ...)"`) — faking it, not the CLI's own logic, is
+    what makes these MAC-05 tests prove the REAL script's behavior on a
+    simulated Mac rather than a restated assumption. Writes straight into
+    the test's OWN `fake_bin_dir` (function-scoped fixture — a fresh tmp
+    dir per test), so no other test's PATH is affected."""
+    uname = fake_bin_dir / "uname"
+    uname.write_text(_FAKE_UNAME)
+    uname.chmod(0o755)
+
+
+class TestEnsureMachineNeverAdoptsAForeignMachine:
+    """MAC-05 (verificacion-mac-1.md): `cmd_ensure_machine` used to adopt
+    whichever machine `podman machine list -q | head -1` returned first —
+    on the owner's real Mac that was their OWN live `podman-machine-default`,
+    started by their own separately-installed podman. This app must only
+    ever create/use a machine under its OWN name and never so much as
+    inspect-with-intent-to-adopt anything else."""
+
+    def test_a_foreign_default_machine_is_never_touched_our_own_gets_created(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        _fake_darwin(fake_bin_dir)
+        podman_log = tmp_path / "podman.log"
+        machines_state = tmp_path / "machines.state"
+        machines_state.write_text("podman-machine-default\n")
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            extra_env={"FAKE_MACHINES_STATE": str(machines_state)},
+        )
+
+        result = _run_safent("ensure-machine", "--porcelain", env=env)
+
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        events = _parse_ndjson(result.stdout)
+        _assert_stage_closure_invariant(events)
+        assert events[-1]["t"] == "done"
+
+        calls = _podman_calls(podman_log)
+        assert not any("podman-machine-default" in c for c in calls), (
+            f"the owner's own foreign machine must never be referenced at all: {calls}"
+        )
+        assert any(c == "machine init safent-test-engine --rootful --cpus 4 --memory 8192 --disk-size 60" for c in calls), (
+            f"expected our OWN name (safent-test-engine, from SAFENT_NAME=safent-test) to be created: {calls}"
+        )
+        assert any(c.startswith("machine start safent-test-engine") for c in calls)
+
+        machine_json = json.loads((tmp_path / "home" / ".safent" / "machine.json").read_text())
+        assert machine_json == {"name": "safent-test-engine", "adopted": False}
+
+    def test_our_own_already_existing_machine_is_reused_without_recreating(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        _fake_darwin(fake_bin_dir)
+        podman_log = tmp_path / "podman.log"
+        machines_state = tmp_path / "machines.state"
+        # Steady state: OUR machine already exists (from a prior bootstrap)
+        # alongside the owner's unrelated foreign one.
+        machines_state.write_text("podman-machine-default\nsafent-test-engine\n")
+        home_dir = tmp_path / "home"
+        state_home = home_dir / ".safent"
+        state_home.mkdir(parents=True)
+        (state_home / "machine.json").write_text('{"name":"safent-test-engine","adopted":false}\n')
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=home_dir,
+            podman_log=podman_log,
+            extra_env={"FAKE_MACHINES_STATE": str(machines_state)},
+        )
+
+        result = _run_safent("ensure-machine", "--porcelain", env=env)
+
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        calls = _podman_calls(podman_log)
+        assert not any(c.startswith("machine init") for c in calls), (
+            f"an already-existing, already-ours machine must never be re-created: {calls}"
+        )
+        assert not any("podman-machine-default" in c for c in calls)
+        assert any(c.startswith("machine start safent-test-engine") for c in calls)
 
 
 class TestStageRuntime:
