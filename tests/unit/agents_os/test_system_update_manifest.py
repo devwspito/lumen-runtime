@@ -335,6 +335,71 @@ class TestAgainstRealMinisignBinary:
         assert rm.verify_minisign(manifest_path.read_bytes(), pubkey_text, minisig_text) is False
 
 
+class TestAgainstRsign2TauriFormat:
+    """The release signer will be the Tauri CLI signer (rsign2), not the C
+    `minisign` binary above — Tauri's key is unencrypted, which the C
+    binary cannot load, so the pipeline signs with the Rust toolchain
+    instead. Cross-lane check (coordinator, on top of app-contracts-cli):
+    prove `verify_minisign` accepts what THAT toolchain actually produces,
+    not just the C reference implementation.
+
+    `npx tauri` / `cargo tauri` were not available in this sandbox
+    (desktop/ has no installed tauri-cli), so per the fallback this test
+    vectors against a fixture vendored from `rsign2` instead — the
+    standalone Rust CLI (github.com/jedisct1/rsign2) built on the same
+    `minisign` Rust crate Tauri's own signer uses; `rsign -H` is a no-op
+    "kept for backwards compatibility", i.e. rsign2 always produces the
+    prehashed "ED" scheme, same as the fixture's algorithm bytes below.
+
+    Fixture provenance (tests/unit/agents_os/fixtures/rsign2_*):
+      $ cargo install rsign2          # 0.6.6, minisign crate 0.9.1
+      $ rsign generate -f -W --unencrypted -p rsign.pub -s rsign.key \
+            -c "signature from tauri secret key"
+      $ rsign sign -s rsign.key -p rsign.pub -W \
+            -x runtime-manifest.json.sig \
+            -c "signature from tauri secret key" \
+            -t "timestamp:1789062638	file:runtime-manifest.json" \
+            runtime-manifest.json
+    The untrusted comment ("signature from tauri secret key") and the
+    tab-separated trusted comment (`timestamp:...\tfile:...`) match
+    exactly what the coordinator specified Tauri produces. The key is
+    throwaway, generated only for this fixture, discarded after use.
+    """
+
+    _FIXTURES = Path(__file__).parent / "fixtures"
+
+    def test_verifies_a_real_rsign2_signature_with_tauri_style_comments(self) -> None:
+        pubkey_text = (self._FIXTURES / "rsign2_runtime_manifest.pub").read_text()
+        minisig_text = (self._FIXTURES / "rsign2_runtime_manifest.json.sig").read_text()
+        file_bytes = (self._FIXTURES / "rsign2_runtime_manifest.json").read_bytes()
+
+        assert rm.verify_minisign(file_bytes, pubkey_text, minisig_text) is True
+
+    def test_the_fixture_really_does_use_the_documented_comment_conventions(self) -> None:
+        """Guards the fixture itself against silent drift/corruption."""
+        pubkey_text = (self._FIXTURES / "rsign2_runtime_manifest.pub").read_text()
+        minisig_text = (self._FIXTURES / "rsign2_runtime_manifest.json.sig").read_text()
+
+        pubkey_comment = pubkey_text.splitlines()[0]
+        assert pubkey_comment == "untrusted comment: minisign public key: C2FF950EFBAC14E0"
+        assert minisig_text.splitlines()[0] == "untrusted comment: signature from tauri secret key"
+        trusted = minisig_text.splitlines()[2]
+        assert trusted.startswith("trusted comment: timestamp:")
+        assert "\tfile:runtime-manifest.json" in trusted
+
+        parsed = rm._parse_minisig(minisig_text)
+        assert parsed is not None
+        assert parsed.trusted_comment.startswith("timestamp:")
+        assert "\tfile:runtime-manifest.json" in parsed.trusted_comment
+
+    def test_tampering_the_fixture_file_after_the_fact_fails_closed(self) -> None:
+        pubkey_text = (self._FIXTURES / "rsign2_runtime_manifest.pub").read_text()
+        minisig_text = (self._FIXTURES / "rsign2_runtime_manifest.json.sig").read_text()
+        file_bytes = (self._FIXTURES / "rsign2_runtime_manifest.json").read_bytes()
+
+        assert rm.verify_minisign(file_bytes + b" ", pubkey_text, minisig_text) is False
+
+
 # ---------------------------------------------------------------------------
 # HTTP route
 # ---------------------------------------------------------------------------
