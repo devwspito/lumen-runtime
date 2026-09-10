@@ -15,6 +15,8 @@ Upload your staff roster in *any* format → get back a fully provisioned org wi
 
 </div>
 
+Ads development handoff: [DGX integration, 10 September 2026](INTEGRATION-2026-09-10.md).
+
 ---
 
 ## What is this?
