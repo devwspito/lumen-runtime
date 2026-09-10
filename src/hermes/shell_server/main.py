@@ -35,7 +35,7 @@ from hermes.shell_server.providers.domain import (
 )
 from hermes.shell_server.providers.repo import SQLiteProviderRepository
 from hermes.shell_server.security.secrets import SecretsVault
-from hermes.tasks.control_plane.domain.ports import AgentUnavailable
+from hermes.tasks.control_plane.domain.ports import AgentUnavailable, EnqueueBlockedByKillSwitch
 
 logger = logging.getLogger("hermes-shell-server")
 
@@ -1212,6 +1212,18 @@ def create_app() -> FastAPI:
                 conversation_id=conv_id_str,
                 agent_id=resolved_agent_id,
             )
+        except EnqueueBlockedByKillSwitch as exc:
+            logger.warning(
+                "hermes.shell_server.chat.kill_switch_engaged",
+                extra={"reason": str(exc)},
+            )
+            raise HTTPException(
+                status_code=423,
+                detail={
+                    "code": "kill_switch_engaged",
+                    "message": "El freno de emergencia está activo — libéralo desde Seguridad para enviar mensajes.",
+                },
+            ) from exc
         except AgentUnavailable as exc:
             logger.warning(
                 "hermes.shell_server.chat.agent_unavailable",

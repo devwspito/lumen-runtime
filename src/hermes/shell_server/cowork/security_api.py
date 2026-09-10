@@ -76,6 +76,14 @@ class RecordInstallDecisionRequest(BaseModel):
     totp: str | None = None          # required to ALLOW a FAIL/WARN scan (owner MFA)
 
 
+class KillSwitchRequest(BaseModel):
+    engaged: bool = Field(description="True = engage the brake, False = release it")
+    reason: str = Field(default="", max_length=500, description="Owner's reason, audited")
+    totp: str | None = Field(
+        default=None, description="Owner TOTP — required only to RELEASE (engaged=False)"
+    )
+
+
 # ------------------------------------------------------------------
 # Router factory
 # ------------------------------------------------------------------
@@ -188,6 +196,45 @@ def create_security_router() -> APIRouter:
             )
         except AgentUnavailable as exc:
             _raise_503(exc, "record_install_decision")
+
+    @router.get("/kill-switch")
+    async def get_kill_switch(request: Request) -> dict:
+        """Estado del freno de emergencia. Fail-soft: {engaged: false, ...} si
+        el daemon no está disponible (nunca 503 en una lectura de estado)."""
+        proxy = request.app.state.dbus_proxy
+        try:
+            status = await proxy.call_dict("get_kill_switch_status")
+        except AgentUnavailable:
+            return {"engaged": False, "reason": None, "changed_by": None, "changed_at": None}
+        return status or {"engaged": False, "reason": None, "changed_by": None, "changed_at": None}
+
+    @router.post("/kill-switch", status_code=200)
+    async def set_kill_switch(request: Request, body: KillSwitchRequest) -> dict:
+        """Engage/release the emergency brake.
+
+        Engaging (engaged=true) needs NOTHING beyond the operator bearer — it
+        is a brake, one click. Releasing (engaged=false) is a sovereign action
+        that requires the owner's TOTP, same require_owner_mfa gate as every
+        other posture change (/security/decisions, /egress/mode).
+        """
+        proxy = request.app.state.dbus_proxy
+        if body.engaged:
+            try:
+                await proxy.call_bool("pause", body.reason)
+            except AgentUnavailable as exc:
+                _raise_503(exc, "kill_switch_engage")
+            return {"ok": True, "engaged": True}
+
+        require_owner_mfa(
+            MfaStore(),
+            body.totp or "",
+            action="liberar el freno de emergencia",
+        )
+        try:
+            await proxy.call_bool("resume")
+        except AgentUnavailable as exc:
+            _raise_503(exc, "kill_switch_release")
+        return {"ok": True, "engaged": False}
 
     return router
 

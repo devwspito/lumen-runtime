@@ -32,6 +32,7 @@ import type {
   EgressDomainsResponse,
   EgressMode,
   EgressModeResponse,
+  KillSwitchStatus,
   PendingApproval,
   InboundDelegation,
   MfaStatus,
@@ -720,6 +721,29 @@ export function unblockEgressDomain(domain: string): Promise<unknown> {
   return request<unknown>('/egress/deny/remove', {
     method: 'POST',
     body: JSON.stringify({ domain }),
+  })
+}
+
+/** Emergency brake status. Fail-soft: never throws, defaults to not-engaged. */
+export function getKillSwitch(): Promise<KillSwitchStatus> {
+  return request<KillSwitchStatus>('/security/kill-switch').catch(() => ({
+    engaged: false, reason: null, changed_by: null, changed_at: null,
+  }))
+}
+
+/** Engage the brake — no MFA required, one click (it's a brake). */
+export function engageKillSwitch(reason: string): Promise<unknown> {
+  return request<unknown>('/security/kill-switch', {
+    method: 'POST',
+    body: JSON.stringify({ engaged: true, reason }),
+  })
+}
+
+/** Release the brake — requires the owner's TOTP (sovereign action). */
+export function releaseKillSwitch(totp: string): Promise<unknown> {
+  return request<unknown>('/security/kill-switch', {
+    method: 'POST',
+    body: JSON.stringify({ engaged: false, totp }),
   })
 }
 

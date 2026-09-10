@@ -373,6 +373,14 @@ export interface EgressModeResponse {
   blocklist_count?: number
 }
 
+/** Emergency brake — freno de emergencia. Engaging needs no MFA; releasing does. */
+export interface KillSwitchStatus {
+  engaged: boolean
+  reason: string | null
+  changed_by: string | null
+  changed_at: string | null
+}
+
 export interface PendingApproval {
   proposal_id: string
   kind?: string

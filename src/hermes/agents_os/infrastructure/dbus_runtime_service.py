@@ -397,10 +397,18 @@ class DbusRuntimeServiceWiring:
         sender_uid: int,
         operator_token: str | None = None,
     ) -> None:
-        """Pausa el agente. sender_uid resuelto por el bus (CWE-862).
+        """Pausa el agente (freno de emergencia). sender_uid resuelto por el
+        bus (CWE-862). Engaging requires nothing else — es un freno, un solo
+        clic (la liberación sí exige TOTP, gateada en la capa REST).
 
         operator_token required when sender_uid == proxy_uid (confused-deputy
         remediation). operator_id derived from token, not from proxy uid.
+
+        Best-effort: también solicita cancelar cada turno con actividad EN
+        VIVO (live_activity — tool dispatch en curso) via el mismo registro
+        cooperativo que CancelTask usa por task_id. Un turno esperando
+        generación del LLM sin tool en curso se detiene en su próximo
+        checkpoint (broker Paso 0 / claim del worker), no aquí.
 
         Raises:
             DbusAuthorizationError: UID del sender no está autorizado o token inválido.
@@ -413,6 +421,33 @@ class DbusRuntimeServiceWiring:
             "hermes.dbus.agent_paused",
             extra={"by_uid": sender_uid, "reason": reason},
         )
+        self._cancel_live_turns(reason="freno de emergencia activado")
+
+    @staticmethod
+    def _cancel_live_turns(*, reason: str) -> None:
+        """Solicita cancelación cooperativa de cada task_id con actividad EN
+        VIVO. Best-effort: nunca levanta — un fallo aquí no debe impedir que
+        el freno quede puesto (el estado ya persistió arriba)."""
+        try:
+            from hermes.runtime import live_activity  # noqa: PLC0415
+            from hermes.tasks.domain.task_cancel_registry import (  # noqa: PLC0415
+                get_cancel_registry,
+            )
+            from uuid import UUID as _UUID  # noqa: PLC0415
+
+            registry = get_cancel_registry()
+            for entry in live_activity.snapshot():
+                try:
+                    registry.request_cancel(_UUID(entry["task_id"]), reason=reason)
+                except (ValueError, KeyError):
+                    continue
+        except Exception:  # noqa: BLE001 — best-effort, never blocks the pause itself
+            logger.warning("hermes.dbus.kill_switch_cancel_live_turns_failed", exc_info=True)
+
+    async def get_kill_switch_status(self) -> dict:
+        """Snapshot read-only del freno: {engaged, reason, changed_by,
+        changed_at}. Sin authZ (lectura, igual que get_security_policy)."""
+        return await self._state.status()
 
     async def cancel_task(
         self,

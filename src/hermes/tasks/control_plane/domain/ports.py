@@ -41,6 +41,11 @@ class EnqueueNotAuthorized(ControlPlaneError):
     fail-closed). Queda traza de la negacion."""
 
 
+class EnqueueBlockedByKillSwitch(ControlPlaneError):
+    """El freno de emergencia (AgentStatePort.is_paused()) está activo: no se
+    admiten turnos nuevos hasta que el dueño lo libere (025 Top-KILL)."""
+
+
 class UnknownTask(ControlPlaneError):
     """task_id inexistente."""
 

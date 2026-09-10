@@ -257,6 +257,12 @@ class AgentStatePort(Protocol):
         """Reanuda sin pérdida ni duplicación. Auditada (AGENT_RESUMED)."""
         ...
 
+    async def status(self) -> dict:
+        """Snapshot del freno de emergencia: {engaged, reason, changed_by,
+        changed_at}. Read-only — no authZ, no efectos. changed_by es el UUID
+        (str) del último operador que pausó/reanudó, o None."""
+        ...
+
 
 @runtime_checkable
 class TriggerSourcePort(Protocol):
