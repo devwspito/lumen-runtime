@@ -22,6 +22,8 @@ use tauri::Manager;
 // yet driving the window. `allow(dead_code)` is temporary — it comes off
 // once boot.rs (T011) calls into the full API surface.
 #[allow(dead_code)]
+mod boot;
+#[allow(dead_code)]
 mod domain;
 #[allow(dead_code)]
 mod engine_adapter;
