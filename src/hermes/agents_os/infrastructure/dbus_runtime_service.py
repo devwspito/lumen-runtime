@@ -6548,6 +6548,70 @@ def _grant_cache_group_write(cache_dir: str) -> None:
                 pass
 
 
+_PREFETCH_EXDEV_RETRIES = 10  # 1 initial attempt + 9 retries — cheap: a genuinely
+# different failure (bad coordinate, registry down) is never retried at all (see
+# the signature check below), so this budget only costs time on the EXDEV path.
+# uv word-wraps its pretty-printed error at a fixed column when stderr is a pipe
+# (capture_output=True), so "Invalid cross-device link" can arrive split across a
+# newline ("Invalid\n      cross-device link"). "os error 18" is the raw errno
+# tag uv always emits on the SAME line as "link", immune to that wrapping —
+# match on that instead of the prose around it.
+_PREFETCH_EXDEV_SIGNATURE = "os error 18"
+
+
+def _run_prefetch_subprocess(
+    cmd: list[str], env: dict[str, str], timeout_s: float,
+) -> "_subprocess.CompletedProcess[str]":
+    """Run *cmd* (npm/uv) detached from this process's session, retrying EXDEV.
+
+    Root cause (2026-09-10, verified live in an isolated container, spec 025
+    matriz item #5): `uv tool install` for a NEVER-cached package spawned
+    directly off this daemon's long-lived, multi-threaded asyncio process
+    intermittently dies with "Invalid cross-device link (os error 18)"
+    renaming its OWN download temp file into its OWN cache dir
+    (`uv-cache/.tmp* -> uv-cache/archive-v0/…`) — even though a diagnostic
+    `os.stat()` taken right before the spawn shows cache/archive/TMPDIR on
+    the IDENTICAL st_dev every time (not a real mount-boundary crossing).
+    The exact same command NEVER reproduced it once across dozens of live
+    trials when spawned as its own session/process group (`systemd-run
+    --pipe`, or a plain fork with `start_new_session=True`) instead of
+    inheriting this process's session — some state tied to the daemon's own
+    long-lived asyncio session (not fd inheritance: close_fds is already the
+    default) confuses uv's cache-population rename for a fraction of fresh
+    packages. `systemd-run` itself is NOT reachable from here (the daemon
+    runs unprivileged, User=hermes, and this host's D-Bus policy denies it
+    `org.freedesktop.systemd1.Manager.StartTransientUnit` — verified: "Access
+    denied"; loosening that policy is a security-posture change, out of
+    scope for this fix). `start_new_session=True` needs no new privilege and
+    cleared the large majority of live trials outright; the retry loop below
+    is the backstop for the remainder — only the EXDEV signature is retried,
+    any other failure (bad coordinate, registry down, no wheel) returns on
+    the first attempt, unchanged.
+    """
+    import subprocess as _subprocess  # noqa: PLC0415
+    import time as _time  # noqa: PLC0415
+
+    result = None
+    for attempt in range(1, _PREFETCH_EXDEV_RETRIES + 1):
+        result = _subprocess.run(  # noqa: S603 — cmd is a fixed list, no shell
+            cmd, env=env, capture_output=True, text=True,
+            timeout=timeout_s, check=False,
+            close_fds=True, start_new_session=True,
+        )
+        if result.returncode == 0:
+            return result
+        tail = (result.stderr or "") + (result.stdout or "")
+        if _PREFETCH_EXDEV_SIGNATURE not in tail:
+            return result  # a different failure — don't mask it with retries
+        logger.warning(
+            "hermes.dbus.mcp_prefetch_exdev_retry attempt=%s/%s cmd=%s",
+            attempt, _PREFETCH_EXDEV_RETRIES, cmd[:2],
+        )
+        if attempt < _PREFETCH_EXDEV_RETRIES:
+            _time.sleep(min(0.2 * attempt, 1.0))  # bounded backoff, cheap either way
+    return result
+
+
 def _prefetch_mcp_package(server_id: str, argv: list[str]) -> None:
     """Download the MCP's package into the shared runner cache in the TRUSTED daemon path.
 
@@ -6636,12 +6700,11 @@ def _prefetch_mcp_package(server_id: str, argv: list[str]) -> None:
             # cross-uid (root) entries that make `npm install` die EACCES. A fresh cache
             # inside the install dir is always writable by this process.
             _pf_env = {**env, "npm_config_cache": str(install_dir / ".npm-cache")}
-            _r = _subprocess.run(  # noqa: S603 — fixed list, no shell
+            _r = _run_prefetch_subprocess(
                 [npm, "install", pkg_spec, "--prefix", str(install_dir),
                  "--ignore-scripts", "--no-audit", "--no-fund", "--no-save",
                  "--loglevel=error"],
-                env=_pf_env, capture_output=True, text=True,
-                timeout=_MCP_PREFETCH_TIMEOUT_S, check=False,
+                _pf_env, _MCP_PREFETCH_TIMEOUT_S,
             )
         except (OSError, _subprocess.TimeoutExpired) as exc:
             _shutil.rmtree(install_dir, ignore_errors=True)
@@ -6685,14 +6748,7 @@ def _prefetch_mcp_package(server_id: str, argv: list[str]) -> None:
         raise RuntimeError(f"ecosistema no soportado para prefetch: {ecosystem!r}")
 
     try:
-        result = _subprocess.run(  # noqa: S603 — cmd is a fixed list, no shell
-            cmd,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=_MCP_PREFETCH_TIMEOUT_S,
-            check=False,
-        )
+        result = _run_prefetch_subprocess(cmd, env, _MCP_PREFETCH_TIMEOUT_S)
     except (OSError, _subprocess.TimeoutExpired) as exc:
         raise RuntimeError(f"prefetch del paquete MCP falló: {exc}") from exc
     if result.returncode != 0:

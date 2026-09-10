@@ -423,6 +423,11 @@ RUN mkdir -p /var/lib/hermes/workspace /var/lib/hermes/browser-sessions && \
 ENV npm_config_cache=/var/lib/hermes/npm-cache
 ENV UV_CACHE_DIR=/var/lib/hermes/uv-cache
 ENV XDG_CACHE_HOME=/var/lib/hermes/xdg-cache
+# Parity with the runtime env (hermes-runtime.service, stdio_mcp_client.py):
+# copy instead of hardlink/rename when uv installs FROM its cache, so the
+# baked warm-up and the runtime path behave identically regardless of the
+# volume layout a given deploy ends up with.
+ENV UV_LINK_MODE=copy
 # Warm BOTH runner caches with the EXACT seed specs (ops/.../seed/mcp-servers.json) so the
 # curated MCPs connect OFFLINE on a fresh boot (the cage denies npm/uv at runtime). Today
 # mcp-servers.json only lists uvx MCPs (Excel / Word / PowerPoint, locales sin clave); the
