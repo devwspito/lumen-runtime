@@ -24,6 +24,7 @@ from hermes.security.landlock_loader import (
     LandlockOutcome,
     _access_mask_for_rules,
     _detect_abi,
+    _max_access_fs_mask,
     apply_runtime_landlock,
     load_and_apply,
     main,
@@ -93,6 +94,44 @@ class TestAccessMaskForRules:
         )
         assert mask & (1 << 2)
         assert mask & (1 << 1)
+
+
+class TestMaxAccessFsMaskBeyondTheKnownAbiTable:
+    """MCP-04 root cause (spec 025 matriz, live-verified on a kernel reporting
+    abi=7 / Fedora 41): `_ABI_MAX_ACCESS_FS` only has exact entries for ABI
+    1-3. Every call site used to do `.get(abi_version, _ABI_MAX_ACCESS_FS[1])`
+    — an ABI this table has no key for (ANY current kernel) silently fell
+    through to the .get() DEFAULT, i.e. ABI 1's mask, stripping `refer`
+    (bit 13) and `truncate` (bit 14) out of EVERY ruleset regardless of what
+    a PathRule requested. Without `refer`, the kernel denies any rename()/
+    link() whose destination has a different parent directory than the
+    source with EXDEV (errno 18) — exactly `uv`'s cache-population rename
+    (`uv-cache/.tmpXXXX` -> `uv-cache/archive-v0/<hash>`) that MCP-04
+    reproduced end to end via the real API."""
+
+    def test_refer_survives_on_an_abi_beyond_the_table(self) -> None:
+        mask = _access_mask_for_rules([frozenset({"refer"})], abi_version=7)
+        assert mask & (1 << 13), "refer must not be silently stripped on abi=7"
+
+    def test_truncate_survives_on_an_abi_beyond_the_table(self) -> None:
+        mask = _access_mask_for_rules([frozenset({"truncate"})], abi_version=7)
+        assert mask & (1 << 14), "truncate must not be silently stripped on abi=7"
+
+    @pytest.mark.parametrize("abi_version", [3, 4, 5, 6, 7, 42, 100])
+    def test_mask_never_regresses_below_abi3_for_any_higher_or_unknown_abi(
+        self, abi_version: int
+    ) -> None:
+        """Landlock ABI versions are cumulative (each new ABI is a strict
+        superset of FS rights over the previous one) — an ABI this loader
+        has no name for yet must still grant at least everything ABI 3
+        does, never fall back to ABI 1's narrower mask."""
+        assert _max_access_fs_mask(abi_version) == _max_access_fs_mask(3)
+
+    def test_abi_1_and_2_are_unaffected_still_narrower(self) -> None:
+        """The fix must not WIDEN grants on genuinely older kernels — only
+        stop guessing wrong on newer ones."""
+        assert _max_access_fs_mask(1) < _max_access_fs_mask(3)
+        assert _max_access_fs_mask(2) < _max_access_fs_mask(3)
 
 
 class TestLoadAndApplyInvalidCapability:

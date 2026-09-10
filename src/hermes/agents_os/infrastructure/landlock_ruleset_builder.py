@@ -117,6 +117,19 @@ _RUNTIME_RW: frozenset[AccessRight] = _RUNTIME_RX | frozenset({
     AccessRight.WRITE_FILE, AccessRight.MAKE_REG, AccessRight.MAKE_DIR,
     AccessRight.MAKE_SOCK, AccessRight.MAKE_FIFO, AccessRight.MAKE_SYM,
     AccessRight.REMOVE_FILE, AccessRight.REMOVE_DIR, AccessRight.TRUNCATE,
+    # MCP-04 root cause (live-verified, spec 025 matriz): without REFER, the
+    # kernel denies EVERY rename()/link() whose destination has a DIFFERENT
+    # parent directory than the source — even two directories on the exact
+    # same filesystem, covered by this exact same rule — with EXDEV (errno
+    # 18, "Invalid cross-device link"). `uv`'s cache-population rename
+    # (`uv-cache/.tmpXXXX` -> `uv-cache/archive-v0/<hash>`) is exactly that
+    # shape, and it is NOT the only one: any tool the daemon spawns that
+    # writes-then-renames within /var/lib/hermes hits the same wall. This
+    # ALSO requires landlock_loader._max_access_fs_mask to actually pass
+    # REFER through for the kernel's real ABI (a separate bug: the old
+    # ABI-mask table silently capped every ruleset at ABI-1's rights on any
+    # kernel it didn't have an exact entry for — see that module).
+    AccessRight.REFER,
 })
 
 _CAPABILITY_PATHS: dict[Capability, tuple[tuple[str, frozenset[AccessRight]], ...]] = {

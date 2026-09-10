@@ -47,6 +47,35 @@ class TestBuild:
         assert spec.rules[0].path == "/home/alice/Documents"
 
 
+class TestRuntimeCapabilityGrantsRefer:
+    """MCP-04 root cause (spec 025 matriz, live-verified): without
+    AccessRight.REFER on /var/lib/hermes, the kernel denies EVERY rename()/
+    link() whose destination has a DIFFERENT parent directory than the
+    source — even two directories on the same filesystem, covered by this
+    exact same rule — with EXDEV (errno 18). `uv`'s cache-population rename
+    (`uv-cache/.tmpXXXX` -> `uv-cache/archive-v0/<hash>`) is exactly that
+    shape; every uncached Python MCP install hit it. (The OTHER half of the
+    fix — the ABI-mask table that was silently stripping `refer` back out
+    on any kernel newer than ABI 3 — is pinned in
+    test_landlock_loader.py::TestMaxAccessFsMaskBeyondTheKnownAbiTable.)"""
+
+    def test_var_lib_hermes_rule_grants_refer(self) -> None:
+        spec = LandlockRulesetBuilder().build(Capability.RUNTIME)
+        rule = next(r for r in spec.rules if r.path == "/var/lib/hermes")
+        assert AccessRight.REFER in rule.accesses
+
+    def test_refer_is_in_the_ruleset_handled_mask(self) -> None:
+        spec = LandlockRulesetBuilder().build(Capability.RUNTIME)
+        assert AccessRight.REFER in spec.handled_access_fs
+
+    def test_the_broad_read_only_var_rule_does_not_need_refer(self) -> None:
+        """REFER only matters for a rule that can already create/remove —
+        the read-only `/var` rule is unaffected and must stay read-only."""
+        spec = LandlockRulesetBuilder().build(Capability.RUNTIME)
+        rule = next(r for r in spec.rules if r.path == "/var")
+        assert AccessRight.WRITE_FILE not in rule.accesses
+
+
 class TestAggregated:
     def test_multiple_caps_sorted(self) -> None:
         specs = LandlockRulesetBuilder().build_aggregated(

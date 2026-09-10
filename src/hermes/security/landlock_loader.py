@@ -96,9 +96,41 @@ _ACCESS_FS_MAP = {
 # Access rights introduced per ABI version (cumulative max bitmask).
 _ABI_MAX_ACCESS_FS: dict[int, int] = {
     1: (1 << 13) - 1,              # bits 0–12  (no refer/truncate)
-    2: (1 << 14) - 1,              # bits 0–13
-    3: (1 << 15) - 1,              # bits 0–14
+    2: (1 << 14) - 1,              # bits 0–13  (+refer)
+    3: (1 << 15) - 1,              # bits 0–14  (+truncate)
 }
+# Highest ABI this table has an EXACT entry for. Landlock ABI versions are
+# cumulative — each newer ABI is a strict superset of the previous one's FS
+# rights (ABI 4+ only adds NON-fs rules: network bind/connect, IOCTL_DEV — see
+# the module docstring's own ABI table) — so a kernel reporting an ABI beyond
+# this MUST still get at least everything ABI 3 grants, never silently fall
+# back to ABI 1's mask.
+_ABI_MAX_KNOWN = max(_ABI_MAX_ACCESS_FS)
+
+
+def _max_access_fs_mask(abi_version: int) -> int:
+    """The FS access-rights bitmask available at *abi_version*.
+
+    MCP-04 root cause (spec 025 matriz, live-verified): every call site used
+    to do `_ABI_MAX_ACCESS_FS.get(abi_version, _ABI_MAX_ACCESS_FS[1])` — a
+    kernel reporting an ABI this table has no exact key for (ANY modern
+    kernel: Fedora 41 here reports abi=7) silently fell through to the
+    `.get()` DEFAULT, which is ABI 1's mask (bits 0–12) — REFER (bit 13) and
+    TRUNCATE (bit 14) were being masked out of every Landlock ruleset on
+    every kernel newer than the ABI-3 (6.0) days this table was last updated
+    for, REGARDLESS of what a PathRule actually requested. Without REFER, the
+    kernel denies EVERY rename/link that moves a path to a DIFFERENT parent
+    directory — even two directories covered by the exact same rule, even on
+    the exact same filesystem — with `EXDEV` (errno 18), which is exactly
+    the "Invalid cross-device link" `uv`'s cache-population rename died with
+    (`uv-cache/.tmpXXXX` -> `uv-cache/archive-v0/<hash>`, two DIFFERENT
+    parent directories under one Landlocked, single-device tree). Capping at
+    ABI 3's mask for any version ≥ 3 (instead of guessing at bits this
+    module has no name for) fixes it for real.
+    """
+    if abi_version >= _ABI_MAX_KNOWN:
+        return _ABI_MAX_ACCESS_FS[_ABI_MAX_KNOWN]
+    return _ABI_MAX_ACCESS_FS.get(abi_version, _ABI_MAX_ACCESS_FS[1])
 
 PR_SET_NO_NEW_PRIVS: int = 38
 
@@ -202,7 +234,7 @@ def _access_mask_for_rules(
 
     Las access rights que exceden el ABI se descartan (degrade silencioso).
     """
-    max_mask = _ABI_MAX_ACCESS_FS.get(abi_version, _ABI_MAX_ACCESS_FS[1])
+    max_mask = _max_access_fs_mask(abi_version)
     mask = 0
     for accesses in rules_accesses:
         for right in accesses:
@@ -284,7 +316,7 @@ def _add_path_rules(
     handled_mask: int,
     abi_version: int,
 ) -> None:
-    max_mask = _ABI_MAX_ACCESS_FS.get(abi_version, _ABI_MAX_ACCESS_FS[1])
+    max_mask = _max_access_fs_mask(abi_version)
 
     for rule in rules:
         path = str(getattr(rule, "path", ""))
