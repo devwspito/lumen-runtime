@@ -175,7 +175,21 @@ impl EngineDriver for EmbeddedCliDriver {
         notifier: &dyn Notifier,
         cancel: &CancelSignal,
     ) -> Result<ApplyOutcome, EngineError> {
-        let (verb, args) = cli_invocation_for(action)?;
+        let (verb, mut args) = cli_invocation_for(action)?;
+        // `up` always provisions the companion SCAFFOLD unconditionally
+        // (T015: "el andamiaje existe siempre") unless told not to — but
+        // when THIS boot's own DesiredState wants no companion at all
+        // (companion_image: None, e.g. every selftest / --no-companion
+        // caller), that provisioning attempt is pure unwanted work: real
+        // network fetches + cert/network setup with zero progress events
+        // for the whole `container` stage's duration, verified live to
+        // exceed this adapter's own 15s stall timeout (packaging review
+        // item 4, verificacion-paquete-linux.md §6). `--no-companion` is
+        // now recognized from ANY position in argv (safent's own filter
+        // loop, same fix) — this is the only place a Rust caller can ask.
+        if verb == "up" && self.config.companion_image.is_none() {
+            args.push("--no-companion".to_string());
+        }
         let want_secret = verb == "up";
         let mut failure: Option<FailureCause> = None;
         let mut ready = false;

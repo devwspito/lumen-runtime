@@ -225,6 +225,37 @@ def _make_bundle(tmp_path: Path, entries: list[tuple[str, bytes, str]], podman_v
     return engine_dir
 
 
+class TestDataVolumeDerivesFromName:
+    """Regression test (packaging review item 4,
+    verificacion-paquete-linux.md §6): DATA_VOLUME was hardcoded to
+    "safent-data" regardless of SAFENT_NAME (unlike
+    ops/container/run-safent.sh's own VOLUME="${NAME}-data") — a second
+    instance with its own SAFENT_NAME silently mounted the FIRST instance's
+    volume if one already existed under that fixed name."""
+
+    def test_a_custom_name_gets_its_own_derived_volume(self, tmp_path: Path, fake_bin_dir: Path) -> None:
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log)
+        env["SAFENT_NAME"] = "custom-instance"
+        del env["SAFENT_DATA_VOLUME"]  # do not let the fixture's own default mask this
+        result = _run_safent("facts", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        calls = _podman_calls(podman_log)
+        assert any(c == "volume exists custom-instance-data" for c in calls), calls
+        assert not any("safent-data" in c for c in calls), calls
+
+    def test_default_name_keeps_the_original_default_volume_unchanged(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log)
+        del env["SAFENT_DATA_VOLUME"]
+        env.pop("SAFENT_NAME", None)
+        result = _run_safent("facts", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        assert any(c == "volume exists safent-data" for c in _podman_calls(podman_log))
+
+
 class TestFactsIsPureObservation:
     def test_bare_facts_emits_one_line_of_parseable_json(self, tmp_path: Path, fake_bin_dir: Path) -> None:
         podman_log = tmp_path / "podman.log"

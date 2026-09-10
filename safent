@@ -31,8 +31,15 @@ PORT_PIN="${SAFENT_PORT:-}"
 # the tenant's cloud instead of the default https://cloud.safent.run.
 CLOUD_ENDPOINT="${SAFENT_CLOUD_ENDPOINT:-}"
 # Named volume that holds the persistent state (config, identity, skills, memory).
-# Override SAFENT_DATA_VOLUME to run more than one isolated instance on one host.
-DATA_VOLUME="${SAFENT_DATA_VOLUME:-safent-data}"
+# Derived from NAME (matches ops/container/run-safent.sh:110's own
+# VOLUME="${NAME}-data") so a second instance with its own SAFENT_NAME gets
+# its own volume automatically — the old hardcoded "safent-data" default
+# meant ANY differently-named instance silently mounted the FIRST instance's
+# volume (verificacion-paquete-linux.md §6: reproduced live, an unrelated
+# volume already existed under that exact name on a real host). Override
+# SAFENT_DATA_VOLUME directly for the rare case a name-derived default isn't
+# wanted.
+DATA_VOLUME="${SAFENT_DATA_VOLUME:-${NAME}-data}"
 # Graceful stop (item #2, spec 025 matriz): PID1 is systemd, which needs
 # SIGRTMIN+3 (not SIGTERM) to begin an orderly shutdown of every unit —
 # STOPSIGNAL SIGRTMIN+3 is baked into the image, but pinning it here too
@@ -86,9 +93,12 @@ COMPANION_HOST="ads.safent.internal"
 COMPANION_PORT="8443"
 COMPANION_IP="10.201.0.10"
 COMPANION_COMPOSE="$COMPANION_BIN_DIR/compose.yaml"
-case "${1:-}" in
-  --no-companion) NO_COMPANION=1; shift ;;
-esac
+# --no-companion itself is recognized from ANY position, not only $1 — see
+# the --porcelain filter loop below, which now also catches this flag.
+# (Previously position-locked to $1 only: the Tauri adapter always invokes
+# `<cli_path> <verb> [args] --porcelain`, verb first, so it had no way to
+# request --no-companion at all — packaging review item 4/
+# verificacion-paquete-linux.md §6.)
 
 # GUI-launched contexts hand this script a MINIMAL PATH: a launchd LaunchAgent (the
 # `safent agent` update watcher) and a Finder-launched .app both run with roughly
@@ -1857,14 +1867,18 @@ safent - control your local Safent
 EOF
 }
 
-# Filter --porcelain out of argv from ANY position (app-engine.md §1: it
-# trails the verb, e.g. `up --porcelain`) before the dispatch below reads
-# positional args. Safe to mutate "$@" mid-loop: `for x in "$@"` expands the
-# list once, up front. Never affects --no-companion, already shifted off above.
+# Filter --porcelain AND --no-companion out of argv from ANY position
+# (app-engine.md §1: --porcelain trails the verb, e.g. `up --porcelain`;
+# --no-companion has the SAME need — the Tauri adapter always invokes
+# `<cli_path> <verb> [args] --porcelain`, verb first, so a position-locked
+# "$1 only" check could never be requested by it at all) before the
+# dispatch below reads positional args. Safe to mutate "$@" mid-loop:
+# `for x in "$@"` expands the list once, up front.
 _rest_n=0
 for _a in "$@"; do
   case "$_a" in
     --porcelain) PORCELAIN=1 ;;
+    --no-companion) NO_COMPANION=1 ;;
     *)
       if [ "$_rest_n" -eq 0 ]; then set -- "$_a"; else set -- "$@" "$_a"; fi
       _rest_n=$((_rest_n + 1))

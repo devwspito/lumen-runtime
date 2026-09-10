@@ -284,6 +284,73 @@ sleep 5
     );
 }
 
+/// Regression test (packaging review item 4, verificacion-paquete-linux.md
+/// §6): `up` never passed --no-companion, so `_provision_companion`
+/// attempted real network fetches + cert/network setup on EVERY bootstrap,
+/// even when this boot's own DesiredState wants no companion at all
+/// (companion_image: None, e.g. every selftest) — verified live to exceed
+/// the adapter's own 15s stall timeout.
+#[test]
+fn up_passes_no_companion_when_no_companion_image_is_desired() {
+    let script = fake_cli(
+        r#"
+if [ "$1" = "up" ]; then
+  shift
+  found=0
+  for a in "$@"; do [ "$a" = "--no-companion" ] && found=1; done
+  [ "$found" -eq 1 ] || { echo "missing --no-companion in: $*" >&2; exit 1; }
+  echo '{"t":"stage","id":"container","label":"Arrancando"}'
+  echo '{"t":"done","id":"container","ms":1}'
+  echo '{"t":"ready","endpoint_ref":"stdout-secret"}'
+  echo "http://127.0.0.1:1/?k=x" >&3
+  exit 0
+fi
+exit 1
+"#,
+    );
+    let driver = EmbeddedCliDriver::new(config(script)); // companion_image: None
+    let notifier = RecordingNotifier::new();
+    driver
+        .apply(
+            &RepairAction::CreateContainer,
+            &notifier,
+            &ports::CancelSignal::new(),
+        )
+        .expect("apply should succeed — the fake exits 1 if --no-companion is missing");
+}
+
+/// The inverse: once a companion IS desired (image set), `up` must NOT
+/// suppress its own scaffold provisioning.
+#[test]
+fn up_does_not_pass_no_companion_when_a_companion_image_is_desired() {
+    let script = fake_cli(
+        r#"
+if [ "$1" = "up" ]; then
+  shift
+  for a in "$@"; do [ "$a" = "--no-companion" ] && { echo "unexpected --no-companion in: $*" >&2; exit 1; }; done
+  echo '{"t":"stage","id":"container","label":"Arrancando"}'
+  echo '{"t":"done","id":"container","ms":1}'
+  echo '{"t":"ready","endpoint_ref":"stdout-secret"}'
+  echo "http://127.0.0.1:1/?k=x" >&3
+  exit 0
+fi
+exit 1
+"#,
+    );
+    let mut cfg = config(script);
+    cfg.companion_image =
+        Some(ImageRef::new("ghcr.io/devwspito/safent-ads", "sha256:companion-good").unwrap());
+    let driver = EmbeddedCliDriver::new(cfg);
+    let notifier = RecordingNotifier::new();
+    driver
+        .apply(
+            &RepairAction::CreateContainer,
+            &notifier,
+            &ports::CancelSignal::new(),
+        )
+        .expect("apply should succeed — the fake exits 1 if --no-companion IS present");
+}
+
 #[test]
 fn up_delivers_the_bootstrap_ticket_over_the_secret_fd_never_on_stdout() {
     let script = fake_cli(
