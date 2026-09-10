@@ -132,6 +132,16 @@ class TestFirstRunWritesExpectedFiles:
         state_dir, _ = provisioned_state
         assert _mode(state_dir / "bearer") == 0o400
 
+    def test_leaf_key_is_readable_by_the_container_uid(
+        self, provisioned_state: tuple[Path, subprocess.CompletedProcess[str]]
+    ) -> None:
+        # ads-api (uid 10001) monta tls/ de solo lectura: a 0600 del host no
+        # podia leer la clave y entraba en bucle de arranque (T214). El
+        # directorio de estado (0700) es lo que la protege de otros usuarios.
+        state_dir, _ = provisioned_state
+        assert _mode(state_dir / "tls" / "leaf.key") == 0o644
+        assert _mode(state_dir) == 0o700
+
     def test_api_env_is_0600_and_mcp_token_equals_the_bearer(
         self, provisioned_state: tuple[Path, subprocess.CompletedProcess[str]]
     ) -> None:
