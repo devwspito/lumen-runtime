@@ -299,8 +299,14 @@ export function setActiveProvider(providerId: string): Promise<unknown> {
   return request<unknown>(`/providers/${encodeURIComponent(providerId)}/activate`, { method: 'POST' })
 }
 
-export function testProvider(providerId: string): Promise<{ ok?: boolean }> {
-  return request<{ ok?: boolean }>(
+/** `code` (PROV-03, specs/025-safent-repaso): honest classification of a
+ *  non-ok result — "invalid_key" (endpoint reachable, credential rejected),
+ *  "endpoint_error" (wrong base_url/path, e.g. a 404), or undefined for an
+ *  unclassified provider error (still surfaced via `error`). */
+export function testProvider(
+  providerId: string,
+): Promise<{ ok?: boolean; error?: string | null; code?: 'invalid_key' | 'endpoint_error' | null }> {
+  return request<{ ok?: boolean; error?: string | null; code?: 'invalid_key' | 'endpoint_error' | null }>(
     `/providers/${encodeURIComponent(providerId)}/test`,
     { method: 'POST', timeoutMs: 60_000 },
   )
@@ -1047,6 +1053,7 @@ export interface SystemUpdateStatus {
   latest_version: string | null
   update_available: boolean
   updating: boolean
+  available?: boolean
   current?: VersionSet
   to?: VersionSet
   pieces?: UpdatePiece[]

@@ -1131,15 +1131,15 @@ class DbusRuntimeServiceWiring:
         if not model:
             return {"ok": False, "error": f"{provider_id} no tiene modelo configurado"}
         try:
-            ok, err = await _nous_validate_model_string(f"{provider_id}/{model}", key, base_url)
+            ok, err, code = await _nous_validate_model_string(f"{provider_id}/{model}", key, base_url)
         except Exception as exc:  # noqa: BLE001
-            ok, err = False, f"{type(exc).__name__}: {str(exc)[:300]}"
-        return {"ok": ok, "error": err}
+            ok, err, code = False, f"{type(exc).__name__}: {str(exc)[:300]}", None
+        return {"ok": ok, "error": err, "code": code}
 
     async def test_provider(self, *, provider_id: str, sender_uid: int) -> dict:
         """Valida el provider a través del runtime REAL (Nous), no de un dialecto
         paralelo: resuelve el ModelConfig como el daemon + una completion mínima
-        por hermes-agent. {ok, error}. Mantiene 'idioma de Hermes'.
+        por hermes-agent. {ok, error, code}. Mantiene 'idioma de Hermes'.
 
         provider_id UUID → fila del repo SQL (comportamiento original).
         provider_id no-UUID → id del catálogo nativo (p.ej. "anthropic",
@@ -1149,6 +1149,16 @@ class DbusRuntimeServiceWiring:
         "error":"daemon_unavailable"}, aunque la clave fuese válida (nunca
         activaba). Mismo bug/mismo arreglo que set_active_provider — ver
         specs/025-safent-repaso PROV-03.
+
+        `code` (PROV-03, matriz-final-39eeb8e — "cambia la causa, no el
+        síntoma"): la sonda de anthropic salía a `POST
+        api.anthropic.com/chat/completions` (forma OpenAI) → 404 SIEMPRE, con
+        clave válida o no, porque Anthropic nunca ha servido esa ruta (la
+        suya es `/v1/messages`). Clasifica honestamente en vez de un `{ok:
+        false}` plano: None en éxito, "invalid_key" si el endpoint respondió
+        pero rechazó la credencial (401/403), "endpoint_error" si la ruta no
+        existe (404 — base_url mal configurada), None para cualquier otro
+        fallo (se conserva el mensaje real del proveedor en `error`).
         """
         self._authorize_and_resolve(sender_uid, operation="test_provider")
         from uuid import UUID as _UUID  # noqa: PLC0415
@@ -1161,9 +1171,9 @@ class DbusRuntimeServiceWiring:
         provider = self._provider_repo.get(provider_id=pid)
         api_key = self._provider_repo.reveal_api_key(provider_id=pid)
         try:
-            ok, err = await _nous_validate_provider(provider, api_key)
+            ok, err, code = await _nous_validate_provider(provider, api_key)
         except Exception as exc:  # noqa: BLE001
-            ok, err = False, f"{type(exc).__name__}: {str(exc)[:300]}"
+            ok, err, code = False, f"{type(exc).__name__}: {str(exc)[:300]}", None
         from hermes.shell_server.providers.domain import ProviderConnectivity  # noqa: PLC0415
         from datetime import datetime, timezone  # noqa: PLC0415
 
@@ -1172,7 +1182,7 @@ class DbusRuntimeServiceWiring:
         )
         provider.last_checked_at = datetime.now(tz=timezone.utc)
         self._provider_repo.update(provider=provider)
-        return {"ok": ok, "error": err}
+        return {"ok": ok, "error": err, "code": code}
 
     # ------------------------------------------------------------------
     # Egress (config-sync path) — soberanía daemon-side.
@@ -5765,7 +5775,7 @@ class DbusRuntimeServiceWiring:
         return json.dumps({"auto_mode": load_auto_mode()})
 
 
-async def _nous_validate_provider(provider: Any, api_key: str | None) -> "tuple[bool, str | None]":
+async def _nous_validate_provider(provider: Any, api_key: str | None) -> "tuple[bool, str | None, str | None]":
     """Valida un provider SQL (shell_server.providers.domain.Provider) EJECUTANDO
     el runtime real (hermes-agent) en el daemon. Ver _nous_validate_model_string
     para el camino compartido con el catálogo NATIVO (test_provider, id no-UUID).
@@ -5776,13 +5786,75 @@ async def _nous_validate_provider(provider: Any, api_key: str | None) -> "tuple[
     return await _nous_validate_model_string(model, api_key, provider.base_url)
 
 
+def _classify_probe_http_status(status: int | None) -> str | None:
+    """Maps an HTTP status from a provider reachability+auth probe to
+    test_provider's `code` (specs/025-safent-repaso PROV-03, matriz-final-
+    39eeb8e): "invalid_key" for a REACHABLE endpoint that rejected the
+    credential, "endpoint_error" for a 404 (wrong base_url/path — the exact
+    shape of the anthropic bug: routing through the OpenAI Chat Completions
+    client always 404s against api.anthropic.com, valid key or not). None
+    for anything else — the caller keeps the raw provider error message.
+    """
+    if status in (401, 403):
+        return "invalid_key"
+    if status == 404:
+        return "endpoint_error"
+    return None
+
+
+_ANTHROPIC_MESSAGES_PATH = "/v1/messages"
+_ANTHROPIC_DEFAULT_BASE_URL = "https://api.anthropic.com"
+_ANTHROPIC_API_VERSION = "2023-06-01"
+
+
+async def _probe_anthropic_messages_api(
+    *, bare_model: str, api_key: str | None, base_url: str | None
+) -> "tuple[bool, str | None, str | None]":
+    """Honest reachability+auth probe against Anthropic's REAL wire format —
+    the Messages API (`x-api-key` + `anthropic-version`, POST /v1/messages) —
+    instead of the OpenAI Chat Completions shape `_nous_validate_model_string`
+    sends every other provider. `api.anthropic.com` has never implemented
+    `/chat/completions`; routing anthropic through the OpenAI-shaped client
+    404s unconditionally, valid key or not, so the Anthropic card never
+    auto-activated (PROV-03, specs/025-safent-repaso matriz-final-39eeb8e).
+
+    Returns (ok, error, code) — same contract as _nous_validate_model_string.
+    """
+    import aiohttp  # noqa: PLC0415
+
+    url = f"{(base_url or _ANTHROPIC_DEFAULT_BASE_URL).rstrip('/')}{_ANTHROPIC_MESSAGES_PATH}"
+    headers = {
+        "x-api-key": api_key or "",
+        "anthropic-version": _ANTHROPIC_API_VERSION,
+        "content-type": "application/json",
+    }
+    body = {
+        "model": bare_model,
+        "max_tokens": 1,
+        "messages": [{"role": "user", "content": "OK"}],
+    }
+    try:
+        async with aiohttp.ClientSession() as session, session.post(
+            url, headers=headers, json=body, timeout=aiohttp.ClientTimeout(total=20.0)
+        ) as resp:
+            status = resp.status
+            text = (await resp.text())[:300]
+    except Exception as exc:  # noqa: BLE001 — surface the REAL network error
+        raw = str(exc).strip()
+        return False, (raw[:300] if raw else type(exc).__name__), None
+
+    if status == 200:
+        return True, None, None
+    return False, (text or f"HTTP {status}"), _classify_probe_http_status(status)
+
+
 async def _nous_validate_model_string(
     model: str, api_key: str | None, base_url: str | None
-) -> "tuple[bool, str | None]":
+) -> "tuple[bool, str | None, str | None]":
     """Valida un `<provider_id>/<model>' EJECUTANDO el runtime real (hermes-agent)
     en el daemon — mismo camino que el chat: resolve_runtime_provider (idioma de
     Hermes) + una completion mínima sin tools. NO litellm, NO shell-server. Corre
-    en el daemon (6G, sin OOM). Devuelve (ok, error_real_del_proveedor).
+    en el daemon (6G, sin OOM). Devuelve (ok, error_real_del_proveedor, code).
 
     Migrado (spec 016): usa el catálogo unificado vía nous_request_from_model_config
     en lugar del antiguo _HERMES_SLUG_BY_PREFIX (que tenía 'openai'→'openai-api',
@@ -5793,7 +5865,18 @@ async def _nous_validate_model_string(
     sin construir un Provider SQL falso — ambos caminos ya producían el MISMO
     '<provider_id>/<model>' vía litellm_model_string, así que el string es la
     única entrada real que este helper necesita.
+
+    anthropic (`model` con prefijo "anthropic/", el MISMO que litellm_model_string
+    produce tanto para el catálogo nativo como para una fila SQL kind=anthropic)
+    se enruta a _probe_anthropic_messages_api en vez del cliente OpenAI de abajo
+    — ver esa función para la causa raíz (PROV-03, matriz-final-39eeb8e).
     """
+    provider_prefix, _sep, bare_model = model.partition("/")
+    if provider_prefix == "anthropic":
+        return await _probe_anthropic_messages_api(
+            bare_model=bare_model, api_key=api_key, base_url=base_url
+        )
+
     import asyncio  # noqa: PLC0415
 
     from hermes.runtime.model_config import ModelConfig  # noqa: PLC0415
@@ -5851,8 +5934,9 @@ async def _nous_validate_model_string(
         ok, err = await loop.run_in_executor(None, _run)
     except Exception as exc:  # noqa: BLE001 — surface the REAL provider error
         raw = str(exc).strip()
-        return False, (raw[:300] if raw else type(exc).__name__)
-    return ok, err
+        code = _classify_probe_http_status(getattr(exc, "status_code", None))
+        return False, (raw[:300] if raw else type(exc).__name__), code
+    return ok, err, None
 
 
 def _uid_to_uuid(uid: int) -> UUID:

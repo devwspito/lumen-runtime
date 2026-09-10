@@ -506,7 +506,11 @@ export function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConf
     setTesting(true)
     try {
       const r = await testProvider(id)
-      onToast(r?.ok ? t('providers.test.ok') : t('providers.test.fail'), r?.ok ? 'ok' : 'warn')
+      // PROV-03: r.error is the provider's own honest reason (invalid key,
+      // wrong endpoint...) once ok is false — show it instead of a generic
+      // "failed" toast so the owner knows whether to fix the key or the URL.
+      const message = r?.ok ? t('providers.test.ok') : (r?.error || t('providers.test.fail'))
+      onToast(message, r?.ok ? 'ok' : 'warn')
     } catch (e) {
       onToast(e instanceof Error ? e.message : t('providers.err.generic'), 'error')
     } finally { setTesting(false) }

@@ -36,7 +36,7 @@ _SAFENT_CLI = _REPO_ROOT / "safent"
 
 _SECRET_TOKEN = "s3cr3t-token-do-not-leak"  # noqa: S105 - test fixture, not a real credential
 
-_KNOWN_EVENT_TYPES = {"stage", "progress", "done", "failed", "facts", "ready"}
+_KNOWN_EVENT_TYPES = {"stage", "progress", "done", "failed", "facts", "ready", "status", "url"}
 
 _FAKE_PODMAN = """#!/usr/bin/env bash
 set -e
@@ -558,6 +558,91 @@ class TestUpDeliversTheTicketOnlyOnTheSecretFd:
         assert events[-1]["code"] == "daemon_unhealthy"
         assert _SECRET_TOKEN not in result.stdout
         assert _SECRET_TOKEN not in result.stderr
+
+
+class TestStatusHonoursPorcelain:
+    """CLI-N2 (specs/025-safent-repaso matriz-final-39eeb8e): `cmd_status`
+    (safent:788-796 at the time of the finding) `echo`d human text
+    unconditionally, even under --porcelain — the only channel invariant
+    app-engine.md §2 states ("stdout — exclusivamente NDJSON... Nada más se
+    escribe aquí"). Not in the closed verb table of §4 either, so this pins
+    the CLI's own general porcelain contract, not a wrapper dependency."""
+
+    def test_non_porcelain_running_is_unchanged_human_text_on_stdout(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log)
+        result = _run_safent("status", env=env)
+        assert result.returncode == 0
+        assert result.stdout.strip() == "[ok] Safent running at  http://localhost:17517/   (open with: safent)"
+        assert result.stderr == ""
+
+    def test_porcelain_running_emits_ndjson_status_event_only(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log)
+        result = _run_safent("status", "--porcelain", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        events = _parse_ndjson(result.stdout)
+        assert events == [{"t": "status", "state": "running", "port": 17517}]
+        assert "[ok]" not in result.stdout
+        assert "http://localhost" not in result.stdout
+
+    def test_porcelain_stopped_and_not_installed_states(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        podman_log = tmp_path / "podman.log"
+        stopped_env = _base_env(
+            fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home-stopped", podman_log=podman_log,
+            container_exists=True, container_running=False,
+        )
+        stopped = _run_safent("status", "--porcelain", env=stopped_env)
+        assert stopped.returncode == 0, f"stdout={stopped.stdout}\nstderr={stopped.stderr}"
+        assert _parse_ndjson(stopped.stdout) == [{"t": "status", "state": "stopped"}]
+
+        absent_env = _base_env(
+            fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home-absent", podman_log=podman_log,
+            container_exists=False, container_running=False,
+        )
+        absent = _run_safent("status", "--porcelain", env=absent_env)
+        assert absent.returncode == 0, f"stdout={absent.stdout}\nstderr={absent.stderr}"
+        assert _parse_ndjson(absent.stdout) == [{"t": "status", "state": "not_installed"}]
+
+
+class TestUrlHonoursPorcelain:
+    """CLI-N2: `cmd_url` (safent:379-383 at the time of the finding) printed
+    the bootstrap URL — WITH the `?k=` ticket — to stdout even under
+    --porcelain, against app-engine.md §5 ("Nunca en stdout"). Non-porcelain
+    behaviour (this command's whole purpose: hand the URL to the caller) is
+    unchanged; under --porcelain the same line moves to stderr and stdout
+    gets a secret-free completion marker instead."""
+
+    def test_non_porcelain_prints_the_url_with_ticket_to_stdout_unchanged(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log)
+        result = _run_safent("url", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        assert result.stdout.strip() == f"http://localhost:17517/?k={_SECRET_TOKEN}"
+
+    def test_porcelain_never_leaks_the_ticket_on_stdout(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log)
+        result = _run_safent("url", "--porcelain", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        assert _SECRET_TOKEN not in result.stdout
+        assert "?k=" not in result.stdout
+
+        events = _parse_ndjson(result.stdout)
+        assert events == [{"t": "url", "delivered_via": "stderr"}]
+
+        # The URL still reaches the caller — just no longer via stdout.
+        assert f"http://localhost:17517/?k={_SECRET_TOKEN}" in result.stderr
 
 
 class TestSafentPodmanOverridesPath:
