@@ -20,6 +20,7 @@ from pathlib import Path
 
 from hermes.capabilities.tool_delicacy import CAGED_NATIVE_TOOLS, default_enabled_equilibrado
 from hermes.runtime.nous_tool_risk_map import NOUS_TOOL_CATALOG
+from hermes.tailnet_ssh.tool_names import TAILNET_SSH_TOOL_NAMES
 
 _DEFAULT_PATH = Path(os.environ.get("HERMES_POLICY_DIR", "/var/lib/hermes/policies")) / "tool_policy.json"
 
@@ -35,7 +36,14 @@ _CAPABILITY_TOOLS: frozenset[str] = frozenset({
 
 # Full catalog the Policies UI lists. CAGED_NATIVE_TOOLS comes from the single source
 # (tool_delicacy) — no hand-listed duplicate of the cage set (de-dup audit 2026-06-19).
-TOOL_CATALOG: frozenset[str] = NOUS_TOOL_CATALOG | _CAPABILITY_TOOLS | CAGED_NATIVE_TOOLS
+# TAILNET_SSH_TOOL_NAMES (spec 022 v2): gives the owner an explicit disable toggle
+# (Step 1.5 of security_hook._pre_tool_call_hook checks is_owner_disabled for ANY
+# tool_name) — a bundle/agent overlay can only ever NARROW this via `is_enabled`/
+# `is_owner_disabled`, it can never widen past the mandatory per-host HITL card in
+# `security_hook._resolve_tailnet_ssh_consent`, which runs unconditionally.
+TOOL_CATALOG: frozenset[str] = (
+    NOUS_TOOL_CATALOG | _CAPABILITY_TOOLS | CAGED_NATIVE_TOOLS | TAILNET_SSH_TOOL_NAMES
+)
 
 # ---------------------------------------------------------------------------
 # Category mapping: tool name → human-readable capability group.
@@ -155,6 +163,10 @@ _CAPABILITY_CATEGORY_MAP: dict[str, str] = {
     "lo_write_text": "Ficheros y documentos",
     # FASE 3 (A2A cross-human) — pide ayuda al asistente de OTRO humano
     "delegate_to_colleague": "Comunicación",
+    # spec 022 v2 — SSH gobernado sobre el tailnet del dueño
+    "tailnet_ssh": "Tailnet / SSH",
+    "tailnet_file_get": "Tailnet / SSH",
+    "tailnet_file_put": "Tailnet / SSH",
 }
 
 # Caged native exec/file tools category
@@ -215,6 +227,8 @@ def _tool_origin(name: str) -> str:
         return "capability"
     if name in CAGED_NATIVE_TOOLS:
         return "native"
+    if name in TAILNET_SSH_TOOL_NAMES:
+        return "capability"
     return "native"
 
 

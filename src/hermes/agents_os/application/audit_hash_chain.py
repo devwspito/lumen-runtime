@@ -74,6 +74,8 @@ class AuditKind(StrEnum):
     # --- egress proxy decisions (Fix-6 / append-only) ---
     EGRESS_ALLOWED = "egress_allowed"
     EGRESS_DENIED = "egress_denied"
+    # --- spec 022 v2: governed tailnet SSH (append-only) ---
+    TAILNET_SSH_EXECUTED = "tailnet_ssh_executed"
 
 
 class AuditChainCorrupted(RuntimeError):
