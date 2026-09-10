@@ -149,3 +149,77 @@ no se tocó en toda la pasada.
   ejercitar (arranque, 0 unidades failed, Landlock, 401 en toda la API, WebSockets con token,
   freno → 423, persistencia por backup/restore, validación de MCP, egress) sigue verde. Los tres
   hallazgos nuevos (CLI-N4, CLI-N2, A-07) son de superficies que la pasada anterior no cubría.
+
+---
+
+## Re-verificación en d2eb8c6
+
+Ejecutada el **2026-09-10** sobre la misma DGX (`linux/aarch64`, podman rootless 4.9.3, uid 1000)
+contra la imagen **reconstruida** `localhost/safent-runtime:latest`, label
+`org.opencontainers.image.revision=d2eb8c6` (`podman image inspect` → `d2eb8c6 | 24.04`), que
+contiene el merge `repaso-fixes-10` y sus cuatro arreglos: `e602a86` (CLI-N4), `1b6837d` (PROV-03),
+`02334d0` (CLI-N2), `aa575ad` (UPD-N2/A-07).
+
+Instancia **única** `matriz-final-4` (volumen `matriz-final-4-data`, `127.0.0.1:18097`, estado
+propio bajo el scratchpad de la sesión, **nunca** `~/.safent`), lanzada con:
+
+```sh
+SAFENT_NAME=matriz-final-4 SAFENT_STATE=$SCRATCH/state SAFENT_STATE_HOME=$SCRATCH/state \
+SAFENT_COMPANION_STATE=$SCRATCH/state/companions/ads \
+./ops/container/run-safent.sh localhost/safent-runtime:latest 18097 --no-companion
+```
+
+Verbos del anfitrión con `SAFENT_NAME=matriz-final-4 SAFENT_STATE_HOME=$SCRATCH/state
+SAFENT_PORT=18097 SAFENT_DATA_VOLUME=matriz-final-4-data
+SAFENT_IMAGE=localhost/safent-runtime:latest SAFENT_PODMAN=/usr/bin/podman`. Pasada
+**sin tocar código** (`git status --porcelain` vacío salvo este fichero), `--no-companion`,
+**ninguna credencial real** (claves de proveedor y contraseña de dispositivo, obviamente falsas).
+
+### Las 4 filas que fallaban
+
+| id | resultado | cómo (comando exacto) | evidencia |
+|---|---|---|---|
+| **CLI-N4** (rastro auditado) | **PASS — CERRADO** | `POST /api/v1/security/kill-switch {"engaged":true,"reason":"reverif d2eb8c6: freno de prueba"}` → `./safent brake release` desde el anfitrión → `GET /api/v1/audit?limit=20` + `sqlite3 /var/lib/hermes/shell-state.db "select audit_kind,description from audit_chain_entries"` | Las entradas **existen** (antes 0 de 9). `/api/v1/audit` devuelve `agent_paused` · `"Agent paused: reverif d2eb8c6: freno de prueba"` · actor `…0370` y `agent_resumed` · **`"Agent resumed (host_cli)"`** · actor `…03e8`. Los actores codifican el uid: `0x370`=880 (`hermes`, el shell-server) y `0x3e8`=1000 (el anfitrión soberano), así que la procedencia se distingue también por actor. Repetido un segundo ciclo completo: la tabla queda con **2 `agent_paused` + 2 `agent_resumed`, las dos con `(host_cli)`** |
+| **CLI-N4** (cadena íntegra) | **PASS** | dentro de la jaula: `_build_audit_components(Path('/var/lib/hermes/shell-state.db'))` → `repo.load_chain()` → `firmer.verify_chain(entries)` (el verificador que ya existe, `audit_hash_chain.py:216`) | `entradas cargadas: 4` → **`VERIFY_CHAIN: OK — cadena íntegra`** (prev_hash + signed_hash + HMAC de las 4). El `signer` llega de verdad: `runtime/__main__.py:_build_agent_state` inyecta `firmer`/`audit_repo` y `SqliteAgentState.__init__` **falla ruidoso** si faltan, en vez de la puerta de atrás `if self._signer is None: return` |
+| **CLI-N4** (liberar por API sin TOTP) | **PASS (fail-closed)** | con MFA **no** enrolado (`MfaStore().is_enrolled() → False`), tres intentos: `POST /security/kill-switch {"engaged":false}` · `{"engaged":false,"totp":"000000"}` · `{"engaged":false,"device_password":"clave-FALSA-de-prueba-no-real"}` | **403 en los tres**, siempre `{"code":"invalid_device_password","message":"Libera el freno de emergencia con tu contraseña de dispositivo."}`. Es el **fallback documentado** (`security_api.py:307-317`: TOTP si hay enrolado, contraseña de dispositivo por PAM si no). El freno **sigue echado** tras los tres intentos y la cadena **no** gana ningún `agent_resumed` falso (siguen 2). Salida soberana real = `./safent brake release` |
+| **PROV-03** (anthropic) | **PASS** | `POST /api/v1/providers/native {"provider_id":"anthropic","api_key":"sk-ant-FALSA-…","model":"claude-sonnet-4-5"}` → `POST /api/v1/providers/anthropic/test` | **`{"ok":false,"error":"{\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"API key is invalid.\"},\"request_id\":null}","code":"invalid_key"}`** — sobre alcanzable + clave rechazada, **no** `endpoint_error`. El cuerpo es el sobre nativo de la Messages API, imposible de obtener de un 404. Journal: **0 ocurrencias** de `api.anthropic.com/chat/completions` (el bug viejo, desaparecido). Ruta construida verificada ejerciendo `_probe_anthropic_messages_api` contra un sumidero local: `POST /v1/messages` + `x-api-key` + `anthropic-version: 2023-06-01`, y un 401 clasifica `code='invalid_key'`; con `_ANTHROPIC_DEFAULT_BASE_URL` (`dbus_runtime_service.py:5806`) la URL efectiva es `POST https://api.anthropic.com/v1/messages` |
+| **PROV-03** (OpenAI-compatible) | **PASS con matiz** | ídem con `openai-api` (`gpt-5.4-nano`) y con `gemini` (`gemini-2.5-flash`), claves falsas | `openai-api` → **`code:"invalid_key"`** con el error real (`Incorrect API key provided: sk-FALSA************real`), journal `HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 401 Unauthorized"`. `gemini` → error real (`Please pass a valid API key`, `INVALID_ARGUMENT`) y journal `POST https://generativelanguage.googleapis.com/v1beta/chat/completions "HTTP/1.1 400 Bad Request"`, pero **`code:null`**: Google contesta **400** a una clave inválida y `_classify_probe_http_status` sólo mapea 401/403 → `invalid_key`. El texto es honesto; el código legible por máquina, no (ver menores) |
+| **PROV-03** (regla de la UI) | **PASS (lectura)** | lectura de `frontend/src/views/ProvidersView.tsx` | La regla sigue siendo `ok:true` y sólo eso: `ProvidersView.tsx:560-561` `testPassed = r?.ok === true` → `setActiveProvider(realId)` + `toast(connected_verified)`; si no, `setAddConnFailed(true)`, que **no** es callejón sin salida (el botón pasa a `providers.retry_key`). El camino de clave válida existe: el clasificador sólo devuelve `invalid_key` en 401/403, así que un 200 de la Messages API da `ok:true` → auto-activación. Además `handleTest` (`:508-515`) ya enseña `r.error` — el error real del proveedor — en vez del genérico. **Sin clave real disponible, la rama `ok:true` no se ejecutó aquí** |
+| **CLI-N2** | **PASS — CERRADO** | `./safent --porcelain status >out 2>err` y `./safent --porcelain url >out 2>err`, parseando **cada** línea de stdout como JSON | `status`: stdout = **1 línea, JSON válido**, `{"t":"status","state":"running","port":18097}`, stderr vacío, rc=0. `url`: stdout = **1 línea, JSON válido**, `{"t":"url","delivered_via":"stderr"}`; el vale viaja **sólo por stderr** (`http://localhost:18097/?k=69d7e168…`). En stdout de los dos verbos: **0 ocurrencias de `?k=` y 0 de 64-hex**. `app-engine.md §2` («stdout — exclusivamente NDJSON») y `§5` («Nunca en stdout») se cumplen |
+| **UPD-N2** | **PASS** | `GET /api/v1/system/update` con bearer | Respuesta completa: `{"current_version":"0.8.42","latest_version":"0.8.42","update_available":false,"updating":false,"engine_digest":null,"companion_digest":null,"pieces":[],`**`"available":false`**`,`**`"current":{"app":"0.8.42","engine":"d2eb8c6","companion":null}`**`,`**`"to":null`**`,`**`"checked_at":"2026-09-10T21:47:26.096090+00:00"}`. Están los cuatro que faltaban, `current` con forma `VersionSet` y `to:null` por la regla «plan vacío → null» de `contracts/update.md §3`. `current.engine` = **`d2eb8c6`** = el label de la imagen. Los tres viejos se conservan. **`is_newer` no existe como campo** ni en el contrato ni en la ruta: su semántica vive en `available` — así lo nombra la propia UI (`SystemUpdateFooter.tsx:54`: «"is_newer" — a newer version is REALLY confirmed»). Aquí **`available:false`**, fail-closed, coherente con UPD-N1 (sin manifiesto firmado no hay botón) |
+| **A-07** | **PASS — CERRADO** | `curl -o /dev/null -w '%{http_code}' $URL/openapi.json` (y `/docs`, `/redoc`) sin y con bearer | `/openapi.json` → **401 sin bearer**, **200 con bearer** (antes 200 a pelo). `/docs` y `/redoc` → **401 sin bearer** y 404 con él: la puerta cierra *antes* de FastAPI, y detrás no hay nada porque `docs_url`/`redoc_url` siguen desactivados — si alguien los reactiva, ya nacen autenticados. El mapa de la superficie deja de regalarse a quien alcance el puerto |
+
+### Smoke de no-regresión (10 min)
+
+| qué | resultado | evidencia |
+|---|---|---|
+| arranque y salud | **PASS** | `/healthz` **200 al primer sondeo** (+2 s); `systemctl is-system-running` → `running`; **0 unidades failed** al arrancar |
+| handshake `?k=` | **PASS** | `GET /app/?k=$(podman exec matriz-final-4 cat …/webui-bootstrap)` → 200 con `__SAFENT_TOKEN__="a36e5453…"` (64 hex); **sin `?k=`** → `grep -c __SAFENT_TOKEN__` = **0**. Ese bearer autentica `GET /api/v1/agents` → 200 |
+| turno de chat, camino de error | **PASS** | `POST /api/v1/chat {"user_message":"hola, ¿estás ahí?"}` → **200** `{"task_id":…,"stream_path":"/ws/tasks/…"}`; sin proveedor activo el motor falla **honesto y acotado**: `hermes.tasks.loop.engine_error … HermesModelNotConfiguredError`, `task_failed` y `hermes.notifications.add kind=chat status=error` — el dueño recibe error, no un colgado |
+| MCP `uvx mcp-server-time` | **PASS** | `POST /api/v1/mcp {"server_id":"time","argv":["uvx","mcp-server-time"]}` → **201 en 2,59 s** `{"ok":true,"tool_count":2}`. EXDEV sigue cerrado |
+| WebSocket sin token | **PASS** | `/api/v1/vnc` y `/api/v1/watch/agent/live`: sin token **403**, `?token=deadbeef` **403**, `?token=<bearer>` **101 Switching Protocols**. Matiz: el bearer **en cabecera `Authorization`** da 403 en los dos — el contrato del WS es el vale por query, no la cabecera |
+| entorno ajeno | **PASS** | al terminar: los cinco `safent-ads-ads-*` intactos (`ads-db`/`ads-api` `healthy`), `safent-demo` `Up`, `safent-{diag,v839,audit}` sin tocar, `podman network ls` → `podman` + `safent-companions` (ni creada ni borrada), `~/.safent` sin modificar (mtime anterior a la pasada) |
+
+### Menores nuevos (ninguno bloquea; ninguno es regresión de los cuatro arreglos)
+
+- **`payload_json` no se persiste nunca.** `SqliteAuditRepository.append()` (`sqlite_audit_repository.py:92-113`) omite la columna en el `INSERT`, así que toda entrada aterriza con el `DEFAULT '{}'` del esquema — comprobado: las 4 filas tienen `payload_json={}`. El `reason` **legible por máquina** que `_emit_audit_resumed` firma (`payload={"changed_by":…, "reason":"host_cli"}`) se firma pero **no se puede releer**; sólo sobrevive la mitad humana, dentro de `description`. La cadena **sigue verificando** porque `verify_chain` usa el `payload_hash_hex` guardado y no recalcula desde el payload, pero `audit_schema.py:24-26` promete justo lo contrario («permite re-verificar `payload_hash_hex` y reconstruir la entrada»). Anterior a este merge.
+- **Echar el freno no tiene vocabulario de procedencia.** El `resume` sí lo tiene (`totp` / `device_password` / `host_cli`, `security_api.py:333/341/345`), pero el `pause` reenvía `body.reason` tal cual (`security_api.py:325`), texto libre del llamante: **no existe un `reason:"api"`**. Dos `agent_paused` de orígenes distintos sólo se distinguen por el `actor` (uid) y por lo que el llamante quisiera escribir.
+- **La sonda de Anthropic no deja ni una línea en el journal.** `api.anthropic.com` aparece **0 veces** en todo el journal, mientras que las de gemini y openai-api salen enteras (`HTTP Request: POST https://… "HTTP/1.1 401 …"`): la rama nueva usa `aiohttp`, que no registra URL, y las viejas usan el SDK sobre httpx, que sí. La sonda queda sin rastro observable justo en el proveedor cuyo bug era la ruta.
+- **`gemini` no clasifica `invalid_key`** porque Google devuelve **400** (no 401/403) a una clave inválida y `_classify_probe_http_status` sólo mapea 401/403. Efecto en producto: nulo (la UI decide por `ok`), pero el `code` miente por omisión (`null`).
+- **Un rechazo de liberación deja una unidad `failed` para siempre.** El intento con contraseña de dispositivo falsa dispara la ruta PAM privilegiada y `hermes-tailscale-control.service` muere `status=1/FAILURE` (`kill_switch_release: PAM verification FAILED for user 'hermes-user'`): **el gate funciona bien** (fail-closed, cuenta sin contraseña en instalación nueva), pero deja rojo permanente en `systemctl --failed` — cualquier comprobación de salud tipo A-02 se rompe tras un solo intento fallido, y el dueño ve una avería donde hubo una defensa. Ninguno de los cuatro arreglos toca esa ruta (`git diff e602a86~1 d2eb8c6` → **0** coincidencias de `tailscale-control` / `_verify_device_password`): es comportamiento previo, aflorado por esta prueba.
+
+### Desmontaje
+
+`podman rm -f matriz-final-4` · `podman volume rm matriz-final-4-data` · borrado del estado
+`$SCRATCH/state`. Nada más se tocó en la máquina.
+
+### Resumen de la re-verificación
+
+**9 filas de re-verificación + 6 de smoke · 15 PASS · 0 FALLA.** Las cuatro FALLA de la matriz
+`39eeb8e` quedan **cerradas** en `d2eb8c6`: CLI-N4 (pausa y reanudación en la cadena WORM, con
+`host_cli`, cadena íntegra y liberación por API fail-closed), PROV-03 (Anthropic responde
+`invalid_key` por su Messages API real; `openai-api` igual), CLI-N2 (`--porcelain` honrado en
+`status` y `url`, vale sólo por stderr) y UPD-N2/A-07 (contrato de update completo con
+`is_newer` ≡ `available:false` fail-closed, y `/openapi.json` tras el bearer). **Sin regresiones**
+en el smoke: arranque, handshake, chat, MCP, WebSockets y aislamiento del entorno ajeno siguen
+verdes. Los cinco menores anotados son observabilidad y clasificación, todos anteriores al merge.
