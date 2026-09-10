@@ -683,6 +683,35 @@ cmd_unpair() {
   echo "[ok] Instance unpaired.  Restart Safent to revert to community edition: safent restart"
 }
 
+# R17 — sovereign fallback to release the emergency brake without MFA. A
+# brake can be engaged before the owner ever enrolls TOTP, and a fresh
+# install has no device/OS password either (the PAM fallback the REST API
+# already offers, POST /api/v1/security/kill-switch, fails closed 403 with
+# neither) — the owner was left with no way out short of enrolling MFA with
+# the brake still on. Host access to run `podman exec` on THIS container
+# already IS the owner (same trust boundary every other host verb here
+# relies on: pair/unpair, companion rotate/update, backup/restore). Execs
+# as hermes-user (uid 1000) — the SAME uid the desktop shell's own DIRECT
+# D-Bus calls already run as and the daemon's authorized_uids already
+# trusts unconditionally — so the release is audited under the real owner
+# identity, not a synthetic one. See brake_release_cli.py's own docstring
+# for the full authorization chain. TOTP via the UI remains the primary,
+# normal path — this is reachable only from the host CLI.
+cmd_brake() {
+  case "${1:-}" in
+    release|libera) ;;
+    "") echo "[x] Usage: safent brake release"; exit 1 ;;
+    *) echo "[x] Unknown 'safent brake' subcommand: $1"; echo "    Usage: safent brake release"; exit 1 ;;
+  esac
+  _ensure_machine
+  if ! _running; then
+    echo "[x] Safent must be running to release the brake.  Start it with: safent start" >&2
+    exit 1
+  fi
+  "$RT" exec -u hermes-user "$NAME" python3 -m hermes.shell_server.security.brake_release_cli release \
+    || { echo "[x] Could not release the brake — see the error above." >&2; exit 1; }
+}
+
 cmd_status() {
   if _exists && _running; then
     echo "[ok] Safent running at  http://localhost:$(_port)/   (open with: safent)"
@@ -1078,6 +1107,10 @@ safent - control your local Safent
   safent companion rotate            issue a new /mcp bearer on both sides, restart ads-api
   safent companion remove [--purge]  stop + remove the companion (keeps its state unless --purge)
 
+  safent brake release   release the emergency brake without MFA (host access == owner;
+                          use only when MFA isn't enrolled yet and no device password
+                          exists — TOTP via the UI is the normal path)
+
   --no-companion    FIRST argument, any command: skip provisioning/joining the
                      preinstalled Safent Ads companion (MCP campaign tools).
                      A failed provisioning attempt never blocks Safent itself.
@@ -1100,6 +1133,7 @@ case "${1:-open}" in
   uninstall|desinstalar)       cmd_uninstall ;;
   backup|respaldo)             cmd_backup "${2:-}" ;;
   restore|restaura)            shift; cmd_restore "$@" ;;
+  brake|freno)                 cmd_brake "${2:-}" ;;
   -h|--help|help|ayuda)        usage ;;
   *) echo "Unknown command: $1"; echo; usage; exit 1 ;;
 esac
