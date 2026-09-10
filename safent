@@ -33,6 +33,15 @@ CLOUD_ENDPOINT="${SAFENT_CLOUD_ENDPOINT:-}"
 # Named volume that holds the persistent state (config, identity, skills, memory).
 # Override SAFENT_DATA_VOLUME to run more than one isolated instance on one host.
 DATA_VOLUME="${SAFENT_DATA_VOLUME:-safent-data}"
+# Graceful stop (item #2, spec 025 matriz): PID1 is systemd, which needs
+# SIGRTMIN+3 (not SIGTERM) to begin an orderly shutdown of every unit —
+# STOPSIGNAL SIGRTMIN+3 is baked into the image, but pinning it here too
+# keeps `podman stop`/`restart` correct even against an older/custom image
+# that predates that STOPSIGNAL. 30s covers a full observed clean shutdown
+# (~6s) with generous margin for a loaded/slow host; `podman stop`/`restart`
+# without an explicit `-t` fall back to this container-level default.
+STOP_SIGNAL="SIGRTMIN+3"
+STOP_TIMEOUT_S="${SAFENT_STOP_TIMEOUT_S:-30}"
 SECCOMP_URL="${SAFENT_SECCOMP_URL:-https://raw.githubusercontent.com/devwspito/safent-runtime/main/ops/container/seccomp/safent.json}"
 SECCOMP_DIR="${HOME:-/tmp}/.safent"
 SECCOMP="$SECCOMP_DIR/safent-seccomp.json"
@@ -201,6 +210,7 @@ _run() {
   if [ -n "$PORT_PIN" ]; then publish="127.0.0.1:${PORT_PIN}:7517"; else publish="127.0.0.1::7517"; fi
   "$RT" run -d --name "$NAME" --systemd=always \
     -p "$publish" \
+    --stop-signal="$STOP_SIGNAL" --stop-timeout="$STOP_TIMEOUT_S" \
     ${CLOUD_ENDPOINT:+-e SAFENT_CLOUD_ENDPOINT=$CLOUD_ENDPOINT} \
     --cap-add NET_ADMIN --cap-add SYS_ADMIN --cap-add AUDIT_READ \
     --security-opt seccomp="$SECCOMP" \
@@ -315,7 +325,9 @@ cmd_start() {
 
 cmd_stop() {
   if _exists && _running; then
-    if "$RT" stop "$NAME" >/dev/null 2>&1; then echo "[ok] Safent stopped."; else echo "[x] Could not stop it."; fi
+    # -t explicit (defense in depth): correct even against a container started
+    # by an OLDER CLI/image that predates the baked --stop-signal/--stop-timeout.
+    if "$RT" stop -t "$STOP_TIMEOUT_S" "$NAME" >/dev/null 2>&1; then echo "[ok] Safent stopped."; else echo "[x] Could not stop it."; fi
   else
     echo "[ok] Safent was already stopped."
   fi

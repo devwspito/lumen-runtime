@@ -208,10 +208,21 @@ SAFENT_TZ_VALUE="$(host_tz)"
 #   --shm-size=1g       Chromium needs a real /dev/shm.
 #   -v ${NAME}-data      persist /var/lib/hermes (keystore, audit, config) across
 #                       image updates (so master.key / provider keys survive pull).
+#   --stop-signal/--stop-timeout  PID1 is systemd, which needs SIGRTMIN+3 (not
+#                       SIGTERM) to begin an orderly shutdown of every unit.
+#                       STOPSIGNAL SIGRTMIN+3 is baked into the image (Containerfile),
+#                       but pinning it here too keeps `podman stop`/`restart` correct
+#                       even against an older/custom image that predates it. 30s is
+#                       generous margin over a verified clean shutdown (~6s); a
+#                       bare `podman stop $NAME` (no explicit -t) falls back to this
+#                       container-level default. Same value as the `safent` CLI's
+#                       own STOP_TIMEOUT_S — keep the two in sync.
 # NOTE: NoNewPrivileges is set PER-UNIT (the hardened units), NOT container-wide —
 # a container-level no-new-privileges breaks dbus/login setuid and the boot fails.
+STOP_TIMEOUT_S="${SAFENT_STOP_TIMEOUT_S:-30}"
 exec "$RUNTIME" run -d --name "$NAME" --systemd=always \
   -p "127.0.0.1:${HOST_PORT}:7517" \
+  --stop-signal=SIGRTMIN+3 --stop-timeout="${STOP_TIMEOUT_S}" \
   -e "TZ=${SAFENT_TZ_VALUE}" -e "HERMES_TZ=${SAFENT_TZ_VALUE}" \
   --cap-add NET_ADMIN --cap-add SYS_ADMIN --cap-add AUDIT_READ \
   --security-opt "seccomp=${SECCOMP}" \
