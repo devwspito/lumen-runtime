@@ -1476,6 +1476,21 @@ def create_app() -> FastAPI:
     app.state.dbus_proxy = DbusRuntimeProxy()
 
     # ------------------------------------------------------------------
+    # Ads session bridge (026, contracts/sso.md) — mint/clear the bridge
+    # cookie under /api/v1/ (existing bearer middleware gates it) and the
+    # same-origin reverse proxy at /ads/* (gated by its own cookie, T005).
+    # Registered here (before the static mount, per main.py's own ordering
+    # discipline) so /ads/* resolves before any catch-all route.
+    # ------------------------------------------------------------------
+    from hermes.shell_server.ads_bridge import (  # noqa: PLC0415
+        AdsSessionJar,
+        create_ads_bridge_router,
+    )
+
+    app.state.ads_session_jar = AdsSessionJar()
+    app.include_router(create_ads_bridge_router())
+
+    # ------------------------------------------------------------------
     # New REST routers: providers native, agents, skills hub, mcp,
     # tasks mutations, security center, memory.
     # All registered BEFORE the static mount so /api/v1/* is resolved first.
