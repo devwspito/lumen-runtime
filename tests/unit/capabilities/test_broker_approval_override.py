@@ -220,15 +220,27 @@ class TestApprovalOverrideRegressionWhenUnwired:
         assert outcome.status == ExecutionStatus.PENDING_APPROVAL
 
 
-class TestT194AdsApplyDefensiveActionIsMfaTier:
-    """024/T091/T194: apply_defensive_action is the one ads write tool added
-    to tool_delicacy._MFA_TIER_HITL (the sole tool that reaches the real ad
-    platform directly). Mirrors
-    TestApprovalOverrideNeverBypassesMfaTierOrHigh's install_mcp case, for
-    the ads-specific tool."""
+class TestT194AdsApplyDefensiveActionHonoursApprovalAxis:
+    """024/T091/T194: apply_defensive_action solo admite lower_budget|pause y
+    pasa por el chokepoint del companion (topes, freno, broker), asi que NO
+    es MFA-tier: el eje `approval` del overlay decide. Sin overlay sigue
+    siendo HITL (baseline de la jaula); `auto` lo respeta (requisito del
+    propietario: pausar/bajar autonomo); `hitl` explicito fuerza tarjeta."""
 
     @pytest.mark.asyncio
-    async def test_auto_override_cannot_bypass_apply_defensive_action(self) -> None:
+    async def test_without_overlay_stays_hitl(self) -> None:
+        tool = "mcp__safent-ads__apply_defensive_action"
+        broker, gate = _make_broker(
+            access_scope_repo=_FakeAccessScopeRepo(_scope_with_overlay({})),
+            tool_name=tool, risk=RiskLevel.LOW, auto_executable=False,
+        )
+        outcome = await broker.dispatch(
+            _proposal(tool), _ctx(), hitl_approval_token=None,
+        )
+        assert outcome.status == ExecutionStatus.PENDING_APPROVAL
+
+    @pytest.mark.asyncio
+    async def test_auto_override_is_honoured_for_defensive_actions(self) -> None:
         tool = "mcp__safent-ads__apply_defensive_action"
         broker, gate = _make_broker(
             access_scope_repo=_FakeAccessScopeRepo(
@@ -239,12 +251,10 @@ class TestT194AdsApplyDefensiveActionIsMfaTier:
         outcome = await broker.dispatch(
             _proposal(tool), _ctx(), hitl_approval_token=None,
         )
-        assert outcome.status == ExecutionStatus.PENDING_APPROVAL
+        assert outcome.status != ExecutionStatus.PENDING_APPROVAL
 
     @pytest.mark.asyncio
     async def test_hitl_override_still_forces_approval(self) -> None:
-        """A bundle explicitly narrowing to 'hitl' (T194's actual fix, in the
-        ads repo's own policy_overlay.json) must keep working regardless."""
         tool = "mcp__safent-ads__apply_defensive_action"
         broker, gate = _make_broker(
             access_scope_repo=_FakeAccessScopeRepo(

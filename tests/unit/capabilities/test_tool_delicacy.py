@@ -75,8 +75,10 @@ class TestDelegateToColleagueCapabilityBindingStillForcesHitl:
 
 
 class TestAdsCompanionMfaTier:
-    def test_apply_defensive_action_is_mfa_tier(self) -> None:
-        assert is_mfa_required("mcp__safent-ads__apply_defensive_action") is True
+    def test_apply_defensive_action_is_not_mfa_tier(self) -> None:
+        # Solo admite lower_budget|pause y pasa por el chokepoint del companion:
+        # el eje `approval` del overlay decide (pausar/bajar autonomo), nunca MFA.
+        assert is_mfa_required("mcp__safent-ads__apply_defensive_action") is False
 
     @pytest.mark.parametrize(
         "tool_name",
