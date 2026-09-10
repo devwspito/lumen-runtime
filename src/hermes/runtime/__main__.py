@@ -1920,13 +1920,6 @@ async def _run(*, systemd_notify: bool) -> None:
         audit_repo=audit_repo,
     )
 
-    # Wire SIGTERM for clean shutdown
-    event_loop = asyncio.get_event_loop()
-    event_loop.add_signal_handler(signal.SIGTERM, orchestrator.request_shutdown)
-    event_loop.add_signal_handler(signal.SIGTERM, unix_socket.close)
-    if browser_guard is not None:
-        event_loop.add_signal_handler(signal.SIGTERM, browser_guard.signal_shutdown)
-
     # Confinement self-check: refuse to start the autonomous loop if kernel
     # confinement gates are absent. Closes the red-team "written but never loaded"
     # gap. Runs after all services are wired so any missing socket/netns is real.
@@ -1963,6 +1956,47 @@ async def _run(*, systemd_notify: bool) -> None:
             )
         )
     tasks.extend(trigger_tasks)
+
+    # Wire SIGTERM for clean shutdown (graceful stop — item #2, spec 025 matriz).
+    #
+    # BUG FIXED (2026-09-10, verified live: `podman stop` never returned, even
+    # given 90s — SIGKILLed every time): `add_signal_handler(sig, cb)` REPLACES
+    # any previous handler for the SAME signal (asyncio, one callback per
+    # signal number) — it does NOT stack. The old code called it three times
+    # for signal.SIGTERM in a row, so only the LAST registration
+    # (browser_guard.signal_shutdown, or nothing at all when browser_guard is
+    # None) ever fired; orchestrator.request_shutdown() and unix_socket.close()
+    # were silently dead code. ONE handler, doing everything, fixes that.
+    #
+    # Even with request_shutdown() wired correctly, trigger_tasks (P2) and any
+    # task with no graceful hook (dbus_task, model_monitor_task, the composio
+    # poller) have nothing telling THEM to stop — asyncio.gather() below waits
+    # for every task, so those alone would still hang the process forever. A
+    # short grace window lets the graceful paths (orchestrator/socket/browser)
+    # exit on their own; anything still running after it is cancelled outright
+    # — every one of these loops already treats CancelledError as a clean exit
+    # (see e.g. SchedulerTimerSource.run_forever), and return_exceptions=True
+    # on the gather absorbs it without turning a clean stop into an error.
+    _SIGTERM_GRACE_S = 5.0
+
+    async def _cancel_stragglers_after_grace() -> None:
+        await asyncio.sleep(_SIGTERM_GRACE_S)
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+
+    def _handle_sigterm() -> None:
+        logger.info("hermes.runtime.sigterm_received — starting graceful shutdown")
+        orchestrator.request_shutdown()
+        unix_socket.close()
+        if browser_guard is not None:
+            browser_guard.signal_shutdown()
+        asyncio.create_task(
+            _cancel_stragglers_after_grace(), name="sigterm-grace-cancel"
+        )
+
+    event_loop = asyncio.get_event_loop()
+    event_loop.add_signal_handler(signal.SIGTERM, _handle_sigterm)
 
     await asyncio.gather(*tasks, return_exceptions=True)
     logger.info("hermes.runtime.loop_stopped")
