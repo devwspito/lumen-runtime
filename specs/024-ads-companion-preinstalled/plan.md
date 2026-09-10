@@ -200,17 +200,21 @@ sobre dinero. Cambia el contrato externo del bundle, así que va al dueño, no s
 | `ops/container/companions/ads/provision.sh` | red + CA + bearer + imagen + secretos (api.env/broker.env) + caps.yaml + up + wait `/mcp/health` | 259 |
 | `ops/container/companions/ads/caps.template.yaml` | **nueva** plantilla de topes duros (fail-closed, `accounts: {}`) | 29 |
 | `ops/container/run-safent.sh` | fase companion, `--network`, 3 binds, `--no-companion`, `SAFENT_ADS_IMAGE` de conveniencia en dev | 45 |
-| `safent` (CLI) | fase companion antes de `_run` (fetch image→raw→caché igual que el seccomp), `--no-companion`, `uninstall` hace `compose down` + borra la red | 105 |
-| `tests/unit/ops/test_companion_provision.py` | **nuevo** — extremo a extremo de `provision.sh` contra estado temporal, podman/curl fingidos | 283 |
-
-Pendiente, NO implementado en esta pasada (fuera del alcance de esta corrección — el CLI sólo
-gana la fase de aprovisionamiento antes de `_run`/`uninstall`, no subcomandos nuevos):
-`safent companion status\|update\|rotate\|remove` como comandos de primer nivel. Hoy
-`safent update` re-provisiona el companion como efecto lateral de recrear el contenedor (llama
-a `_run`, que llama a `_provision_companion`), pero no hay un comando dedicado a
-inspeccionar/rotar/eliminar sólo el companion sin tocar Safent.
+| `safent` (CLI) | fase companion antes de `_run` (fetch image→raw→caché igual que el seccomp), `--no-companion`, `uninstall` hace `compose down` + borra la red; **`companion status\|update\|rotate\|remove` como comandos de primer nivel (T193)** | 105 |
+| `tests/unit/ops/test_companion_provision.py` | **nuevo** — extremo a extremo de `provision.sh` contra estado temporal, podman/curl fingidos; extendido (T193) con los cuatro verbos de `safent companion` | 283 |
 | `src/hermes/shell_server/cowork/mcp_api.py` | estado en el listado; `PUT managed-remote-endpoints/safent-ads` → 409 si hay companion | 25 |
 | `frontend/src/views/McpView.tsx` | badge de estado, oculta el campo URL (**frontend-engineer**) | 40 |
+
+**T193 — resuelto**: `safent companion status\|update\|rotate\|remove` existen como comandos de
+primer nivel (ver `usage()`), separados del ciclo de vida de Safent. `status` comprueba la red
+(`safent-companions`), cuenta contenedores vivos vía `compose ps -q -a` + `inspect` y sondea
+`/mcp/health` con la CA local; `update` sólo hace `pull`+`compose up -d` de la imagen del
+companion (nunca toca el contenedor Safent); `rotate` emite un bearer nuevo en `$STATE/bearer`
+y en `ADS_MCP_TOKEN` de `secrets/api.env`, reinicia `ads-api` y le dice al dueño que reinicie
+Safent para que el demonio vuelva a leer el bind; `remove` hace `compose down` + borra la red,
+conservando `$STATE` salvo `--purge`. `safent update` sigue re-aprovisionando el companion como
+efecto lateral de recrear Safent (sin cambios) — los verbos nuevos son la vía para tocar
+SÓLO el companion.
 
 **Tests**: `tests/unit/shell_server/test_companions.py` (180) · `tests/unit/agents_os/test_companion_egress_source.py`
 (90) · `tests/unit/agents_os/test_seeded_vs_builtin_trust.py` (60) · `tests/unit/hardening/test_companion_nft_generation.py`

@@ -218,3 +218,64 @@ class TestApprovalOverrideRegressionWhenUnwired:
             _proposal(tool), _ctx(), hitl_approval_token=None,
         )
         assert outcome.status == ExecutionStatus.PENDING_APPROVAL
+
+
+class TestT194AdsApplyDefensiveActionIsMfaTier:
+    """024/T091/T194: apply_defensive_action is the one ads write tool added
+    to tool_delicacy._MFA_TIER_HITL (the sole tool that reaches the real ad
+    platform directly). Mirrors
+    TestApprovalOverrideNeverBypassesMfaTierOrHigh's install_mcp case, for
+    the ads-specific tool."""
+
+    @pytest.mark.asyncio
+    async def test_auto_override_cannot_bypass_apply_defensive_action(self) -> None:
+        tool = "mcp__safent-ads__apply_defensive_action"
+        broker, gate = _make_broker(
+            access_scope_repo=_FakeAccessScopeRepo(
+                _scope_with_overlay({tool: {"approval": "auto"}})
+            ),
+            tool_name=tool, risk=RiskLevel.LOW, auto_executable=False,
+        )
+        outcome = await broker.dispatch(
+            _proposal(tool), _ctx(), hitl_approval_token=None,
+        )
+        assert outcome.status == ExecutionStatus.PENDING_APPROVAL
+
+    @pytest.mark.asyncio
+    async def test_hitl_override_still_forces_approval(self) -> None:
+        """A bundle explicitly narrowing to 'hitl' (T194's actual fix, in the
+        ads repo's own policy_overlay.json) must keep working regardless."""
+        tool = "mcp__safent-ads__apply_defensive_action"
+        broker, gate = _make_broker(
+            access_scope_repo=_FakeAccessScopeRepo(
+                _scope_with_overlay({tool: {"approval": "hitl"}})
+            ),
+            tool_name=tool, risk=RiskLevel.LOW, auto_executable=True,
+        )
+        outcome = await broker.dispatch(
+            _proposal(tool), _ctx(), hitl_approval_token=None,
+        )
+        assert outcome.status == ExecutionStatus.PENDING_APPROVAL
+
+
+class TestT194ProposeDoesNotRaiseHitlCard:
+    """024/T091/T194: propose_*/withdraw_proposal are NOT MFA-tier — they
+    only ever create a pending row in the companion's OWN datastore (a
+    SEPARATE human approval happens later via Telegram/REST, outside this
+    broker), so tool-surface.md's 'auto' policy_overlay entry for them must
+    keep working after apply_defensive_action's own tier is tightened."""
+
+    @pytest.mark.asyncio
+    async def test_propose_does_not_raise_hitl_card(self) -> None:
+        tool = "mcp__safent-ads__propose_budget_change"
+        broker, gate = _make_broker(
+            access_scope_repo=_FakeAccessScopeRepo(
+                _scope_with_overlay({tool: {"approval": "auto"}})
+            ),
+            tool_name=tool, risk=RiskLevel.LOW, auto_executable=False,
+        )
+        outcome = await broker.dispatch(
+            _proposal(tool), _ctx(), hitl_approval_token=None,
+        )
+        assert outcome.status != ExecutionStatus.PENDING_APPROVAL
+        assert gate.register_calls == []

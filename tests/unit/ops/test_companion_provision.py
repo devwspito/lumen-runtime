@@ -281,3 +281,352 @@ class TestComposeConfigRenders:
         assert result.returncode == 0, result.stderr
         assert "10.201.0.10" in result.stdout
         assert "ADS_COMPANION_MODE" in result.stdout
+
+
+# =============================================================================
+# T193 — `safent companion status|update|rotate|remove`
+#
+# Before this, `safent` had no dedicated companion lifecycle: `safent update`
+# re-provisioned it as a SIDE EFFECT of recreating the Safent container, and
+# `safent start` on an existing container did not even do that (runbook.md
+# §9). These tests drive the REAL `safent` script (sh, not sourced) with only
+# podman/curl faked — same "fake the two commands that would touch a real
+# engine" discipline as TestFirstRunWritesExpectedFiles above.
+# =============================================================================
+
+_SAFENT_CLI = _REPO_ROOT / "safent"
+
+# Args land on this fake exactly as the CLI invokes them:
+#   network inspect safent-companions
+#   network rm safent-companions
+#   pull <image>
+#   compose -p safent-ads -f <compose> ps -q -a
+#   compose -p safent-ads -f <compose> up -d [--force-recreate ads-api]
+#   compose -p safent-ads -f <compose> down
+#   inspect -f {{.State.Running}} <id>
+_FAKE_PODMAN_CLI = """#!/usr/bin/env bash
+set -e
+echo "$@" >> "$FAKE_PODMAN_LOG"
+case "$1" in
+  network)
+    case "$2" in
+      inspect) [ "${FAKE_NETWORK_PRESENT:-1}" = "1" ] && exit 0 || exit 1 ;;
+      rm) exit 0 ;;
+    esac
+    ;;
+  pull)
+    [ "${FAKE_PULL_FAIL:-0}" = "1" ] && exit 1
+    exit 0
+    ;;
+  compose)
+    verb="$6"
+    case "$verb" in
+      ps)
+        for id in ${FAKE_COMPOSE_IDS:-c1 c2}; do echo "$id"; done
+        exit 0
+        ;;
+      up) [ "${FAKE_COMPOSE_UP_FAIL:-0}" = "1" ] && exit 1; exit 0 ;;
+      down) exit 0 ;;
+    esac
+    exit 0
+    ;;
+  inspect)
+    id="$4"
+    case " ${FAKE_RUNNING_IDS:-c1 c2} " in
+      *" $id "*) echo true ;;
+      *) echo false ;;
+    esac
+    exit 0
+    ;;
+esac
+exit 0
+"""
+
+_FAKE_CURL_HEALTH = """#!/usr/bin/env bash
+printf '%s' "${FAKE_HEALTH_CODE:-401}"
+exit 0
+"""
+
+
+@pytest.fixture()
+def fake_cli_bin_dir(tmp_path: Path) -> Path:
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    podman = bin_dir / "podman"
+    podman.write_text(_FAKE_PODMAN_CLI)
+    podman.chmod(0o755)
+    curl = bin_dir / "curl"
+    curl.write_text(_FAKE_CURL_HEALTH)
+    curl.chmod(0o755)
+    return bin_dir
+
+
+def _companion_state(tmp_path: Path, *, provisioned: bool) -> Path:
+    """A minimal $COMPANION_STATE — only what the CLI's own verbs read
+    (bearer, secrets/api.env, tls/ca.crt), never provision.sh's full output."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    if provisioned:
+        (state_dir / "tls").mkdir()
+        (state_dir / "tls" / "ca.crt").write_text("dummy-ca")
+        (state_dir / "secrets").mkdir()
+        (state_dir / "secrets" / "api.env").write_text(
+            "ADS_MCP_TOKEN=old-bearer-value\nADS_SESSION_SECRET=x\n"
+        )
+        (state_dir / "bearer").write_text("old-bearer-value\n")
+        (state_dir / "bearer").chmod(0o400)
+    return state_dir
+
+
+def _companion_bin_dir(home_dir: Path, *, provisioned: bool) -> Path:
+    """$COMPANION_BIN_DIR derives from $HOME (safent has no override env for
+    it) — mirrors run-safent.sh/provision.sh's own cached-file layout."""
+    bin_dir = home_dir / ".safent" / "companions" / "ads" / "bin"
+    bin_dir.mkdir(parents=True)
+    if provisioned:
+        shutil.copy(_COMPOSE_YAML, bin_dir / "compose.yaml")
+    return bin_dir
+
+
+def _run_companion(
+    *args: str,
+    fake_bin_dir: Path,
+    state_dir: Path,
+    home_dir: Path,
+    podman_log: Path,
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    env = dict(os.environ)
+    env["PATH"] = f"{fake_bin_dir}:{env.get('PATH', '')}"
+    env["HOME"] = str(home_dir)
+    env["SAFENT_COMPANION_STATE"] = str(state_dir)
+    env["SAFENT_ADS_IMAGE"] = "safent-ads:test-fake"
+    env["FAKE_PODMAN_LOG"] = str(podman_log)
+    env.update(extra_env or {})
+    return subprocess.run(
+        ["sh", str(_SAFENT_CLI), "companion", *args],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+class TestCompanionStatus:
+    def test_reports_not_provisioned_when_never_provisioned(
+        self, tmp_path: Path, fake_cli_bin_dir: Path
+    ) -> None:
+        state_dir = _companion_state(tmp_path, provisioned=False)
+        home_dir = tmp_path / "home"
+        _companion_bin_dir(home_dir, provisioned=False)
+        result = _run_companion(
+            "status",
+            fake_bin_dir=fake_cli_bin_dir,
+            state_dir=state_dir,
+            home_dir=home_dir,
+            podman_log=tmp_path / "podman.log",
+        )
+        assert result.returncode == 0, result.stderr
+        assert "not provisioned" in result.stdout
+
+    def test_reports_network_containers_and_health_when_provisioned(
+        self, tmp_path: Path, fake_cli_bin_dir: Path
+    ) -> None:
+        state_dir = _companion_state(tmp_path, provisioned=True)
+        home_dir = tmp_path / "home"
+        _companion_bin_dir(home_dir, provisioned=True)
+        result = _run_companion(
+            "status",
+            fake_bin_dir=fake_cli_bin_dir,
+            state_dir=state_dir,
+            home_dir=home_dir,
+            podman_log=tmp_path / "podman.log",
+            extra_env={
+                "FAKE_NETWORK_PRESENT": "1",
+                "FAKE_COMPOSE_IDS": "c1 c2 c3",
+                "FAKE_RUNNING_IDS": "c1 c2",
+                "FAKE_HEALTH_CODE": "401",
+            },
+        )
+        assert result.returncode == 0, result.stderr
+        assert "network:      up" in result.stdout
+        assert "containers:   2/3 running" in result.stdout
+        assert "/mcp/health:  reachable (HTTP 401)" in result.stdout
+
+    def test_reports_network_absent(self, tmp_path: Path, fake_cli_bin_dir: Path) -> None:
+        state_dir = _companion_state(tmp_path, provisioned=True)
+        home_dir = tmp_path / "home"
+        _companion_bin_dir(home_dir, provisioned=True)
+        result = _run_companion(
+            "status",
+            fake_bin_dir=fake_cli_bin_dir,
+            state_dir=state_dir,
+            home_dir=home_dir,
+            podman_log=tmp_path / "podman.log",
+            extra_env={"FAKE_NETWORK_PRESENT": "0"},
+        )
+        assert result.returncode == 0, result.stderr
+        assert "network:      absent" in result.stdout
+
+
+class TestCompanionUpdate:
+    def test_pulls_the_image_and_recreates_the_containers(
+        self, tmp_path: Path, fake_cli_bin_dir: Path
+    ) -> None:
+        state_dir = _companion_state(tmp_path, provisioned=True)
+        home_dir = tmp_path / "home"
+        _companion_bin_dir(home_dir, provisioned=True)
+        podman_log = tmp_path / "podman.log"
+        result = _run_companion(
+            "update",
+            fake_bin_dir=fake_cli_bin_dir,
+            state_dir=state_dir,
+            home_dir=home_dir,
+            podman_log=podman_log,
+        )
+        assert result.returncode == 0, result.stderr
+        log = podman_log.read_text()
+        assert "pull safent-ads:test-fake" in log
+        assert "up -d" in log
+
+    def test_fails_loud_when_not_provisioned(
+        self, tmp_path: Path, fake_cli_bin_dir: Path
+    ) -> None:
+        state_dir = _companion_state(tmp_path, provisioned=False)
+        home_dir = tmp_path / "home"
+        _companion_bin_dir(home_dir, provisioned=False)
+        result = _run_companion(
+            "update",
+            fake_bin_dir=fake_cli_bin_dir,
+            state_dir=state_dir,
+            home_dir=home_dir,
+            podman_log=tmp_path / "podman.log",
+        )
+        assert result.returncode != 0
+        assert "not provisioned" in result.stderr
+
+    def test_fails_loud_when_pull_fails(self, tmp_path: Path, fake_cli_bin_dir: Path) -> None:
+        state_dir = _companion_state(tmp_path, provisioned=True)
+        home_dir = tmp_path / "home"
+        _companion_bin_dir(home_dir, provisioned=True)
+        result = _run_companion(
+            "update",
+            fake_bin_dir=fake_cli_bin_dir,
+            state_dir=state_dir,
+            home_dir=home_dir,
+            podman_log=tmp_path / "podman.log",
+            extra_env={"FAKE_PULL_FAIL": "1"},
+        )
+        assert result.returncode != 0
+        assert "Could not pull" in result.stderr
+
+
+class TestCompanionRotate:
+    def test_rotates_bearer_on_both_sides_and_restarts_ads_api(
+        self, tmp_path: Path, fake_cli_bin_dir: Path
+    ) -> None:
+        state_dir = _companion_state(tmp_path, provisioned=True)
+        home_dir = tmp_path / "home"
+        _companion_bin_dir(home_dir, provisioned=True)
+        old_bearer = (state_dir / "bearer").read_text().strip()
+        podman_log = tmp_path / "podman.log"
+
+        result = _run_companion(
+            "rotate",
+            fake_bin_dir=fake_cli_bin_dir,
+            state_dir=state_dir,
+            home_dir=home_dir,
+            podman_log=podman_log,
+        )
+
+        assert result.returncode == 0, result.stderr
+        new_bearer = (state_dir / "bearer").read_text().strip()
+        assert new_bearer != old_bearer
+        assert len(new_bearer) == 64  # openssl rand -hex 32
+        assert stat.S_IMODE((state_dir / "bearer").stat().st_mode) == 0o400
+
+        api_env = (state_dir / "secrets" / "api.env").read_text()
+        assert f"ADS_MCP_TOKEN={new_bearer}" in api_env
+        assert "ADS_SESSION_SECRET=x" in api_env  # every other line survives
+        assert api_env.count("ADS_MCP_TOKEN=") == 1
+
+        log = podman_log.read_text()
+        assert "up -d --force-recreate ads-api" in log
+        assert "restart safent" in result.stdout.lower()
+
+    def test_fails_loud_when_secrets_are_missing(
+        self, tmp_path: Path, fake_cli_bin_dir: Path
+    ) -> None:
+        state_dir = _companion_state(tmp_path, provisioned=True)
+        (state_dir / "secrets" / "api.env").unlink()
+        home_dir = tmp_path / "home"
+        _companion_bin_dir(home_dir, provisioned=True)
+        result = _run_companion(
+            "rotate",
+            fake_bin_dir=fake_cli_bin_dir,
+            state_dir=state_dir,
+            home_dir=home_dir,
+            podman_log=tmp_path / "podman.log",
+        )
+        assert result.returncode != 0
+        assert "not found" in result.stderr
+
+
+class TestCompanionRemove:
+    def test_composes_down_and_removes_the_network_keeping_state(
+        self, tmp_path: Path, fake_cli_bin_dir: Path
+    ) -> None:
+        state_dir = _companion_state(tmp_path, provisioned=True)
+        home_dir = tmp_path / "home"
+        _companion_bin_dir(home_dir, provisioned=True)
+        podman_log = tmp_path / "podman.log"
+
+        result = _run_companion(
+            "remove",
+            fake_bin_dir=fake_cli_bin_dir,
+            state_dir=state_dir,
+            home_dir=home_dir,
+            podman_log=podman_log,
+        )
+
+        assert result.returncode == 0, result.stderr
+        log = podman_log.read_text()
+        assert "compose -p safent-ads" in log and "down" in log
+        assert "network rm safent-companions" in log
+        assert state_dir.exists()  # state survives without --purge
+        assert (state_dir / "secrets" / "api.env").exists()
+
+    def test_purge_also_deletes_state(self, tmp_path: Path, fake_cli_bin_dir: Path) -> None:
+        state_dir = _companion_state(tmp_path, provisioned=True)
+        home_dir = tmp_path / "home"
+        _companion_bin_dir(home_dir, provisioned=True)
+
+        result = _run_companion(
+            "remove",
+            "--purge",
+            fake_bin_dir=fake_cli_bin_dir,
+            state_dir=state_dir,
+            home_dir=home_dir,
+            podman_log=tmp_path / "podman.log",
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert not state_dir.exists()
+
+
+class TestCompanionUsageGuard:
+    def test_unknown_verb_fails_loud_with_usage(
+        self, tmp_path: Path, fake_cli_bin_dir: Path
+    ) -> None:
+        state_dir = _companion_state(tmp_path, provisioned=False)
+        home_dir = tmp_path / "home"
+        _companion_bin_dir(home_dir, provisioned=False)
+        result = _run_companion(
+            "bogus",
+            fake_bin_dir=fake_cli_bin_dir,
+            state_dir=state_dir,
+            home_dir=home_dir,
+            podman_log=tmp_path / "podman.log",
+        )
+        assert result.returncode != 0
+        assert "Usage: safent companion" in result.stderr

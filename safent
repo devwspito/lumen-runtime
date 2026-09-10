@@ -16,7 +16,7 @@ set -e
 # Monotonic CLI revision. `safent update` self-updates this script from CLI_URL
 # when the published revision is HIGHER (never downgrades). Bump on every CLI
 # change or the fix will not reach installed machines.
-_CLI_REV=7
+_CLI_REV=8
 
 # ONE runtime image for both community and associate (paired) operation. The
 # image carries no edition-specific code: pairing state (the .enterprise marker +
@@ -50,6 +50,14 @@ COMPANION_BIN_DIR="${HOME:-/tmp}/.safent/companions/ads/bin"
 COMPANION_RAW_BASE="${SAFENT_COMPANION_URL_BASE:-https://raw.githubusercontent.com/devwspito/safent-runtime/main/ops/container/companions/ads}"
 COMPANION_RUN_ARGS=""
 NO_COMPANION=0
+# Product constants (provision.sh §"Product constants") — mirrored here (never
+# re-derived at runtime) so `safent companion status|rotate` can reach the
+# companion WITHOUT re-running provision.sh.
+COMPANION_NETWORK="safent-companions"
+COMPANION_HOST="ads.safent.internal"
+COMPANION_PORT="8443"
+COMPANION_IP="10.201.0.10"
+COMPANION_COMPOSE="$COMPANION_BIN_DIR/compose.yaml"
 case "${1:-}" in
   --no-companion) NO_COMPANION=1; shift ;;
 esac
@@ -526,6 +534,21 @@ cmd_agent() {
   done
 }
 
+# Exports the three vars compose.yaml interpolates (SAFENT_STATE,
+# SAFENT_ADS_IMAGE, ADS_POSTGRES_PASSWORD), same values `provision.sh` used to
+# bring the companion up. Shared by every `$RT compose ...` call site below so
+# there is exactly ONE place that resolves them, never copy-pasted per verb.
+_companion_env() {
+  SAFENT_STATE="$COMPANION_STATE"
+  SAFENT_ADS_IMAGE="${SAFENT_ADS_IMAGE:-ghcr.io/devwspito/safent-ads:latest}"
+  if [ -f "$COMPANION_STATE/pg_password" ]; then
+    ADS_POSTGRES_PASSWORD="$(cat "$COMPANION_STATE/pg_password" 2>/dev/null || true)"
+  else
+    ADS_POSTGRES_PASSWORD="unused-for-down"
+  fi
+  export SAFENT_STATE SAFENT_ADS_IMAGE ADS_POSTGRES_PASSWORD
+}
+
 # Tear down the safent-ads companion (024): compose down its four services
 # and remove the fixed network, using the SAME cached compose.yaml
 # provisioning used to start it (nothing rebuilt here). Best-effort — a
@@ -535,18 +558,156 @@ cmd_agent() {
 # piece of local Safent state (there is no partial-uninstall mode in this
 # CLI today — see cmd_uninstall's own doc comment).
 _uninstall_companion() {
-  [ -f "$COMPANION_BIN_DIR/compose.yaml" ] || return 0
+  [ -f "$COMPANION_COMPOSE" ] || return 0
   echo "[*] Removing the safent-ads companion…"
-  SAFENT_STATE="$COMPANION_STATE"
-  SAFENT_ADS_IMAGE="${SAFENT_ADS_IMAGE:-ghcr.io/devwspito/safent-ads:latest}"
-  if [ -f "$COMPANION_STATE/pg_password" ]; then
-    ADS_POSTGRES_PASSWORD="$(cat "$COMPANION_STATE/pg_password" 2>/dev/null || true)"
+  _companion_env
+  "$RT" compose -p safent-ads -f "$COMPANION_COMPOSE" down >/dev/null 2>&1 || true
+  "$RT" network rm "$COMPANION_NETWORK" >/dev/null 2>&1 || true
+}
+
+# ---- companion subcommands (T193): status|update|rotate|remove -------------
+# Decouples the companion's OWN lifecycle from Safent's: before this, the
+# only way to touch it was `safent update` (which re-provisions it as a side
+# effect of recreating the Safent container) or `safent uninstall` (which
+# removes everything). None of the four let an owner inspect, upgrade, rotate
+# the bearer, or tear down ONLY the companion.
+
+# `podman/docker compose ps -q [-a]` prints one container ID per line — the
+# same ID format `$RT inspect` accepts, so counting running vs total reuses
+# the exact primitive `_running()` already uses for the main container.
+_companion_container_counts() {
+  total=0
+  running=0
+  ids="$("$RT" compose -p safent-ads -f "$COMPANION_COMPOSE" ps -q -a 2>/dev/null || true)"
+  for id in $ids; do
+    total=$((total + 1))
+    state="$("$RT" inspect -f '{{.State.Running}}' "$id" 2>/dev/null || echo false)"
+    if [ "$state" = true ]; then running=$((running + 1)); fi
+  done
+}
+
+# Bearer-protected `/mcp/health` — a bare 401 IS liveness (see provision.sh's
+# own wait_for_health): we never pass a bearer on this read-only probe.
+_companion_health_code() {
+  curl -s -o /dev/null -w '%{http_code}' --max-time 3 \
+    --cacert "$COMPANION_STATE/tls/ca.crt" \
+    --resolve "$COMPANION_HOST:$COMPANION_PORT:$COMPANION_IP" \
+    "https://$COMPANION_HOST:$COMPANION_PORT/mcp/health" 2>/dev/null || true
+}
+
+cmd_companion_status() {
+  echo "safent-ads companion:"
+  if "$RT" network inspect "$COMPANION_NETWORK" >/dev/null 2>&1; then
+    echo "  network:      up ($COMPANION_NETWORK)"
   else
-    ADS_POSTGRES_PASSWORD="unused-for-down"
+    echo "  network:      absent"
   fi
-  export SAFENT_STATE SAFENT_ADS_IMAGE ADS_POSTGRES_PASSWORD
-  "$RT" compose -p safent-ads -f "$COMPANION_BIN_DIR/compose.yaml" down >/dev/null 2>&1 || true
-  "$RT" network rm safent-companions >/dev/null 2>&1 || true
+  if [ -f "$COMPANION_COMPOSE" ]; then
+    _companion_container_counts
+    echo "  containers:   $running/$total running"
+  else
+    echo "  containers:   not provisioned (run: safent update)"
+    return 0
+  fi
+  if [ -f "$COMPANION_STATE/tls/ca.crt" ]; then
+    code="$(_companion_health_code)"
+    case "$code" in
+      200|401) echo "  /mcp/health:  reachable (HTTP $code)" ;;
+      *)       echo "  /mcp/health:  unreachable" ;;
+    esac
+  else
+    echo "  /mcp/health:  unknown (no CA yet)"
+  fi
+}
+
+# Pull the owner's published companion image and recreate its containers —
+# ONLY the companion, never Safent itself (that coupling was exactly T193's
+# gap: `safent update` re-provisioned the companion as a SIDE EFFECT of
+# recreating Safent, with no dedicated command for the companion alone).
+cmd_companion_update() {
+  if [ ! -f "$COMPANION_COMPOSE" ]; then
+    echo "[x] Companion not provisioned yet. Run 'safent update' first." >&2
+    exit 1
+  fi
+  _companion_env
+  echo "[*] Pulling $SAFENT_ADS_IMAGE..."
+  "$RT" pull "$SAFENT_ADS_IMAGE" || { echo "[x] Could not pull the companion image." >&2; exit 1; }
+  echo "[*] Recreating the companion containers..."
+  "$RT" compose -p safent-ads -f "$COMPANION_COMPOSE" up -d \
+    || { echo "[x] Companion update failed." >&2; exit 1; }
+  echo "[ok] Companion updated."
+}
+
+# Re-emit the /mcp bearer on BOTH sides: the file Safent's daemon sends
+# (`$STATE/bearer`, bind-mounted into Safent) and the value ads-api validates
+# incoming requests against (`ADS_MCP_TOKEN` in secrets/api.env, loaded via
+# ads-api's env_file at container start — NOT hot-reloaded, hence the
+# --force-recreate below). Safent's OWN daemon reads its side of the bind
+# once at startup too, so the owner still has to restart it by hand — we
+# never restart Safent from here (companion verbs stay companion-scoped).
+cmd_companion_rotate() {
+  if [ ! -f "$COMPANION_COMPOSE" ]; then
+    echo "[x] Companion not provisioned yet. Run 'safent update' first." >&2
+    exit 1
+  fi
+  api_env="$COMPANION_STATE/secrets/api.env"
+  if [ ! -f "$api_env" ]; then
+    echo "[x] $api_env not found — cannot rotate (companion secrets missing)." >&2
+    exit 1
+  fi
+  echo "[*] Rotating the companion bearer..."
+  new_bearer="$(openssl rand -hex 32)"
+  printf '%s' "$new_bearer" > "$COMPANION_STATE/bearer.tmp"
+  chmod 0400 "$COMPANION_STATE/bearer.tmp"
+  mv -f "$COMPANION_STATE/bearer.tmp" "$COMPANION_STATE/bearer"
+
+  tmp_env="$(mktemp)"
+  awk -v tok="ADS_MCP_TOKEN=$new_bearer" '
+    /^ADS_MCP_TOKEN=/ { print tok; done=1; next }
+    { print }
+    END { if (!done) print tok }
+  ' "$api_env" > "$tmp_env"
+  chmod 0600 "$tmp_env"
+  mv -f "$tmp_env" "$api_env"
+
+  _companion_env
+  echo "[*] Restarting ads-api with the new token..."
+  "$RT" compose -p safent-ads -f "$COMPANION_COMPOSE" up -d --force-recreate ads-api \
+    || { echo "[x] Bearer files updated but ads-api restart failed — restart it by hand." >&2; exit 1; }
+  echo "[ok] Bearer rotated."
+  echo "    Restart Safent so the daemon re-reads it:  safent restart"
+}
+
+# Compose down + remove the fixed network — mirrors _uninstall_companion
+# exactly, except $STATE (TLS/secrets/caps.yaml) survives unless --purge:
+# an owner reaching for THIS verb wants the companion gone, not necessarily
+# its history/config re-generated from scratch on the next `safent update`.
+cmd_companion_remove() {
+  if [ -f "$COMPANION_COMPOSE" ]; then
+    echo "[*] Stopping the companion..."
+    _companion_env
+    "$RT" compose -p safent-ads -f "$COMPANION_COMPOSE" down >/dev/null 2>&1 || true
+  fi
+  "$RT" network rm "$COMPANION_NETWORK" >/dev/null 2>&1 || true
+  if [ "${1:-}" = "--purge" ]; then
+    rm -rf "$COMPANION_STATE" 2>/dev/null || true
+    echo "[ok] Companion removed and state purged ($COMPANION_STATE)."
+  else
+    echo "[ok] Companion removed. State kept at $COMPANION_STATE (use --purge to delete it too)."
+  fi
+}
+
+cmd_companion() {
+  case "${1:-}" in
+    status) cmd_companion_status ;;
+    update) cmd_companion_update ;;
+    rotate) cmd_companion_rotate ;;
+    remove) cmd_companion_remove "${2:-}" ;;
+    *)
+      echo "Usage: safent companion status|update|rotate|remove [--purge]" >&2
+      exit 1
+      ;;
+  esac
 }
 
 # Remove Safent from the machine: the container, the companion, its data
@@ -592,6 +753,11 @@ safent - control your local Safent
   safent unpair        remove the enterprise association (reverts to community edition)
   safent uninstall     remove Safent (container + data + CLI + agent; keeps podman/docker)
 
+  safent companion status            is the companion up? containers, /mcp/health
+  safent companion update            pull the latest companion image and recreate it
+  safent companion rotate            issue a new /mcp bearer on both sides, restart ads-api
+  safent companion remove [--purge]  stop + remove the companion (keeps its state unless --purge)
+
   --no-companion    FIRST argument, any command: skip provisioning/joining the
                      preinstalled Safent Ads companion (MCP campaign tools).
                      A failed provisioning attempt never blocks Safent itself.
@@ -608,6 +774,7 @@ case "${1:-open}" in
   agent|watch)                 cmd_agent ;;
   status|estado)               cmd_status ;;
   logs|log)                    cmd_logs ;;
+  companion|compañero)         cmd_companion "${2:-}" "${3:-}" ;;
   pair|vincular)               cmd_pair "${2:-}" ;;
   unpair|desvincular)          cmd_unpair ;;
   uninstall|desinstalar)       cmd_uninstall ;;
