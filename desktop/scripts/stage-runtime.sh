@@ -17,6 +17,23 @@
 #   x86_64-apple-darwin is a RECOGNIZED triple that is deliberately rejected
 #   (see below) — everything else is an unrecognized triple, rejected loudly.
 #
+# Exit codes (every non-zero exit in this script and in lib/fetch-verified.sh
+# uses one of these — "the install never fails" means failing LOUDLY and
+# distinguishably, not silently or ambiguously):
+#   0  success (including "already staged, nothing to do")
+#   1  usage error: bad/missing target argument, or a required tool
+#      (curl/jq/tar/pkgutil) is missing from PATH
+#   2  download failed: the network never delivered a complete transfer
+#      despite every retry (EXIT_DOWNLOAD, see lib/fetch-verified.sh)
+#   3  integrity failure: a transfer completed (right byte count) but its
+#      sha256 did not match the pinned lock, twice in a row — corruption,
+#      not incompleteness (EXIT_INTEGRITY, see lib/fetch-verified.sh)
+#   4  staging failure: something in the lock file, an archive's layout, or
+#      a .pkg's payload did not match what this script expects (not a
+#      network problem — retrying would not help)
+#   5  platform guard: this target must be staged on a different host OS
+#      (aarch64-apple-darwin needs pkgutil, i.e. an actual macOS host/runner)
+#
 # Every URL + sha256 this script trusts comes from ONE committed file,
 # desktop/runtime-manifest.lock (sibling of this script's parent dir, keyed by
 # the SAME triples) — nothing is fetched from a floating "latest" endpoint. A
@@ -26,16 +43,34 @@
 # of two checks; the app re-verifies at runtime before exec, see
 # contracts/app-engine.md).
 #
+# Every download (archives AND the machine image) goes through
+# lib/fetch-verified.sh's `fetch_verified`: resumable across both curl's own
+# --retry budget and dropped connections between separate runs of this
+# script (a killed/retried CI job resumes instead of restarting an 888 MiB
+# transfer from zero — the exact failure a real macOS pipeline run hit
+# before this existed: a connection closed 31 MB from the end and the old,
+# non-resuming logic threw the whole download away).
+#
 # aarch64-apple-darwin must run on a macOS host/runner: it expands the official
 # podman .pkg with `pkgutil --expand-full` WITHOUT installing it (no
 # `installer -pkg`, no admin password) and copies the binaries out. On Linux
 # this step fails fast with a clear message instead of doing partial work.
 set -euo pipefail
 
+EXIT_USAGE=1
+EXIT_STAGE=4
+EXIT_PLATFORM=5
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DESKTOP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 LOCKFILE="$DESKTOP_DIR/runtime-manifest.lock"
 RESOURCES_ROOT="$DESKTOP_DIR/src-tauri/resources/runtime"
+# Persistent across runs (on purpose — see header): a killed script resumes
+# an in-flight archive/image download from here instead of restarting it.
+CACHE_DIR="$RESOURCES_ROOT/.cache"
+
+# shellcheck source=lib/fetch-verified.sh
+source "$SCRIPT_DIR/lib/fetch-verified.sh"
 
 TARGET="${1:-}"
 case "$TARGET" in
@@ -45,37 +80,33 @@ case "$TARGET" in
     echo "    macOS Intel installer. Matches contracts/update.md (darwin-x86_64" >&2
     echo "    intentionally absent). See runtime-manifest.lock ->" >&2
     echo "    excluded_targets.x86_64-apple-darwin." >&2
-    exit 1
+    exit "$EXIT_USAGE"
     ;;
   "")
     echo "usage: $0 <aarch64-apple-darwin|x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu>" >&2
-    exit 1
+    exit "$EXIT_USAGE"
     ;;
   *)
     echo "[x] unrecognized target triple: $TARGET" >&2
     echo "    want one of: aarch64-apple-darwin | x86_64-unknown-linux-gnu | aarch64-unknown-linux-gnu" >&2
-    exit 1
+    exit "$EXIT_USAGE"
     ;;
 esac
 
 for tool in curl jq tar; do
-  command -v "$tool" >/dev/null 2>&1 || { echo "[x] need '$tool' on PATH (build-time only, not shipped)" >&2; exit 1; }
+  command -v "$tool" >/dev/null 2>&1 || { echo "[x] need '$tool' on PATH (build-time only, not shipped)" >&2; exit "$EXIT_USAGE"; }
 done
-SHA256() {
-  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
-  else shasum -a 256 "$1" | awk '{print $1}'
-  fi
-}
 
-[ -f "$LOCKFILE" ] || { echo "[x] missing $LOCKFILE"; exit 1; }
+[ -f "$LOCKFILE" ] || { echo "[x] missing $LOCKFILE" >&2; exit "$EXIT_USAGE"; }
 case "$TARGET" in
   *-apple-darwin)
     if [ "$(uname -s)" != Darwin ]; then
       echo "[x] $TARGET must be staged on a macOS host/runner (uses pkgutil to" >&2
       echo "    expand the official .pkg WITHOUT installing it). Refusing to do" >&2
       echo "    partial work on $(uname -s)." >&2
-      exit 1
+      exit "$EXIT_PLATFORM"
     fi
+    command -v pkgutil >/dev/null 2>&1 || { echo "[x] need 'pkgutil' (macOS only) on PATH" >&2; exit "$EXIT_USAGE"; }
     ;;
 esac
 
@@ -84,30 +115,6 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT INT TERM
 
 echo "[*] stage-runtime: target=$TARGET lock=$LOCKFILE dest=$DEST"
-
-# Download $1=url $2=expected-sha256 $3=expected-size-bytes -> prints path in $WORK.
-# Fails closed: a mismatch deletes the partial file and exits non-zero.
-_fetch_verified() {
-  local url="$1" want_sha="$2" want_size="$3" out
-  out="$WORK/$(basename "$1")"
-  echo "    downloading $(basename "$url") ($((want_size / 1024 / 1024)) MiB)..." >&2
-  curl -fsSL --retry 3 --retry-delay 2 -o "$out" "$url"
-  local got_size got_sha
-  got_size="$(stat -c '%s' "$out" 2>/dev/null || stat -f '%z' "$out")"
-  if [ "$got_size" != "$want_size" ]; then
-    rm -f "$out"
-    echo "[x] size mismatch for $url: got $got_size, pinned $want_size" >&2
-    exit 1
-  fi
-  got_sha="$(SHA256 "$out")"
-  if [ "$got_sha" != "$want_sha" ]; then
-    rm -f "$out"
-    echo "[x] sha256 mismatch for $url: got $got_sha, pinned $want_sha" >&2
-    exit 1
-  fi
-  echo "    verified sha256 $got_sha" >&2
-  printf '%s' "$out"
-}
 
 # ---- already staged with matching hashes? skip the network entirely -----------
 _already_staged() {
@@ -131,7 +138,7 @@ if _already_staged; then
   exit 0
 fi
 rm -rf "$DEST"
-mkdir -p "$DEST"
+mkdir -p "$DEST" "$CACHE_DIR"
 
 # ---- x86_64/aarch64-unknown-linux-gnu: static tarball, extract a curated subset --
 _stage_linux() {
@@ -139,7 +146,10 @@ _stage_linux() {
   url="$(jq -r '.targets[$t].download.url' --arg t "$TARGET" "$LOCKFILE")"
   want_sha="$(jq -r '.targets[$t].download.sha256' --arg t "$TARGET" "$LOCKFILE")"
   want_size="$(jq -r '.targets[$t].download.size_bytes' --arg t "$TARGET" "$LOCKFILE")"
-  archive="$(_fetch_verified "$url" "$want_sha" "$want_size")"
+  archive="$CACHE_DIR/$(basename "$url")"
+  echo "    downloading $(basename "$url") ($((want_size / 1024 / 1024)) MiB)..."
+  fetch_verified "$url" "$archive" "$want_size" "$want_sha" || exit $?
+  echo "    verified sha256 $want_sha"
 
   # The tarball's own top-level dir varies only by arch name; discover it instead
   # of hardcoding "podman-linux-<arch>/" so a future archive layout tweak upstream
@@ -161,7 +171,7 @@ _stage_linux() {
       libexec/podman/*) member="${top}usr/local/lib/podman/${path#libexec/podman/}" ;;
       bin/*)            member="${top}usr/local/bin/${path#bin/}" ;;
       etc/*)             member="${top}${path}" ;;
-      *) echo "[x] unexpected entry path in lock file: $path" >&2; exit 1 ;;
+      *) echo "[x] unexpected entry path in lock file: $path" >&2; exit "$EXIT_STAGE" ;;
     esac
     mkdir -p "$WORK/x" "$(dirname "$DEST/$path")"
     tar xzf "$archive" -C "$WORK/x" "$member"
@@ -170,11 +180,11 @@ _stage_linux() {
     chmod "$mode" "$DEST/$path"
     local got_bin_sha got_bin_size
     got_bin_sha="$(SHA256 "$DEST/$path")"
-    got_bin_size="$(stat -c '%s' "$DEST/$path" 2>/dev/null || stat -f '%z' "$DEST/$path")"
+    got_bin_size="$(_filesize "$DEST/$path")"
     if [ "$got_bin_sha" != "$want_bin_sha" ] || [ "$got_bin_size" != "$want_bin_size" ]; then
       rm -f "$DEST/$path"
       echo "[x] staged $path does not match runtime-manifest.lock (sha256 or size) — refusing to keep it." >&2
-      exit 1
+      exit "$EXIT_STAGE"
     fi
     echo "    staged $path ($got_bin_size bytes, sha256 verified)"
   done
@@ -191,7 +201,10 @@ _stage_macos() {
   url="$(jq -r '.targets[$t].download.url' --arg t "$TARGET" "$LOCKFILE")"
   want_sha="$(jq -r '.targets[$t].download.sha256' --arg t "$TARGET" "$LOCKFILE")"
   want_size="$(jq -r '.targets[$t].download.size_bytes' --arg t "$TARGET" "$LOCKFILE")"
-  pkg="$(_fetch_verified "$url" "$want_sha" "$want_size")"
+  pkg="$CACHE_DIR/$(basename "$url")"
+  echo "    downloading $(basename "$url") ($((want_size / 1024 / 1024)) MiB)..."
+  fetch_verified "$url" "$pkg" "$want_size" "$want_sha" || exit $?
+  echo "    verified sha256 $want_sha"
 
   expanded="$WORK/pkg-expanded"
   rm -rf "$expanded"
@@ -201,7 +214,7 @@ _stage_macos() {
   local found
   for bin in podman gvproxy vfkit; do
     found="$(set +o pipefail; find "$expanded" -type f -name "$bin" -perm -u+x | head -1)"
-    [ -n "$found" ] || { echo "[x] '$bin' not found inside the expanded .pkg payload" >&2; exit 1; }
+    [ -n "$found" ] || { echo "[x] '$bin' not found inside the expanded .pkg payload" >&2; exit "$EXIT_STAGE"; }
     cp -p "$found" "$DEST/bin/$bin"
     chmod 0755 "$DEST/bin/$bin"
     echo "    staged bin/$bin ($(SHA256 "$DEST/bin/$bin"))"
@@ -214,7 +227,10 @@ _stage_macos() {
   kurl="$(jq -r '.targets[$t].krunkit.download.url' --arg t "$TARGET" "$LOCKFILE")"
   ksha="$(jq -r '.targets[$t].krunkit.download.sha256' --arg t "$TARGET" "$LOCKFILE")"
   ksize="$(jq -r '.targets[$t].krunkit.download.size_bytes' --arg t "$TARGET" "$LOCKFILE")"
-  karchive="$(_fetch_verified "$kurl" "$ksha" "$ksize")"
+  karchive="$CACHE_DIR/$(basename "$kurl")"
+  echo "    downloading $(basename "$kurl") ($((ksize / 1024 / 1024)) MiB)..."
+  fetch_verified "$kurl" "$karchive" "$ksize" "$ksha" || exit $?
+  echo "    verified sha256 $ksha"
   kroot="$WORK/krunkit"
   mkdir -p "$kroot"
   tar xzf "$karchive" -C "$kroot"
@@ -227,7 +243,9 @@ _stage_macos() {
 
   # Machine image: pulled by BLOB DIGEST from the registry's content-addressable
   # blob store — the digest below IS the sha256 of the blob by OCI protocol
-  # invariant, so this is a real verified-download, not a self-check.
+  # invariant, so this is a real verified-download, not a self-check. This is
+  # the 888 MiB transfer that motivated fetch_verified's resume logic in the
+  # first place (a real macOS run dropped 31 MB from the end of it).
   local oci_ref blob_digest blob_size blob_name
   oci_ref="$(jq -r '.targets[$t].machine_image.oci_ref' --arg t "$TARGET" "$LOCKFILE")"
   blob_digest="$(jq -r '.targets[$t].machine_image.blob_digest' --arg t "$TARGET" "$LOCKFILE")"
@@ -236,19 +254,11 @@ _stage_macos() {
   local registry_host registry_repo
   registry_host="${oci_ref%%/*}"
   registry_repo="${oci_ref#*/}"; registry_repo="${registry_repo%%:*}"
-  mkdir -p "$DEST/machine"
+  local blob_sha="${blob_digest#sha256:}"
   echo "    downloading machine image $blob_name ($((blob_size / 1024 / 1024)) MiB)..."
-  curl -fSL --retry 3 --retry-delay 2 \
-    -o "$DEST/machine/$blob_name" \
-    "https://$registry_host/v2/$registry_repo/blobs/$blob_digest"
-  local got_sha
-  got_sha="sha256:$(SHA256 "$DEST/machine/$blob_name")"
-  if [ "$got_sha" != "$blob_digest" ]; then
-    rm -f "$DEST/machine/$blob_name"
-    echo "[x] machine image digest mismatch: got $got_sha, pinned $blob_digest" >&2
-    exit 1
-  fi
-  echo "    verified machine image digest $got_sha"
+  fetch_verified "https://$registry_host/v2/$registry_repo/blobs/$blob_digest" \
+    "$DEST/machine/$blob_name" "$blob_size" "$blob_sha" || exit $?
+  echo "    verified machine image digest sha256:$blob_sha"
 }
 
 case "$TARGET" in
