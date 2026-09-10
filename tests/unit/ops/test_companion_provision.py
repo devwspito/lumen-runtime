@@ -1146,6 +1146,29 @@ class TestCompanionRemove:
         assert not state_dir.exists()
 
 
+class TestImageRefNeverReachesPodmanRunInOptionPosition:
+    """Security review 2026-09-10 (LOW finding, CWE-88): the persisted/
+    resolved image ref is quoted (no word-splitting) but sits where
+    `podman run` still accepts options — a value beginning with `-` would
+    be consumed as a flag, not an image name. `$STATE` is 0700 owner-only
+    (no privilege boundary crossed today, per the review's own read), but
+    `--` costs nothing and removes the shape entirely. Static check: every
+    `run --rm --network none` invocation of an image variable in both
+    scripts must have `--` immediately before it."""
+
+    def test_safent_cli(self) -> None:
+        src = _SAFENT_CLI.read_text(encoding="utf-8")
+        for line in src.splitlines():
+            if "run --rm --network none" in line:
+                assert "run --rm --network none -- " in line, line
+
+    def test_provision_sh(self) -> None:
+        src = _PROVISION_SH.read_text(encoding="utf-8")
+        for line in src.splitlines():
+            if "run --rm --network none" in line:
+                assert "run --rm --network none -- " in line, line
+
+
 class TestCompanionUsageGuard:
     def test_unknown_verb_fails_loud_with_usage(
         self, tmp_path: Path, fake_cli_bin_dir: Path

@@ -214,7 +214,9 @@ ensure_secrets() {
   else
     log "generando secretos de ads-api/ads-worker/ads-broker (una sola vez)…"
     local keypair signing_key public_key session_secret totp_key master_key
-    keypair="$("$RUNTIME" run --rm --network none "$SAFENT_ADS_IMAGE" \
+    # -- (security review 2026-09-10, LOW finding, CWE-88): stops podman/
+    # docker from ever reading $SAFENT_ADS_IMAGE as an option.
+    keypair="$("$RUNTIME" run --rm --network none -- "$SAFENT_ADS_IMAGE" \
       python -m safent_ads.tools.gen_keys)"
     signing_key="$(printf '%s\n' "$keypair" | sed -n 's/^ADS_APPROVAL_SIGNING_KEY=//p')"
     public_key="$(printf '%s\n' "$keypair" | sed -n 's/^ADS_APPROVAL_PUBLIC_KEY=//p')"
@@ -292,7 +294,8 @@ ensure_sso_keypair() {
   [ -f "$STATE/sso/ads-sso.key" ] && return 0
   log "generando par Ed25519 de SSO (puente de sesión, 026)…"
   local keypair seed_std pub_std pub_urlsafe
-  keypair="$("$RUNTIME" run --rm --network none "$SAFENT_ADS_IMAGE" \
+  # -- (LOW finding, CWE-88): see ensure_secrets's own identical comment.
+  keypair="$("$RUNTIME" run --rm --network none -- "$SAFENT_ADS_IMAGE" \
     python -m safent_ads.tools.gen_keys)"
   seed_std="$(printf '%s\n' "$keypair" | sed -n 's/^ADS_APPROVAL_SIGNING_KEY=//p')"
   pub_std="$(printf '%s\n' "$keypair" | sed -n 's/^ADS_APPROVAL_PUBLIC_KEY=//p')"
@@ -354,7 +357,8 @@ _refuse_if_image_predates_the_database() {
     psql -U ads -d ads -tAc 'SELECT version_num FROM alembic_version;' 2>/dev/null \
     | tr -d '[:space:]')"
   [ -n "$db_rev" ] || return 0
-  history="$("$RUNTIME" run --rm --network none "$SAFENT_ADS_IMAGE" alembic history 2>/dev/null || true)"
+  # -- (LOW finding, CWE-88): see ensure_secrets's own identical comment.
+  history="$("$RUNTIME" run --rm --network none -- "$SAFENT_ADS_IMAGE" alembic history 2>/dev/null || true)"
   if [ -z "$history" ]; then
     log "no se pudo leer el historial de alembic de '$SAFENT_ADS_IMAGE' — se continúa (FR-3, no bloquea el arranque)"
     return 0

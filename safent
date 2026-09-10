@@ -940,7 +940,11 @@ _refuse_if_image_predates_the_database() {
     echo "[*] No alembic_version row yet — skipping the migration-head guard."
     return 0
   fi
-  history="$("$RT" run --rm --network none "$image" alembic history 2>/dev/null || true)"
+  # Security review 2026-09-10 (LOW finding, CWE-88): `--` stops podman/
+  # docker from ever reading $image as an option (e.g. a value beginning
+  # with `-`) — $STATE is 0700, owner-only, no privilege boundary crossed
+  # today, but the image ref sits in option position regardless.
+  history="$("$RT" run --rm --network none -- "$image" alembic history 2>/dev/null || true)"
   if [ -z "$history" ]; then
     echo "[x] Could not read '$image' migration history — refusing to update against an unverifiable image." >&2
     echo "    The database is already at revision '$db_rev'; retry once the image can be inspected." >&2
@@ -1021,7 +1025,9 @@ cmd_companion_rotate() {
   mv -f "$tmp_env" "$api_env"
 
   echo "[*] Rotating the SSO Ed25519 keypair (026)..."
-  sso_keypair="$("$RT" run --rm --network none "$SAFENT_ADS_IMAGE" \
+  # -- (LOW finding, CWE-88): see _refuse_if_image_predates_the_database's
+  # own comment on this exact pattern.
+  sso_keypair="$("$RT" run --rm --network none -- "$SAFENT_ADS_IMAGE" \
     python -m safent_ads.tools.gen_keys)"
   sso_seed="$(printf '%s\n' "$sso_keypair" | sed -n 's/^ADS_APPROVAL_SIGNING_KEY=//p')"
   sso_pub_std="$(printf '%s\n' "$sso_keypair" | sed -n 's/^ADS_APPROVAL_PUBLIC_KEY=//p')"
