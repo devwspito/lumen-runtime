@@ -409,6 +409,45 @@ class TestClearRuntimeProviderCache:
         assert second[0]["provider"] == "anthropic"
         assert calls == ["gemini", "anthropic"]
 
+    def test_slow_resolve_does_not_poison_cache_after_concurrent_clear(self) -> None:
+        """PROV-05 — the ~30-70s "switch takes a while" symptom is a write-
+        after-clear race, not a missing invalidation call: _resolve_hermes_
+        runtime() runs OUTSIDE the lock (it's a blocking disk/SDK read), so a
+        resolve that started BEFORE a switch can still be mid-flight when
+        clear_runtime_provider_cache() runs, and then write its STALE result
+        back into the cache AFTER the clear — re-poisoning it with the OLD
+        provider for a full new 30s TTL window even though the switch (and
+        config.yaml) already moved on. Reproduces the exact matrix pattern:
+        turn #1 (in flight before the switch) correctly returns the OLD
+        provider; turn #2 (issued AFTER the switch) must NOT inherit turn
+        #1's stale write."""
+        from hermes.runtime import nous_engine
+
+        engine_id = 888
+        calls: list[str] = []
+
+        def _fake_resolve(model_config):
+            calls.append(model_config)
+            if len(calls) == 1:
+                # The owner switches providers (and the daemon clears the
+                # cache) WHILE this first resolve is still running.
+                nous_engine.clear_runtime_provider_cache()
+            return ({"provider": model_config}, "bare-model")
+
+        with patch.object(nous_engine, "_resolve_hermes_runtime", side_effect=_fake_resolve):
+            first = nous_engine._cached_resolve_hermes_runtime(engine_id, "gemini")
+            second = nous_engine._cached_resolve_hermes_runtime(engine_id, "anthropic")
+
+        assert first[0]["provider"] == "gemini"
+        assert second[0]["provider"] == "anthropic"
+        # The critical assertion: turn #2 must have MISSED the cache and
+        # recomputed. Without the epoch guard, turn #1's write-back (which
+        # runs AFTER the clear but is unconditional) wins the race and turn
+        # #2 reads it straight from cache — same failure mode as before the
+        # fix, just moved one layer down: "invalidated but immediately
+        # re-poisoned" instead of "never invalidated".
+        assert calls == ["gemini", "anthropic"]
+
 
 # ---------------------------------------------------------------------------
 # D. Integration-style: REST -> D-Bus mutator carries set_active end to end
