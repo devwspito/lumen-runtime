@@ -130,3 +130,50 @@ departamentos poblados, `GET /instance/features` → `edition:"community"`.
 | MCP-10 | **PASS** | `DELETE /api/v1/mcp/memory` y `/mcp/gh-test` | **204** en ambos; desaparecen de la lista |
 | MCP-11 | **PASS** | `GET /mcp` sobre una entrada con env | el payload devuelve `argv`/`health`/`tool_count`; no expone valores de env en claro |
 | MCP-12 | **PASS** | `POST /api/v1/security/scans/install {"kind":"mcp","identifier":"npx:evil-dropper-mcp"}` | 200 `score:45, verdict:"WARN", requires_owner_approval:true, engine:"trivy"` con riesgos CVE listados |
+
+## §7 En vivo (LIVE)
+
+| id | resultado | cómo | evidencia |
+|---|---|---|---|
+| LIVE-01 | **PASS** | `GET /api/v1/runtime/status` en fresco + `EnVivoView.tsx:75-79` | `{"state":"idle","activity":[],"browser_live":false}`; la vista pinta `envivo.no_tasks` y **no** monta `VncFrame` |
+| LIVE-02 | **[DUEÑO]** | requiere modelo real que dispare `browser_navigate` | el frame se monta sólo con `status.browser_live === true` (`EnVivoView.tsx:40-44`), no por el nombre de la tool |
+| LIVE-03 | **[DUEÑO]** | idem con destino bloqueado por egress | misma condición de código: sin página real `browser_live` sigue `false`, el frame no aparece |
+| LIVE-04 | **PASS** | `POST /api/v1/tasks/{task_id}/cancel` sobre una tarea de cron encolada | 200 `{"ok":true,"requested":true}` |
+| LIVE-05 | **PASS** | `grep -c teach frontend/src/views/EnVivoView.tsx` | **0** coincidencias: la vista es sólo monitor + detener, coherente con la retirada de "enseñar" |
+
+## §8 Seguridad (SEG) y §19 SSH gobernado
+
+| id | resultado | cómo | evidencia |
+|---|---|---|---|
+| SEG-01 | **PASS** | `GET /api/v1/security/kill-switch` en fresco | `{"engaged":false,"reason":null,…}` |
+| SEG-02 | **PASS** | `POST /security/kill-switch {"engaged":true,"reason":"matriz: prueba de freno"}` **sin MFA enrolado** | 200 `{"ok":true,"engaged":true}`; el estado devuelve `reason`, `changed_by`, `changed_at` |
+| SEG-03 | **PASS** | `POST /api/v1/chat` con el freno activo | **423** `{"code":"kill_switch_engaged","message":"El freno de emergencia está activo — libéralo desde Seguridad para enviar mensajes."}` |
+| SEG-04 | **PASS** | `POST /security/kill-switch {"engaged":false,"totp":<válido>}` | 200 `{"ok":true,"engaged":false}`; el chat vuelve a admitir turnos (200) inmediatamente después |
+| SEG-05 | **PASS** (código) | `frontend/src/components/KillSwitchBanner.tsx:51-54` | banner global con texto de alerta y `<Link to="/sistema?tab=seguridad">Liberar</Link>` |
+| **Liberación SIN MFA (hallazgo C)** | **FALLA (parcial — sigue sin salida en instalación nueva)** | con MFA **no** enrolado: `POST … {"engaged":false}` y `{"engaged":false,"device_password":"contrasena-falsa-matriz"}` | el camino nuevo existe y llega de verdad al helper root (`security_api.py:117-166` → `hermes-tailscale-control` acción `kill_switch_release`), pero ambas respuestas son **403** `invalid_device_password` y el journal explica por qué: `WARNING hermes-tailscale-control: cuenta hermes-user sin contraseña válida (passwordless/locked) — gate FAIL-CLOSED (configura una en el onboarding)` + `kill_switch_release: PAM verification FAILED`. En una instalación nueva **nadie ha puesto contraseña de dispositivo**, así que la única salida real sigue siendo enrolar MFA con el freno echado (`POST /mfa/enroll` **sí** funciona frenado) y soltar con TOTP. Cero fugas: `grep` del journal por la contraseña falsa → 0 |
+| SEG-06 | **[DUEÑO]** | `GET /api/v1/approvals/pending` | `[]` 200 — la tarjeta sólo la genera una propuesta de tool de un modelo real |
+| SEG-07 | **[DUEÑO]** | idem | — |
+| SEG-08 | **PASS** | `POST /api/v1/mfa/enroll {"totp":null}` (con el freno activo) | 200 `otpauth://totp/Safent:owner?secret=…&issuer=Safent&algorithm=SHA1&digits=6&period=30`; `GET /mfa/status` → `{"enrolled":true}`. Matiz: el enrolado es **inmediato** en la primera llamada (`approvals_api.py:82-92`) y la UI (`MfaEnroll.tsx`) sólo confirma en local — nadie comprueba que el dueño llegara a escanear el QR |
+| SEG-09 | **PASS** | `POST /security/kill-switch {"engaged":false,"totp":"000000"}` | **401** `{"code":"invalid_totp"}` |
+| SEG-10 | **PASS** | reenviar el TOTP ya gastado | **401** `{"code":"totp_replayed"}`; con un código nuevo → 200 |
+| SEG-11 | **[DUEÑO]** | `GET /api/v1/inbound-delegations` | `[]` 200; exige un segundo Safent emparejado |
+| SEG-12 | **PASS** | `POST /policies/preset` con `totp:""` y con TOTP válido | sin código **401** `invalid_totp`; con código 200 `{"ok":true,"preset":"bloqueado"}` y el catálogo pasa a **0 de 88 tools activas**; vuelta a `equilibrado` 200 |
+| SEG-13 | **PASS** (código) | `SeguridadView.tsx:502-503,480-483` | los toggles se acumulan en `toolPending` y aparece la barra "Guardar cambios"/"Descartar" |
+| SEG-14 | **PASS** | `POST /policies/tools {"tools":{"web_search":false},"totp":<válido>}` | 200 `{"ok":true,"count":1}`; `GET /policies` confirma `web_search:false` y persiste |
+| SEG-15 | **FALLA (dead-end)** | `POST /policies/mfa_on_dangers {"enabled":false,"totp":<válido>}` → luego los **cuerpos exactos** que manda la UI cuando `mfaDisabled` (`SeguridadView.tsx:622-671`) | desactivar la verificación devuelve 200 `{"mfa_on_dangers":false}`, pero a partir de ahí **el backend sigue exigiendo TOTP** y la UI ya no lo pide: `POST /policies/preset {"preset":"permisivo","totp":""}` → **401**, `POST /policies/tools {…,"totp":""}` → **401**, y —lo peor— `POST /policies/mfa_on_dangers {"enabled":true,"totp":""}` → **401**: ni siquiera se puede volver a **encender** la verificación desde la UI. El dueño se queda con presets, lote de permisos y el propio interruptor rotos, con un toast de error y sin ningún sitio donde teclear el código |
+| SEG-16 | **PASS** (código) | `seg.changes.discard` | vuelve al estado persistido sin llamada de red |
+| SEG-17 | **PASS** (código) | `SeguridadView.tsx:517-539,854-861` | `defenseGroups` (categoría `security`) se pinta aparte del catálogo de capacidades |
+| SEG-18 | **PASS** | `GET /api/v1/egress/mode` recién arrancado | `{"mode":"deny","description":"deny: only explicitly allowed domains reachable"}` — deny-by-default sigue cerrado |
+| SEG-19 | **PASS** | `POST /egress/mode` con `totp:""` **teniendo `mfa_on_dangers:false`** y con TOTP | sin código **401** `Cambiar el modo de red exige tu código MFA` (no hay bypass, tal como dice el diseño); con código 200 `{"ok":true,"mode":"allow","pushed":true}` y vuelta a `deny` 200 |
+| SEG-20 | **PASS** | `POST /egress/deny/add {"domain":"example.org"}` en modo `allow`, **sin** TOTP | 200 `{"ok":true,"denylist":["example.org"],"pushed":true}` |
+| SEG-21 | **PASS** | `POST /egress/domains/grant` con dominio válido e inválido | `example.com` → 200 `{"domains":["example.com"],"pushed":true}`; `"no es dominio"` → **422** `{"code":"invalid_domain"}` (nada de `{ok:false}` bajo 200) |
+| SEG-22 | **PASS** | `GET /api/v1/egress/domains` | `{"mode":"deny","domains":["example.com"],"denylist":[],"blocklist_count":0}` — el contador existe y viene del backend (0 en esta instalación) |
+| SEG-23 | **PASS** | `GET /api/v1/tailnet` en fresco | `{"configured":false,"online":false,"node_name":null,…,"last_attempt":null}` |
+| SEG-24 | **PASS — hallazgo D CERRADO** (éxito real: **[DUEÑO]**) | `POST /api/v1/tailnet/connect {"auth_key":"tskey-auth-FAKEmatrizfinal-noreal-…"}` y sondeo de `GET /tailnet` cada 15 s | 202 `{"staged":true}`; a los ~45 s el helper agota los reintentos y el estado pasa a `{"configured":false,"online":false,"last_attempt":{"at":"…14:47:42…","ok":false,"error_kind":"tailscale_up_failed"}}` — ya **no** miente con `configured:true`. La UI mapea ese estado a `failed` (`SeguridadView.tsx:1402-1406`). `grep` del journal por la clave falsa → **0**; `/run/hermes/tailscale-control/` vacío (shred) |
+| SEG-25 | **PASS** (mecanismo) / **[DUEÑO]** (éxito) | `POST /api/v1/tailnet/disconnect {"password":"password-falsa-matriz-2"}` | 200 `{"staged":true}`; el helper root responde `disconnect action: PAM verification FAILED for user 'hermes-user' — aborting` y aborta sin tocar el marker; 0 apariciones de la contraseña en el journal |
+| SEG-26 | **PASS** | `POST /api/v1/security/scans/install {"kind":"skill",…}` → `POST /api/v1/security/decisions {…,"decision":"allow","totp":<válido>}` | 201 `{"ok":true,"reauth_grant":"q7TOulZnKI3I…"}`; `GET /security/scans` deja la fila `official/research/gitnexus-explorer FAIL ALLOWED`; `GET /security/audit/head` con `integrity:"present"` |
+| **SKL-04 (flujo de UI, UN solo TOTP)** | **PASS — hallazgo A CERRADO** | secuencia exacta de `SkillsView.handleScanApprove`: `scans/install` → `security/decisions {…,totp}` → `POST /skills/hub/install {"identifier":"official/research/gitnexus-explorer","force":true}` con cabecera `X-Owner-Reauth-Grant: <reauth_grant>` y **sin** segundo TOTP | **202** `{"op_id":…}` → `GET /skills/hub/ops/{id}` → `{"status":"done"}`; `GET /skills` lista `native:gitnexus-explorer`. El 401 `invalid_totp` de R11 ya no ocurre |
+| SEG-WS | **PASS** | handshake WebSocket a `/api/v1/watch/agent/live` y `/api/v1/vnc` sin token, con token malo y con el bearer | sin token → **403**, token malo → **403**, bearer válido → **101 Switching Protocols** en ambos |
+| SSH-01 | **PASS** | `podman exec … which ssh && ssh -V` | `/usr/bin/ssh`, `OpenSSH_9.6p1 Ubuntu-3ubuntu13.19` — el `openssh-client` del follow-up de `ssh-v2.md` ya está horneado |
+| SSH-02 | **PASS — el GAP está cerrado** | dentro de la jaula: `build_capability_tool_specs(broker=…, consent_context=…)` y `GET /api/v1/policies` | el esquema de tools del LLM trae **24** capacidades e incluye `tailnet_ssh`, `tailnet_file_get`, `tailnet_file_put`; el catálogo de políticas (88 tools, preset `equilibrado`) también las lista. Ya no es cierto que "el agente no puede invocarlo" |
+| SSH-03 | **PASS — el GAP está cerrado** | `GET /api/v1/tailnet/ssh-hosts`; `DELETE /api/v1/tailnet/ssh-hosts/{host}` | `{"hosts":[]}` 200; el DELETE valida el TOTP (`totp:""` → **422** `string_too_short`) y la UI lo consume (`client.ts:795-802`, `SshHostsSection`) |
