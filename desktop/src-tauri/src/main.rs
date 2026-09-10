@@ -265,7 +265,7 @@ fn progress(window: &tauri::WebviewWindow, msg: &str) {
     if m.is_empty() {
         return;
     }
-    let _ = window.eval(&format!(
+    let _ = window.eval(format!(
         "window.__safentProgress && window.__safentProgress(`{}`);",
         js_escape(m)
     ));
@@ -274,7 +274,7 @@ fn progress(window: &tauri::WebviewWindow, msg: &str) {
 /// Show a human error inside the (already-visible) loader window instead of a blank page.
 fn show_error(window: &tauri::WebviewWindow, message: &str) {
     eprintln!("safent-desktop: {message}");
-    let _ = window.eval(&format!(
+    let _ = window.eval(format!(
         "window.__safentError && window.__safentError(`{}`);",
         js_escape(message)
     ));
@@ -297,20 +297,18 @@ fn run_and_stream(window: &tauri::WebviewWindow, program: &str, args: &[&str]) -
         child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>),
         child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>),
     ];
-    for pipe in pipes {
-        if let Some(p) = pipe {
-            let w = window.clone();
-            handles.push(std::thread::spawn(move || {
-                let mut last = String::new();
-                for line in BufReader::new(p).lines().map_while(Result::ok) {
-                    if !line.trim().is_empty() {
-                        progress(&w, &line);
-                        last = line;
-                    }
+    for p in pipes.into_iter().flatten() {
+        let w = window.clone();
+        handles.push(std::thread::spawn(move || {
+            let mut last = String::new();
+            for line in BufReader::new(p).lines().map_while(Result::ok) {
+                if !line.trim().is_empty() {
+                    progress(&w, &line);
+                    last = line;
                 }
-                last
-            }));
-        }
+            }
+            last
+        }));
     }
     let status = child.wait().map_err(|e| format!("error esperando el instalador: {e}"))?;
     let mut last = String::new();
@@ -439,7 +437,7 @@ fn push_latest_version(window: &tauri::WebviewWindow) {
                 && v.len() <= 20
                 && v.split('.').all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
             if ok {
-                let _ = window.eval(&format!("window.__safentLatestVersion = `{}`;", js_escape(&v)));
+                let _ = window.eval(format!("window.__safentLatestVersion = `{}`;", js_escape(&v)));
             }
         }
     }
