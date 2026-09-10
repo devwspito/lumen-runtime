@@ -80,6 +80,17 @@ while [ "$i" -lt "$n" ]; do
   want_sha="$(jq -r --arg t "$TARGET" ".targets[\$t].entries[$i].sha256" "$LOCKFILE")"
   base="$(basename "$path")"
   [ -f "$DEST/$path" ] || fail "podman toolchain file missing from staged tree: $path"
+  if [ "$path" = "etc/containers/containers.conf" ]; then
+    # Deliberately patched post-verification (stage-runtime.sh's own
+    # _patch_bundled_containers_conf, packaging review item 3: lock_type =
+    # "file" so the bundled podman never collides with the host's own on
+    # /dev/shm) — its lock entry pins the PRISTINE upstream download on
+    # purpose, so the staged (patched) file never matches it again; same
+    # special case as _already_staged() itself.
+    grep -q '^lock_type = "file"' "$DEST/$path" || fail "$path: not patched with lock_type"
+    i=$((i + 1))
+    continue
+  fi
   got_sha="$(sha256sum "$DEST/$path" | awk '{print $1}')"
   [ "$got_sha" = "$want_sha" ] || fail "$path: staged sha256 disagrees with runtime-manifest.lock"
   bundle_sha="$(jq -r --arg p "$base" '.entries[] | select(.path == $p) | .sha256' "$MANIFEST")"

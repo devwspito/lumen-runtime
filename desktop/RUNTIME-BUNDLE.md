@@ -192,3 +192,17 @@ tipado en vez de silencioso); verificación minisign de `runtime-manifest.json`
 con una firma real generada con `minisign -G`/`-S` (no un fixture inventado).
 24 tests, `cargo test` limpio. Falta cablear `run_update`/`UpdatePorts` al CLI
 embebido real — eso es integración de T011, no de esta entrega.
+
+## AppImage excluido de esta entrega (revisión de empaquetado, item 5)
+
+`runtime-manifest.lock` → `excluded_bundle_formats.appimage` tiene el
+razonamiento completo. En corto: linuxdeploy/patchelf reescriben el RUNPATH
+de 6 de los 15 binarios del runtime al empaquetar el AppImage — parte normal
+de cómo AppImage se hace reubicable, no manipulación — así que su sha256 ya
+no casa con `targets[].entries` (el valor pre-empaquetado) y
+`cmd_stage_runtime` los rechaza correctamente con `runtime_hash_mismatch` en
+cuanto esa verificación corre de verdad. El `.deb` verifica 15/15 exacto
+(medido en vivo) y el `.rpm` comparte el mismo modelo no reubicable, así que
+Linux ya queda cubierto sin el AppImage. **Pendiente para T023**
+(`agents-autonomy/safent-desktop.yml`, otro repo): dejar de publicar el
+AppImage en `latest.json`/el Release; sólo `.deb` + `.rpm`.

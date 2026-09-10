@@ -281,6 +281,9 @@
   "excluded_targets": {
     "x86_64-apple-darwin": "containers/podman v6.1.1 no publica podman-installer-macos-amd64.pkg (solo arm64 + darwin_arm64 remote-only). Consistente con contracts/update.md: 'darwin-x86_64 ausente a proposito: Mac Intel no esta servido'. No hay nada barato que empaquetar; no se intenta."
   },
+  "excluded_bundle_formats": {
+    "appimage": "Decision (packaging review item 5, specs/028-safent-app-nativa/verificacion-paquete-linux.md): the AppImage produced by agents-autonomy/safent-desktop.yml (linuxdeploy/patchelf) rewrites the ELF RUNPATH of 6 of the 15 bundled podman-toolchain binaries (crun, fuse-overlayfs, fusermount3, passt, conmon, catatonit — measured live: +33040/+63256/+63992/+62432/+60088/+39920 bytes each) to make them relocatable, which is what AppImage's OWN distribution model requires — not tampering, not a build defect, and not something stage-runtime.sh's download-time verification can see (it verifies the PRE-packaging download). Their sha256 in targets[].entries above is the pristine, pre-AppImage-repack value, so cmd_stage_runtime's runtime verification (data-model.md RuntimeBundle: 'un binario que no verifica no se ejecuta jamas') correctly, and permanently, fails runtime_hash_mismatch for an AppImage build once that verification actually runs for real. podman/netavark/aardvark-dns/rootlessport stay byte-identical and would verify fine on their own, but a partially-verifiable bundle is not an acceptable delivery. The .deb already verifies 15/15 exact (measured live) and the .rpm shares the same non-relocating packaging model, so Linux distribution needs are already covered without AppImage. This is a deliverable-scope decision for T023 (agents-autonomy/safent-desktop.yml, a different repo/worktree) to apply: stop publishing the AppImage artifact in latest.json/the GitHub Release; .deb and .rpm only. Revisiting this later would need stage-runtime.sh (or T023 itself) to capture a SEPARATE, POST-AppImage-repack hash set and cmd_stage_runtime to pick the matching set for the bundle format it is actually running from — real added complexity for a format with no capability .deb/.rpm lack."
+  },
   "target_key_format": "Rust target triple (matches agents-autonomy/safent-desktop.yml's build matrix): aarch64-apple-darwin, x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu. x86_64-apple-darwin is a recognized-but-excluded triple (see excluded_targets).",
   "app_files": {
     "note": "safent CLI + host launcher + companion provisioning assets — REPO content, recomputed by stage-runtime.sh from the current checkout on every run, never hand-pinned like targets[].entries.",
@@ -288,8 +291,8 @@
       {
         "repo_path": "safent",
         "flat_name": "safent",
-        "sha256": "c2758e8536266da9ed585e7675ad7fe786d22269945ff89e81bb6d8bc07bc021",
-        "size_bytes": 89116,
+        "sha256": "d15dfce5659fabdb5b27f5510ddefd7ce1d06111ac3c191cf5a3d6c3762b6884",
+        "size_bytes": 90109,
         "mode": "0755"
       },
       {
