@@ -17,6 +17,11 @@ use std::process::{Command, Stdio};
 mod window_policy;
 use window_policy::WindowPolicy;
 
+// T014: update orchestrator (contracts/update.md) — plan/orchestrator are pure
+// resp. port-driven and exercised entirely by `cargo test`; wiring the plugin
+// into the running app's Builder is bootstrap work for the T011 lane.
+mod update;
+
 const BOOTSTRAP_URL: &str =
     "https://raw.githubusercontent.com/devwspito/safent-runtime/main/get-safent.sh";
 

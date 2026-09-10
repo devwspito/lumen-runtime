@@ -23,5 +23,13 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "__TAURI_UPDATER_PUBKEY__",
+      "endpoints": [
+        "https://github.com/devwspito/safent-runtime/releases/latest/download/latest.json"
+      ]
+    }
   }
 }

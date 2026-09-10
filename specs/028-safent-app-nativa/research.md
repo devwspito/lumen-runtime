@@ -122,6 +122,69 @@ fija una decisión de arquitectura que el diseño necesita. Las cifras están
   mantiene como pieza y como puerta al ámbito de sistema.
 - **Links**: 028 FR-014, matriz 025 DIST-06; gobernanza en `plan.md`.
 
+### Verificación en vivo — esta DGX, worktree `desk2`, 10-sep-2026 (T010)
+
+Matriz 025 DIST-06 es evidencia de **otra** máquina. Esta sección la repite en
+esta DGX (Ubuntu 24.04.4 LTS, aarch64, kernel 6.17, `kernel.
+apparmor_restrict_unprivileged_userns=1` confirmado activo) con el **binario
+pinneado real** (podman-static v6.1.1 aarch64, el mismo de
+`runtime-manifest.lock`), y **afina** el «por qué» del apartado anterior con un
+hallazgo que cambia la condición exacta del ayudante.
+
+- **Cage completo, rootless, con el podman del sistema** (`/usr/bin/podman`
+  4.9.3, perfilado por `/etc/apparmor.d/podman`): contenedor `desk2-cage-test`
+  levantado con las flags exactas de `run-safent.sh` (`--systemd=always`,
+  `--cap-add NET_ADMIN,SYS_ADMIN,AUDIT_READ`, `--security-opt
+  seccomp=<perfil>`, `unmask=/sys/kernel/security`, `label=disable`,
+  `apparmor=unconfined` porque AppArmor está `Y`), imagen real
+  `ghcr.io/devwspito/safent:0.8.42` (la del `VERSION` del repo). Resultado —
+  **PASA los cuatro invariantes**: `systemd` PID1 (`is-system-running:
+  running`, cero unidades fallidas), Landlock (`landlock_loader BROWSER OK —
+  confinamiento FS activo` en el journal, LSM list del kernel incluye
+  `landlock`), netns (`/run/netns/{hermes-browser,hermes-mcp}` +
+  `veth-hbr-host`/`veth-hmcp-host` reales), nftables (las tres tablas
+  `hermes_host`/`hermes_browser_egress`/`hermes_mcp_egress` con las reglas
+  anti-pivot cargadas). Contenedor destruido tras la prueba.
+- **El mismo cage con un binario podman REUBICADO Y SIN PERFIL** (copiado a
+  `/tmp`, confirmado `unconfined` vía `/proc/self/attr/current`) — el sustituto
+  más fiel posible, desde este host, de lo que será
+  `~/.safent/runtime/<versión>/podman`: **también PASA los cuatro invariantes**,
+  idéntico resultado (`desk2-cage-test2`, misma imagen, mismo journal de
+  Landlock, mismas tres tablas nftables, cero unidades fallidas). Contenedor y
+  volumen destruidos tras la prueba.
+- **Hallazgo que afina el «por qué»**: la restricción de Ubuntu 24.04
+  (`apparmor_restrict_unprivileged_userns=1`) sólo bloquea la creación de
+  espacio de nombres de usuario a procesos **confinados por un perfil que no
+  la declara** — comprobado con `unshare --user --map-root-user id` (el
+  binario `/usr/bin/unshare` real, sin perfil dedicado) → **bloqueado**
+  (`Operación no permitida` en `/proc/self/uid_map`). Un binario **realmente
+  sin perfil** (el podman copiado a `/tmp`, `unconfined` confirmado) →
+  **permitido** (`podman unshare id` da `uid=0`), y sostiene el cage entero
+  como demuestra la prueba anterior. Es decir: en esta máquina, un podman
+  empaquetado en `$HOME`/`~/.safent` **no necesita el ayudante** — la
+  condición real que sí lo exige es `kernel.unprivileged_userns_clone=0` (el
+  interruptor Debian/Ubuntu clásico, **distinto** del de AppArmor; en esta DGX
+  vale `1`), no «Ubuntu 24.04+» como tal.
+- **Decisión (confirmada, condición afinada)**: rootless por defecto se
+  mantiene — es el resultado medido, dos veces, con el binario pinneado real.
+  El ayudante privilegiado **no se ejecuta incondicionalmente**: el
+  reconciliador lo invoca sólo cuando `HostFacts.userNsAllowed` observa el
+  bloqueo real (sonda barata en `preflight`/`engine_provisioning`: `<podman
+  empaquetado> unshare true`; éxito ⇒ `userNsAllowed=true` ⇒ sin ayudante;
+  fallo con «Operación no permitida» en `uid_map` ⇒ `userNsAllowed=false` ⇒
+  `InstallPrivilegedHelper`). Esto ya es exactamente lo que `data-model.md`
+  modela (`HostFacts.userNsAllowed: bool`, `RepairAction::
+  InstallPrivilegedHelper` condicional) — esta verificación confirma que el
+  diseño existente es el correcto y fija la sonda concreta que `T011`
+  (`bootstrap_service.rs`, otro lane) debe usar para poblar ese campo.
+- **No hizo falta rootful**: al pasar rootless los cuatro invariantes con el
+  binario real (dos veces), la rama «si rootless no basta, rootful con
+  ayudante acotado» de este ticket no se activa. No se probó rootful en esta
+  DGX por no ser necesario, no por no poder.
+- **Evidencia**: comandos, salidas y limpieza en el registro de la sesión T010
+  (worktree `lumen-runtime-desk2`, contenedores `desk2-cage-test`/
+  `desk2-cage-test2`, ambos destruidos; ningún contenedor ajeno tocado).
+
 ## Decisión: reconciliador auto-sanador como componente de primer nivel
 
 - **Elegido**: un **planificador puro** `reconcile(HostFacts, DesiredState) →
