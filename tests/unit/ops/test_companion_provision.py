@@ -69,7 +69,15 @@ printf '401'
 exit 0
 """
 
+# gen_keys prints STANDARD base64 (the fake above) for BOTH the approval
+# keypair (unchanged, T193/024) and the 026 SSO keypair (T001) —
+# provision.sh calls gen_keys twice, once per pair. Kept byte-identical to
+# the value test_gitleaks_allowlist.py pins (it must stay literally present
+# in this file, or that allowlist entry becomes dead weight) — it happens
+# to contain no `+`/`/`, so TestSsoKeypairUrlSafeConversion below uses ITS
+# OWN fake with different values to actually exercise the alphabet swap.
 _GEN_KEYS_PUBLIC = "ZmFrZS1wdWJsaWMta2V5LWI2NA=="
+_GEN_KEYS_PUBLIC_URLSAFE = _GEN_KEYS_PUBLIC
 
 
 @pytest.fixture()
@@ -200,6 +208,88 @@ class TestFirstRunWritesExpectedFiles:
             assert secret not in combined_output, f"secret value leaked into output: {secret!r}"
 
 
+class TestSsoKeypairProvisioning:
+    """026, contracts/sso.md §3 — the SSO Ed25519 pair provisioned alongside
+    the bearer: private half 0400 on the host, public half handed to the
+    companion via secrets/api.env, never argv/log."""
+
+    def test_private_key_is_0400(
+        self, provisioned_state: tuple[Path, subprocess.CompletedProcess[str]]
+    ) -> None:
+        state_dir, _ = provisioned_state
+        assert _mode(state_dir / "sso" / "ads-sso.key") == 0o400
+
+    def test_sso_dir_is_0700(
+        self, provisioned_state: tuple[Path, subprocess.CompletedProcess[str]]
+    ) -> None:
+        state_dir, _ = provisioned_state
+        assert _mode(state_dir / "sso") == 0o700
+
+    def test_public_key_in_api_env_is_url_safe_base64(
+        self, provisioned_state: tuple[Path, subprocess.CompletedProcess[str]]
+    ) -> None:
+        state_dir, _ = provisioned_state
+        api_env = (state_dir / "secrets" / "api.env").read_text()
+        lines = {
+            ln.split("=", 1)[0]: ln.split("=", 1)[1]
+            for ln in api_env.splitlines()
+            if "=" in ln and not ln.startswith("#")
+        }
+        assert lines["ADS_SSO_PUBLIC_KEY"] == _GEN_KEYS_PUBLIC_URLSAFE
+        assert "+" not in lines["ADS_SSO_PUBLIC_KEY"]
+        assert "/" not in lines["ADS_SSO_PUBLIC_KEY"]
+
+    def test_private_key_never_reaches_stdout_or_stderr(
+        self, provisioned_state: tuple[Path, subprocess.CompletedProcess[str]]
+    ) -> None:
+        state_dir, result = provisioned_state
+        seed = (state_dir / "sso" / "ads-sso.key").read_text().strip()
+        combined_output = result.stdout + result.stderr
+        assert seed not in combined_output
+
+
+# gen_keys public halves can legitimately contain base64's `+`/`/` chars;
+# the shared fake above (_GEN_KEYS_PUBLIC) happens not to — it is pinned
+# byte-identical to test_gitleaks_allowlist.py's allowlisted value. This
+# fake is used ONLY by TestSsoKeypairUrlSafeConversion below, so it can use
+# a value that actually exercises the standard->url-safe base64 swap
+# without touching the gitleaks-pinned literal.
+_FAKE_PODMAN_SPECIAL_CHARS_PUBLIC = _FAKE_PODMAN.replace(
+    "ADS_APPROVAL_PUBLIC_KEY=ZmFrZS1wdWJsaWMta2V5LWI2NA==",
+    "ADS_APPROVAL_PUBLIC_KEY=AAAA+BBBB/CCCC==",
+)
+
+
+class TestSsoKeypairUrlSafeConversion:
+    """`tr '+/' '-_'` must actually swap the alphabet, not just pass a value
+    through that never contained those characters (the everyday fake used
+    elsewhere in this file for the gitleaks-allowlist reason above)."""
+
+    def test_plus_and_slash_are_swapped_to_dash_and_underscore(
+        self, tmp_path: Path
+    ) -> None:
+        bin_dir = tmp_path / "fakebin"
+        bin_dir.mkdir()
+        podman = bin_dir / "podman"
+        podman.write_text(_FAKE_PODMAN_SPECIAL_CHARS_PUBLIC)
+        podman.chmod(0o755)
+        curl = bin_dir / "curl"
+        curl.write_text(_FAKE_CURL)
+        curl.chmod(0o755)
+
+        state_dir = tmp_path / "state"
+        result = _run_provision(state_dir, bin_dir, tmp_path / "podman.log")
+
+        assert result.returncode == 0, result.stderr
+        api_env = (state_dir / "secrets" / "api.env").read_text()
+        lines = {
+            ln.split("=", 1)[0]: ln.split("=", 1)[1]
+            for ln in api_env.splitlines()
+            if "=" in ln and not ln.startswith("#")
+        }
+        assert lines["ADS_SSO_PUBLIC_KEY"] == "AAAA-BBBB_CCCC=="
+
+
 class TestSecondRunIsIdempotent:
     def test_second_run_changes_no_file(
         self, tmp_path: Path, fake_bin_dir: Path
@@ -215,6 +305,21 @@ class TestSecondRunIsIdempotent:
         after = _hash_tree(state_dir)
 
         assert before == after
+
+    def test_second_run_does_not_regenerate_the_sso_keypair(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        state_dir = tmp_path / "state"
+        podman_log = tmp_path / "podman.log"
+        first = _run_provision(state_dir, fake_bin_dir, podman_log)
+        assert first.returncode == 0, first.stderr
+        seed_before = (state_dir / "sso" / "ads-sso.key").read_bytes()
+        pub_before = (state_dir / "secrets" / "api.env").read_text()
+
+        second = _run_provision(state_dir, fake_bin_dir, podman_log)
+        assert second.returncode == 0, second.stderr
+        assert (state_dir / "sso" / "ads-sso.key").read_bytes() == seed_before
+        assert (state_dir / "secrets" / "api.env").read_text() == pub_before
 
     def test_vendor_env_is_merged_once_and_only_once(
         self, tmp_path: Path, fake_bin_dir: Path
@@ -310,6 +415,7 @@ _SAFENT_CLI = _REPO_ROOT / "safent"
 #   network inspect safent-companions
 #   network rm safent-companions
 #   pull <image>
+#   run --rm --network none <image> python -m safent_ads.tools.gen_keys
 #   compose -p safent-ads -f <compose> ps -q -a
 #   compose -p safent-ads -f <compose> up -d [--force-recreate ads-api]
 #   compose -p safent-ads -f <compose> down
@@ -326,6 +432,17 @@ case "$1" in
     ;;
   pull)
     [ "${FAKE_PULL_FAIL:-0}" = "1" ] && exit 1
+    exit 0
+    ;;
+  run)
+    [ "${FAKE_GEN_KEYS_FAIL:-0}" = "1" ] && exit 1
+    for a in "$@"; do
+      if [ "$a" = "safent_ads.tools.gen_keys" ]; then
+        echo "ADS_APPROVAL_SIGNING_KEY=new-sso-seed-$RANDOM$RANDOM"
+        echo "ADS_APPROVAL_PUBLIC_KEY=new+sso/pub-$RANDOM$RANDOM=="
+        exit 0
+      fi
+    done
     exit 0
     ;;
   compose)
@@ -373,7 +490,8 @@ def fake_cli_bin_dir(tmp_path: Path) -> Path:
 
 def _companion_state(tmp_path: Path, *, provisioned: bool) -> Path:
     """A minimal $COMPANION_STATE — only what the CLI's own verbs read
-    (bearer, secrets/api.env, tls/ca.crt), never provision.sh's full output."""
+    (bearer, secrets/api.env, tls/ca.crt, sso/ads-sso.key), never
+    provision.sh's full output."""
     state_dir = tmp_path / "state"
     state_dir.mkdir()
     if provisioned:
@@ -381,10 +499,15 @@ def _companion_state(tmp_path: Path, *, provisioned: bool) -> Path:
         (state_dir / "tls" / "ca.crt").write_text("dummy-ca")
         (state_dir / "secrets").mkdir()
         (state_dir / "secrets" / "api.env").write_text(
-            "ADS_MCP_TOKEN=old-bearer-value\nADS_SESSION_SECRET=x\n"
+            "ADS_MCP_TOKEN=old-bearer-value\n"
+            "ADS_SESSION_SECRET=x\n"
+            "ADS_SSO_PUBLIC_KEY=old-sso-pub\n"
         )
         (state_dir / "bearer").write_text("old-bearer-value\n")
         (state_dir / "bearer").chmod(0o400)
+        (state_dir / "sso").mkdir()
+        (state_dir / "sso" / "ads-sso.key").write_text("old-sso-seed\n")
+        (state_dir / "sso" / "ads-sso.key").chmod(0o400)
     return state_dir
 
 
@@ -560,9 +683,46 @@ class TestCompanionRotate:
         assert "ADS_SESSION_SECRET=x" in api_env  # every other line survives
         assert api_env.count("ADS_MCP_TOKEN=") == 1
 
+        # 026 — the SSO Ed25519 pair rotates alongside the bearer.
+        new_sso_seed = (state_dir / "sso" / "ads-sso.key").read_text().strip()
+        assert new_sso_seed != "old-sso-seed"
+        assert stat.S_IMODE((state_dir / "sso" / "ads-sso.key").stat().st_mode) == 0o400
+        assert "ADS_SSO_PUBLIC_KEY=old-sso-pub" not in api_env
+        assert api_env.count("ADS_SSO_PUBLIC_KEY=") == 1
+        new_sso_pub = next(
+            ln.split("=", 1)[1]
+            for ln in api_env.splitlines()
+            if ln.startswith("ADS_SSO_PUBLIC_KEY=")
+        )
+        assert "+" not in new_sso_pub and "/" not in new_sso_pub  # url-safe b64
+
         log = podman_log.read_text()
+        assert "run --rm --network none" in log
         assert "up -d --force-recreate ads-api" in log
         assert "restart safent" in result.stdout.lower()
+
+    def test_fails_loud_when_sso_keygen_fails(
+        self, tmp_path: Path, fake_cli_bin_dir: Path
+    ) -> None:
+        state_dir = _companion_state(tmp_path, provisioned=True)
+        home_dir = tmp_path / "home"
+        _companion_bin_dir(home_dir, provisioned=True)
+        old_bearer = (state_dir / "bearer").read_text().strip()
+
+        result = _run_companion(
+            "rotate",
+            fake_bin_dir=fake_cli_bin_dir,
+            state_dir=state_dir,
+            home_dir=home_dir,
+            podman_log=tmp_path / "podman.log",
+            extra_env={"FAKE_GEN_KEYS_FAIL": "1"},
+        )
+
+        assert result.returncode != 0
+        # Bearer rotation already committed before the SSO step — the old
+        # SSO key is left untouched rather than half-rotated.
+        assert (state_dir / "bearer").read_text().strip() != old_bearer
+        assert (state_dir / "sso" / "ads-sso.key").read_text().strip() == "old-sso-seed"
 
     def test_fails_loud_when_secrets_are_missing(
         self, tmp_path: Path, fake_cli_bin_dir: Path

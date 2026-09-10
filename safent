@@ -16,7 +16,7 @@ set -e
 # Monotonic CLI revision. `safent update` self-updates this script from CLI_URL
 # when the published revision is HIGHER (never downgrades). Bump on every CLI
 # change or the fix will not reach installed machines.
-_CLI_REV=8
+_CLI_REV=9
 
 # ONE runtime image for both community and associate (paired) operation. The
 # image carries no edition-specific code: pairing state (the .enterprise marker +
@@ -193,7 +193,7 @@ _provision_companion() {
     }
   done
   if "$COMPANION_BIN_DIR/provision.sh"; then
-    COMPANION_RUN_ARGS="--network safent-companions -v ${COMPANION_STATE}/companions.json:/etc/hermes/companions.json:ro -v ${COMPANION_STATE}/tls/ca.crt:/etc/hermes/companions/ads-ca.crt:ro -v ${COMPANION_STATE}/bearer:/etc/hermes/companions/ads.bearer:ro"
+    COMPANION_RUN_ARGS="--network safent-companions -v ${COMPANION_STATE}/companions.json:/etc/hermes/companions.json:ro -v ${COMPANION_STATE}/tls/ca.crt:/etc/hermes/companions/ads-ca.crt:ro -v ${COMPANION_STATE}/bearer:/etc/hermes/companions/ads.bearer:ro -v ${COMPANION_STATE}/sso/ads-sso.key:/etc/hermes/companions/ads-sso.key:ro"
   else
     echo "[!] Companion provisioning failed — starting Safent without it (FR-3)." >&2
   fi
@@ -809,13 +809,18 @@ cmd_companion_update() {
   echo "[ok] Companion updated."
 }
 
-# Re-emit the /mcp bearer on BOTH sides: the file Safent's daemon sends
-# (`$STATE/bearer`, bind-mounted into Safent) and the value ads-api validates
-# incoming requests against (`ADS_MCP_TOKEN` in secrets/api.env, loaded via
-# ads-api's env_file at container start — NOT hot-reloaded, hence the
-# --force-recreate below). Safent's OWN daemon reads its side of the bind
-# once at startup too, so the owner still has to restart it by hand — we
-# never restart Safent from here (companion verbs stay companion-scoped).
+# Re-emit the /mcp bearer AND the 026 SSO Ed25519 pair on every side that
+# holds a copy: the files Safent's daemon reads (`$STATE/bearer`, `$STATE/
+# sso/ads-sso.key`, both bind-mounted into Safent) and the values ads-api
+# validates/verifies against (`ADS_MCP_TOKEN`/`ADS_SSO_PUBLIC_KEY` in
+# secrets/api.env, loaded via ads-api's env_file at container start — NOT
+# hot-reloaded, hence the --force-recreate below). Safent's OWN daemon reads
+# its side of both binds once at startup too, so the owner still has to
+# restart it by hand — we never restart Safent from here (companion verbs
+# stay companion-scoped). Rotating the SSO pair invalidates every assertion
+# minted under the old key (contracts/sso.md §6): only FUTURE assertions
+# fail, live `ads_session` cookies already exchanged keep working until they
+# expire on their own.
 cmd_companion_rotate() {
   if [ ! -f "$COMPANION_COMPOSE" ]; then
     echo "[x] Companion not provisioned yet. Run 'safent update' first." >&2
@@ -841,12 +846,39 @@ cmd_companion_rotate() {
   chmod 0600 "$tmp_env"
   mv -f "$tmp_env" "$api_env"
 
+  echo "[*] Rotating the SSO Ed25519 keypair (026)..."
   _companion_env
+  sso_keypair="$("$RT" run --rm --network none "$SAFENT_ADS_IMAGE" \
+    python -m safent_ads.tools.gen_keys)"
+  sso_seed="$(printf '%s\n' "$sso_keypair" | sed -n 's/^ADS_APPROVAL_SIGNING_KEY=//p')"
+  sso_pub_std="$(printf '%s\n' "$sso_keypair" | sed -n 's/^ADS_APPROVAL_PUBLIC_KEY=//p')"
+  if [ -z "$sso_seed" ] || [ -z "$sso_pub_std" ]; then
+    echo "[x] Could not generate a new SSO keypair — bearer rotated, SSO key left unchanged." >&2
+    exit 1
+  fi
+  mkdir -p "$COMPANION_STATE/sso"
+  printf '%s\n' "$sso_seed" > "$COMPANION_STATE/sso/ads-sso.key.tmp"
+  chmod 0400 "$COMPANION_STATE/sso/ads-sso.key.tmp"
+  mv -f "$COMPANION_STATE/sso/ads-sso.key.tmp" "$COMPANION_STATE/sso/ads-sso.key"
+
+  # Same standard-base64 -> url-safe-base64 alphabet swap as provision.sh's
+  # ensure_sso_keypair (padding untouched) — ADS_SSO_PUBLIC_KEY is decoded
+  # url-safe by the companion's Ed25519 verifier (contracts/sso.md §3).
+  sso_pub_urlsafe="$(printf '%s' "$sso_pub_std" | tr '+/' '-_')"
+  tmp_env2="$(mktemp)"
+  awk -v tok="ADS_SSO_PUBLIC_KEY=$sso_pub_urlsafe" '
+    /^ADS_SSO_PUBLIC_KEY=/ { print tok; done=1; next }
+    { print }
+    END { if (!done) print tok }
+  ' "$api_env" > "$tmp_env2"
+  chmod 0600 "$tmp_env2"
+  mv -f "$tmp_env2" "$api_env"
+
   echo "[*] Restarting ads-api with the new token..."
   "$RT" compose -p safent-ads -f "$COMPANION_COMPOSE" up -d --force-recreate ads-api \
-    || { echo "[x] Bearer files updated but ads-api restart failed — restart it by hand." >&2; exit 1; }
-  echo "[ok] Bearer rotated."
-  echo "    Restart Safent so the daemon re-reads it:  safent restart"
+    || { echo "[x] Bearer/SSO files updated but ads-api restart failed — restart it by hand." >&2; exit 1; }
+  echo "[ok] Bearer and SSO keypair rotated."
+  echo "    Restart Safent so the daemon re-reads them:  safent restart"
 }
 
 # Compose down + remove the fixed network — mirrors _uninstall_companion
