@@ -619,6 +619,17 @@ def _build_jailed_cmd(argv: list[str], env: dict[str, str], byok_keys: frozenset
     vars like INVOCATION_ID/NOTIFY_SOCKET/LISTEN_* into the child). The egress proxy
     vars are added LAST so the caller cannot override them (force every runner
     through the audited proxy).
+
+    Security review 2026-09-10 (MEDIUM finding, belt-and-braces on top of
+    UV_OFFLINE now being deny-listed): _ALWAYS_FORWARDED_ENV_KEYS reads from
+    `os.environ` directly, NEVER from `env` — `env` is `sanitised`, a copy
+    of `os.environ` a caller's accepted BYOK keys have already been merged
+    into (`_validate_request`). Every name in _ALWAYS_FORWARDED_ENV_KEYS is
+    ALSO on the deny-list today (so `sanitised[key]` can never actually be
+    caller-overridden), but that is a property of the deny-list, not of
+    this loop — reading the true process environment here means a future
+    deny-list gap can never let a caller's value win for one of these four,
+    only ever this launcher's own.
     """
     unit = f"hermes-mcp-{os.urandom(8).hex()}.service"
     cmd = [
@@ -631,7 +642,11 @@ def _build_jailed_cmd(argv: list[str], env: dict[str, str], byok_keys: frozenset
         f"--property=RuntimeMaxSec={_MCP_RUNTIME_MAX_S}",
         *_MCP_PROPERTIES,
     ]
-    for key in _INTERNAL_ENV_KEYS | _ALWAYS_FORWARDED_ENV_KEYS | byok_keys:
+    for key in _ALWAYS_FORWARDED_ENV_KEYS:
+        val = os.environ.get(key)
+        if val is not None:
+            cmd.append(f"--setenv={key}={val}")
+    for key in _INTERNAL_ENV_KEYS | byok_keys:
         val = env.get(key)
         if val is not None:
             cmd.append(f"--setenv={key}={val}")

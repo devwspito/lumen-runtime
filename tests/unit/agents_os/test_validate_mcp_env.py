@@ -158,6 +158,32 @@ class TestDenyListParityWithTheLauncher:
         assert module._BYOK_ENV_DENY_PREFIXES == _MCP_ENV_DENY_PREFIXES_CORE
 
 
+class TestUvOfflineIsNonOverridable:
+    """Security review 2026-09-10 (MEDIUM): UV_OFFLINE is now deny-listed
+    (H-1) AND _ALWAYS_FORWARDED_ENV_KEYS reads from the real os.environ, not
+    from the caller-mergeable `env` dict — belt-and-braces, so a future
+    deny-list gap can never let a caller's UV_OFFLINE value win."""
+
+    def test_denied_at_both_gates(self) -> None:
+        with pytest.raises(ValueError, match="clave de env no permitida"):
+            _validate_mcp_env({"UV_OFFLINE": "0"})
+        module = _load_launcher_module()
+        assert module._is_allowed_env_key("UV_OFFLINE") is False
+
+    def test_build_jailed_cmd_sources_it_from_os_environ_not_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        module = _load_launcher_module()
+        monkeypatch.setenv("UV_OFFLINE", "1")
+        # `env` stands in for `sanitised` with a value that would only be
+        # there if some future bug let a caller override it — the daemon's
+        # own real environ must win regardless.
+        env = {"UV_OFFLINE": "0"}
+        cmd = module._build_jailed_cmd(["uvx", "some-pkg"], env, frozenset())
+        assert "--setenv=UV_OFFLINE=1" in cmd
+        assert "--setenv=UV_OFFLINE=0" not in cmd
+
+
 class TestPreviouslyRejectedButPlausibleKeysAreNowAccepted:
     def test_the_forms_own_placeholder_example_is_accepted(self) -> None:
         """The exact repro (spec 025 matriz MCP-05): BRAVE_API_KEY=br-xxx,
