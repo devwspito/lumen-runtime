@@ -12,11 +12,13 @@ import { useConfirmDialog } from '../components/ConfirmDialog'
 import InstallScanModal from '../components/InstallScanModal'
 import type { MfaFactors } from '../components/MfaModal'
 import { panelOriginFromMcpUrl } from '../hooks/useAdsPanel'
+import { useAdsAvailability } from '../hooks/useAdsAvailability'
 import { PageHeader } from '../components/ui/PageHeader'
 import { EmptyState } from '../components/ui/EmptyState'
 import { Button } from '../components/ui/Button'
 import { Badge as DsBadge, StatusDot } from '../components/ui/Badge'
 import type { StatusDotState } from '../components/ui/Badge'
+import { CompanionInstallAction } from '../components/CompanionInstallAction'
 import {
   AnimatePresence,
   AnimatedListItem,
@@ -749,6 +751,10 @@ function ManagedRemotePresetCard({ connectedServer, onConnected, onRemove }: Man
   const [url, setUrl] = useState('')
   const [connecting, setConnecting] = useState(false)
   const [pendingScan, setPendingScan] = useState<InstallScanResponse | null>(null)
+  // 029: the self-host URL is an escape hatch now, collapsed and off by
+  // default — CompanionInstallAction ("Instalar") is the default path.
+  const [advancedOpen, setAdvancedOpen] = useState(false)
+  const availability = useAdsAvailability()
 
   useEffect(() => {
     if (connectedServer) return
@@ -859,36 +865,56 @@ function ManagedRemotePresetCard({ connectedServer, onConnected, onRemove }: Man
           </div>
         </div>
 
-        <div className={styles.envForm}>
-          <div className={styles.envField}>
-            <label className={styles.envLabel} htmlFor="mcp-managed-ads-url">
-              {t('mcp.managed.ads.url.label')}
-            </label>
-            <input
-              id="mcp-managed-ads-url"
-              className={styles.envInput}
-              type="url"
-              inputMode="url"
-              autoComplete="off"
-              placeholder={t('mcp.managed.ads.url.placeholder')}
-              value={url}
-              onChange={e => setUrl(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') handleConnectClick() }}
-            />
+        {/* Default path (029 FR-001/FR-002): one "Instalar" action, no URL, no
+            connection field — the SAME flow the sidebar's not_installed entry
+            triggers. Renders nothing while ready/loading (CompanionInstallAction
+            owns that judgment via useAdsAvailability). */}
+        <CompanionInstallAction availability={availability} />
+
+        <button
+          type="button"
+          className={styles.serverCmdToggle}
+          onClick={() => setAdvancedOpen(v => !v)}
+          aria-expanded={advancedOpen}
+          aria-label={advancedOpen ? t('mcp.managed.ads.advanced.hide') : t('mcp.managed.ads.advanced.show')}
+        >
+          <AnimatedChevron open={advancedOpen} size={10} />
+          <span>{t('mcp.managed.ads.advanced.toggle')}</span>
+        </button>
+
+        <AnimatedExpanderContent open={advancedOpen}>
+          <p className={styles.catalogCardDesc}>{t('mcp.managed.ads.advanced.hint')}</p>
+          <div className={styles.envForm}>
+            <div className={styles.envField}>
+              <label className={styles.envLabel} htmlFor="mcp-managed-ads-url">
+                {t('mcp.managed.ads.url.label')}
+              </label>
+              <input
+                id="mcp-managed-ads-url"
+                className={styles.envInput}
+                type="url"
+                inputMode="url"
+                autoComplete="off"
+                placeholder={t('mcp.managed.ads.url.placeholder')}
+                value={url}
+                onChange={e => setUrl(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') handleConnectClick() }}
+              />
+            </div>
+            <div className={styles.envActions}>
+              <Button
+                variant="primary"
+                size="sm"
+                type="button"
+                loading={connecting}
+                disabled={connecting}
+                onClick={handleConnectClick}
+              >
+                {connecting ? t('mcp.managed.connecting') : t('mcp.managed.connect')}
+              </Button>
+            </div>
           </div>
-          <div className={styles.envActions}>
-            <Button
-              variant="primary"
-              size="sm"
-              type="button"
-              loading={connecting}
-              disabled={connecting}
-              onClick={handleConnectClick}
-            >
-              {connecting ? t('mcp.managed.connecting') : t('mcp.managed.connect')}
-            </Button>
-          </div>
-        </div>
+        </AnimatedExpanderContent>
       </motion.div>
     </>
   )

@@ -364,13 +364,39 @@ const translations = {
     'mcp.managed.section':      'Presets gestionados',
     'mcp.managed.section.aria':'Herramientas gestionadas por Safent',
     'mcp.managed.ads.title':    'Safent Ads · campañas Google/Meta',
-    'mcp.managed.ads.desc':     'Conecta el servidor de Safent Ads para que el agente pueda revisar tus campañas de Google y Meta y proponerte cambios.',
+    'mcp.managed.ads.desc':     'El agente revisa tus campañas de Google y Meta y te propone cambios.',
     'mcp.managed.ads.url.label':       'URL del servidor de Safent Ads',
     'mcp.managed.ads.url.placeholder': 'https://ads.tu-dominio/mcp',
     'mcp.managed.ads.toast.connected': 'Safent Ads conectado — el agente ya puede revisar tus campañas',
     'mcp.managed.ads.status.waiting':   'Instalado · esperando servicio',
     'mcp.managed.ads.status.ready':     'Conectado',
     'mcp.managed.ads.status.installed': 'Instalado',
+    'mcp.managed.ads.advanced.toggle':  'Avanzado',
+    'mcp.managed.ads.advanced.show':    'Mostrar opciones avanzadas',
+    'mcp.managed.ads.advanced.hide':    'Ocultar opciones avanzadas',
+    'mcp.managed.ads.advanced.hint':    'Solo para quien aloja el servicio de anuncios en su propio servidor. La mayoría no necesita esto: usa «Instalar» arriba.',
+
+    // Companion install action (029) — shared by the Ads card and the sidebar.
+    'ads.install.action':        'Instalar',
+    'ads.install.repair_action': 'Reparar',
+    'ads.install.expired':       'Nadie atendió la instalación. Puedes intentarlo de nuevo.',
+    'ads.install.err.generic':   'No se pudo completar. Puedes reintentarlo.',
+
+    // Shared install/update stage labels (028/029) — always in the owner's language.
+    'install.stage.preflight':           'Comprobando el equipo…',
+    'install.stage.runtime_staging':     'Preparando la base de ejecución…',
+    'install.stage.machine':             'Preparando la máquina…',
+    'install.stage.pull_engine':         'Descargando el motor…',
+    'install.stage.pull_companion':      'Descargando el servicio de anuncios…',
+    'install.stage.container':           'Arrancando el servicio…',
+    'install.stage.health':              'Comprobando que todo funciona…',
+    'install.stage.companion_scaffold':  'Preparando la red de Anuncios…',
+    'install.stage.companion_up':        'Arrancando Anuncios…',
+    'install.stage.companion_reload':    'Registrando las herramientas de Anuncios…',
+    'install.stage.backup':              'Guardando una copia de seguridad…',
+    'install.stage.restore':             'Restaurando la versión anterior…',
+    'install.stage.cleanup':             'Terminando…',
+    'install.stage.generic':             'Trabajando…',
     'ads.panel.title':          'Panel de anuncios',
     'ads.panel.open':           'Abrir panel',
     'ads.panel.connections':    'Conexiones',
@@ -942,16 +968,31 @@ const translations = {
     'cost.gov.selfhosted.label':     'Cómputo propio',
     'cost.gov.selfhosted.note':      'acciones sin coste externo',
 
-    // System update
+    // Reconnect screen (028 FR-012/SC-012) — the ONE honest state for a
+    // tokenless load, a stale cache, or a failed refresh. Never a stack of
+    // errors, never a retry loop: one screen, one action.
+    'reconnect.title':                 'Reabre Safent',
+    'reconnect.reason.no_token':       'No se encontró una sesión de Safent en esta ventana.',
+    'reconnect.reason.refresh_failed': 'La sesión de Safent ha caducado.',
+    'reconnect.hint':                  'Ciérrala y vuelve a abrirla desde el icono de Safent.',
+    'reconnect.action':                'Reintentar',
+
+    // System update (028) — "Actualizar" only renders when a newer version is
+    // actually confirmed (contracts/update.md §3); otherwise the footer shows
+    // sysupdate.current quietly, with no button at all.
     'sysupdate.current':        'Versión {v}',
     'sysupdate.action':         'Actualizar',
     'sysupdate.updating':       'Actualizando…',
     'sysupdate.available':      'Hay una versión nueva',
     'sysupdate.confirm.title':  '¿Actualizar Safent?',
-    'sysupdate.confirm.body':   'Se instalará la última versión. Puede tardar unos minutos y la app se recargará sola.',
+    'sysupdate.confirm.body':   'Se instalará la última versión. Puede tardar unos minutos; la app se cerrará y volverá a abrirse sola para terminar.',
     'sysupdate.confirm.ok':     'Actualizar',
     'sysupdate.toast.started':  'Actualizando… vuelve en un par de minutos.',
     'sysupdate.err.start':      'No se pudo iniciar la actualización.',
+    'sysupdate.relaunch_notice':'Se cerrará y volverá a abrirse sola para terminar.',
+    'sysupdate.retry':          'Reintentar',
+    'sysupdate.err.generic':    'No se pudo completar la actualización. Puedes reintentarlo.',
+    'sysupdate.expired':        'Nadie atendió la actualización. Puedes intentarlo de nuevo.',
     'sysuninstall.action':      'Desinstalar',
     'sysuninstall.confirm.title': '¿Desinstalar Safent?',
     'sysuninstall.confirm.body': 'Se eliminarán Safent, TODOS tus datos locales (configuración, agentes, habilidades, memoria) y el contenedor. No se puede deshacer. (Podman/Docker se conservan.)',
@@ -1301,13 +1342,39 @@ const translations = {
     'mcp.managed.section':      'Managed presets',
     'mcp.managed.section.aria':'Tools managed by Safent',
     'mcp.managed.ads.title':    'Safent Ads · Google/Meta campaigns',
-    'mcp.managed.ads.desc':     'Connect the Safent Ads server so the agent can review your Google and Meta campaigns and propose changes.',
+    'mcp.managed.ads.desc':     'The agent reviews your Google and Meta campaigns and proposes changes.',
     'mcp.managed.ads.url.label':       'Safent Ads server URL',
     'mcp.managed.ads.url.placeholder': 'https://ads.your-domain/mcp',
     'mcp.managed.ads.toast.connected': 'Safent Ads connected — the agent can now review your campaigns',
     'mcp.managed.ads.status.waiting':   'Installed · waiting for the service',
     'mcp.managed.ads.status.ready':     'Connected',
     'mcp.managed.ads.status.installed': 'Installed',
+    'mcp.managed.ads.advanced.toggle':  'Advanced',
+    'mcp.managed.ads.advanced.show':    'Show advanced options',
+    'mcp.managed.ads.advanced.hide':    'Hide advanced options',
+    'mcp.managed.ads.advanced.hint':    'Only for owners self-hosting the ads service on their own server. Most people do not need this: use "Install" above.',
+
+    // Companion install action (029) — shared by the Ads card and the sidebar.
+    'ads.install.action':        'Install',
+    'ads.install.repair_action': 'Repair',
+    'ads.install.expired':       'Nobody picked up the install. You can try again.',
+    'ads.install.err.generic':   'Could not finish. You can retry.',
+
+    // Shared install/update stage labels (028/029) — always in the owner's language.
+    'install.stage.preflight':           'Checking the machine…',
+    'install.stage.runtime_staging':     'Preparing the runtime…',
+    'install.stage.machine':             'Preparing the machine…',
+    'install.stage.pull_engine':         'Downloading the engine…',
+    'install.stage.pull_companion':      'Downloading the ads service…',
+    'install.stage.container':           'Starting the service…',
+    'install.stage.health':              'Checking everything works…',
+    'install.stage.companion_scaffold':  'Preparing the Ads network…',
+    'install.stage.companion_up':        'Starting Ads…',
+    'install.stage.companion_reload':    'Registering the Ads tools…',
+    'install.stage.backup':              'Saving a backup…',
+    'install.stage.restore':             'Restoring the previous version…',
+    'install.stage.cleanup':             'Finishing up…',
+    'install.stage.generic':             'Working…',
     'ads.panel.title':          'Ads panel',
     'ads.panel.open':           'Open panel',
     'ads.panel.connections':    'Connections',
@@ -1879,16 +1946,31 @@ const translations = {
     'cost.gov.selfhosted.label':     'Self-hosted compute',
     'cost.gov.selfhosted.note':      'actions with no external cost',
 
-    // System update
+    // Reconnect screen (028 FR-012/SC-012) — the ONE honest state for a
+    // tokenless load, a stale cache, or a failed refresh. Never a stack of
+    // errors, never a retry loop: one screen, one action.
+    'reconnect.title':                 'Reopen Safent',
+    'reconnect.reason.no_token':       'No Safent session was found in this window.',
+    'reconnect.reason.refresh_failed': 'Your Safent session has expired.',
+    'reconnect.hint':                  'Close it and open it again from the Safent icon.',
+    'reconnect.action':                'Retry',
+
+    // System update (028) — "Update" only renders when a newer version is
+    // actually confirmed (contracts/update.md §3); otherwise the footer shows
+    // sysupdate.current quietly, with no button at all.
     'sysupdate.current':        'Version {v}',
     'sysupdate.action':         'Update',
     'sysupdate.updating':       'Updating…',
     'sysupdate.available':      'A new version is available',
     'sysupdate.confirm.title':  'Update Safent?',
-    'sysupdate.confirm.body':   'The latest version will be installed. It may take a few minutes and the app will reload on its own.',
+    'sysupdate.confirm.body':   'The latest version will be installed. It may take a few minutes; the app will close and reopen on its own to finish.',
     'sysupdate.confirm.ok':     'Update',
     'sysupdate.toast.started':  'Updating… come back in a couple of minutes.',
     'sysupdate.err.start':      'Could not start the update.',
+    'sysupdate.relaunch_notice':'It will close and reopen on its own to finish.',
+    'sysupdate.retry':          'Retry',
+    'sysupdate.err.generic':    'Could not finish the update. You can retry.',
+    'sysupdate.expired':        'Nobody picked up the update. You can try again.',
     'sysuninstall.action':      'Uninstall',
     'sysuninstall.confirm.title': 'Uninstall Safent?',
     'sysuninstall.confirm.body': 'This removes Safent, ALL your local data (config, agents, skills, memory) and the container. It cannot be undone. (Podman/Docker are kept.)',

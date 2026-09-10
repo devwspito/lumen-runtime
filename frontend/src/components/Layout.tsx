@@ -1,14 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
-import { sileo } from 'sileo'
-import { RefreshCw, Trash2 } from 'lucide-react'
-import {
-  listConversations,
-  getSystemUpdate,
-  requestSystemUpdate,
-  requestSystemUninstall,
-  type SystemUpdateStatus,
-} from '../api/client'
+import { listConversations } from '../api/client'
 import { useChat } from '../hooks/useChat'
 import { useFeatures } from '../hooks/useFeatures'
 import { usePendingApprovals } from '../hooks/usePendingApprovals'
@@ -18,7 +10,7 @@ import { AdsNavItem } from './AdsNavItem'
 import type { ConversationSummary } from '../api/types'
 import NotificationsPanel from './NotificationsPanel'
 import KillSwitchBanner from './KillSwitchBanner'
-import { useConfirmDialog } from './ConfirmDialog'
+import { SystemUpdateFooter } from './SystemUpdateFooter'
 import { useT, useLocale } from '../lib/i18n'
 import { CAPACIDADES_VIEW_IDS, SISTEMA_VIEW_IDS } from '../views/SectionHubs'
 
@@ -106,166 +98,6 @@ function useNavItems(): HubNavItem[] {
     { to: '/capacidades', label: t('nav.section.capabilities'), icon: <CapacidadesIcon />, anyOf: CAPACIDADES_VIEW_IDS },
     { to: '/sistema',     label: t('nav.section.system'),       icon: <SistemaIcon />, anyOf: SISTEMA_VIEW_IDS, showsPendingBadge: true },
   ]
-}
-
-// ── System update ─────────────────────────────────────────────────────────────
-
-const SYSTEM_UPDATE_POLL_MS = 15 * 60_000
-// While an update is in flight, poll fast: the owner is WATCHING "Updating…"
-// and must see completion (or the stale-flag expiry) in seconds, not in 15 min.
-const SYSTEM_UPDATE_ACTIVE_POLL_MS = 20_000
-
-/** Compare two dotted versions ("0.8.34"). >0 if a is newer than b, 0 if equal, <0 older. */
-function cmpVersion(a: string, b: string): number {
-  const pa = a.split('.').map(n => parseInt(n, 10) || 0)
-  const pb = b.split('.').map(n => parseInt(n, 10) || 0)
-  const len = Math.max(pa.length, pb.length)
-  for (let i = 0; i < len; i++) {
-    const d = (pa[i] || 0) - (pb[i] || 0)
-    if (d !== 0) return d > 0 ? 1 : -1
-  }
-  return 0
-}
-
-/** The Tauri desktop shell (host, has internet) injects the latest version it fetched from
- *  the published VERSION file. The sandboxed backend's own check can be blocked by the
- *  egress cage, so we trust whichever source says "newer". */
-function injectedLatestVersion(): string {
-  if (typeof window === 'undefined') return ''
-  const v = (window as unknown as { __safentLatestVersion?: unknown }).__safentLatestVersion
-  return typeof v === 'string' ? v.trim() : ''
-}
-
-/** Footer: current version, a calm "Actualizar" affordance that ALERTS (pulsing accent +
- *  latest version) when a newer build exists, and a compact "Desinstalar". Icon-forward
- *  (Lucide) and stacked into two rows so nothing overflows the narrow sidebar. The refresh
- *  icon spins while an update is running. */
-function SystemUpdateFooter() {
-  const t = useT()
-  const [status, setStatus] = useState<SystemUpdateStatus | null>(null)
-  const [confirmUpdate, confirmUpdateDialog] = useConfirmDialog()
-
-  const poll = useCallback(() => {
-    getSystemUpdate().then(setStatus)
-  }, [])
-
-  const updating = !!status?.updating
-  useEffect(() => {
-    poll()
-    const id = setInterval(poll, updating ? SYSTEM_UPDATE_ACTIVE_POLL_MS : SYSTEM_UPDATE_POLL_MS)
-    return () => clearInterval(id)
-  }, [poll, updating])
-
-  async function handleUpdateClick() {
-    const ok = await confirmUpdate({
-      title: t('sysupdate.confirm.title'),
-      description: t('sysupdate.confirm.body'),
-      confirmLabel: t('sysupdate.confirm.ok'),
-    })
-    if (!ok) return
-
-    try {
-      const res = await requestSystemUpdate()
-      setStatus(prev => (prev ? { ...prev, updating: res.updating } : prev))
-      sileo.success({ title: t('sysupdate.toast.started') })
-    } catch {
-      sileo.error({ title: t('sysupdate.err.start') })
-    }
-  }
-
-  async function handleUninstallClick() {
-    const ok = await confirmUpdate({
-      title: t('sysuninstall.confirm.title'),
-      description: t('sysuninstall.confirm.body'),
-      confirmLabel: t('sysuninstall.confirm.ok'),
-    })
-    if (!ok) return
-    try {
-      await requestSystemUninstall()
-      sileo.success({ title: t('sysuninstall.toast.started') })
-    } catch {
-      sileo.error({ title: t('sysuninstall.err.start') })
-    }
-  }
-
-  if (!status?.current_version) return null
-
-  const latest = status.latest_version || injectedLatestVersion()
-  const available = !updating && (
-    !!status.update_available || (!!latest && cmpVersion(latest, status.current_version) > 0)
-  )
-  const availableLabel = latest ? `${t('sysupdate.available')} · v${latest}` : t('sysupdate.available')
-
-  return (
-    <div
-      style={{
-        display: 'flex', flexDirection: 'column', gap: 'var(--space-1)',
-        padding: `var(--space-2) var(--space-4) var(--space-3)`,
-        fontSize: 'var(--text-xs)', color: 'var(--color-text-dim)',
-      }}
-    >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', minWidth: 0 }}>
-        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {t('sysupdate.current').replace('{v}', status.current_version)}
-        </span>
-        <span style={{ flex: 1 }} />
-        {available && (
-          <span
-            title={availableLabel}
-            style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: 'var(--color-accent)', whiteSpace: 'nowrap', maxWidth: '55%' }}
-          >
-            <span aria-hidden="true" style={{
-              width: 6, height: 6, borderRadius: '50%', background: 'var(--color-accent)',
-              animation: 'pulse-dot 1.6s ease-in-out infinite', flex: '0 0 auto',
-            }} />
-            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
-              {latest ? `v${latest}` : t('sysupdate.available')}
-            </span>
-          </span>
-        )}
-      </div>
-
-      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
-        <button
-          type="button"
-          className="cv-btn cv-btn--ghost cv-btn--sm"
-          style={{
-            height: 'auto', padding: `3px var(--space-2)`, fontSize: 'var(--text-xs)',
-            display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-            flex: 1, minWidth: 0,
-            ...(available ? {
-              color: 'var(--color-accent)',
-              borderColor: 'color-mix(in srgb, var(--color-accent) 45%, transparent)',
-            } : {}),
-          }}
-          onClick={handleUpdateClick}
-          disabled={updating}
-          title={available ? availableLabel : undefined}
-          aria-label={available ? `${availableLabel} — ${t('sysupdate.action')}` : t('sysupdate.action')}
-        >
-          <RefreshCw size={13} className={updating ? 'spin' : undefined} aria-hidden="true" style={{ flex: '0 0 auto' }} />
-          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {updating ? t('sysupdate.updating') : t('sysupdate.action')}
-          </span>
-        </button>
-        <button
-          type="button"
-          className="cv-btn cv-btn--ghost cv-btn--sm cv-btn--danger"
-          style={{
-            height: 'auto', padding: `3px 7px`,
-            display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flex: '0 0 auto',
-          }}
-          onClick={handleUninstallClick}
-          disabled={updating}
-          title={t('sysuninstall.action')}
-          aria-label={t('sysuninstall.action')}
-        >
-          <Trash2 size={13} aria-hidden="true" />
-        </button>
-      </div>
-      {confirmUpdateDialog}
-    </div>
-  )
 }
 
 // ── Recientes ─────────────────────────────────────────────────────────────────

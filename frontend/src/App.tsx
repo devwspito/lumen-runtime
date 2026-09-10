@@ -1,4 +1,4 @@
-import { lazy, Suspense } from 'react'
+import { lazy, Suspense, useSyncExternalStore } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { Toaster } from 'sileo'
 import Layout from './components/Layout'
@@ -7,6 +7,8 @@ import AdsView from './views/AdsView'
 import { CapacidadesView, SistemaView } from './views/SectionHubs'
 import { useActiveProvider } from './hooks/useActiveProvider'
 import { useFeatures } from './hooks/useFeatures'
+import { ReconnectScreen } from './components/ReconnectScreen'
+import { getAuthStatus, subscribeAuthStatus } from './lib/token'
 
 // Code-split OfficeView at the route boundary; it imports the canvas engine
 // which is non-trivial (~10 kB gzipped) and not needed on other routes.
@@ -70,6 +72,18 @@ function Shell() {
 
 // basename="/app" matches the shell-server mount point and Vite's base: '/app/'
 export default function App() {
+  // 028 FR-012/FR-013, SC-012: gate the ENTIRE routed shell on auth status. A
+  // tokenless load, a stale cache, or a failed refresh must never mount Layout
+  // (and with it every polling hook — chat, features, providers, ads
+  // availability, pending approvals, the update footer…) — that mount is
+  // exactly what today fires ~20 authenticated calls that all 401 plus an
+  // endless refresh loop. Below this gate, nothing fetches; above it, one
+  // screen with one action.
+  const auth = useSyncExternalStore(subscribeAuthStatus, getAuthStatus)
+  if (auth.kind === 'unauthenticated') {
+    return <ReconnectScreen reason={auth.reason} />
+  }
+
   return (
     <BrowserRouter basename="/app">
       <Toaster position="top-right" />
