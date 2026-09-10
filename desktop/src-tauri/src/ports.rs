@@ -3,11 +3,36 @@
 //! `engine_adapter.rs` implements these against the embedded CLI; `boot.rs`
 //! depends only on the traits; tests depend on the fakes at the bottom.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::domain::{
     BootstrapTicket, DomainEvent, FailureCause, FailureCode, HostFacts, RepairAction,
 };
+
+/// Shared, cheap-to-check cancellation signal. `boot.rs` owns one per
+/// bootstrap attempt and flips it when the owner cancels; the adapter polls
+/// it between NDJSON lines so a mid-flight `apply()` can be interrupted
+/// before its point of no return (contract app-engine.md §6). `Clone` is
+/// cheap (an `Arc`) — the same signal is handed to the driver call AND kept
+/// by whatever is listening for the owner's cancel gesture.
+#[derive(Clone, Default)]
+pub struct CancelSignal(Arc<AtomicBool>);
+
+impl CancelSignal {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_set(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
 
 /// Observes the host + engine and reports what is actually true right now.
 /// Never mutates anything (contract app-engine.md §4, `facts --json`).
@@ -23,6 +48,7 @@ pub trait EngineDriver: Send + Sync {
         &self,
         action: &RepairAction,
         notifier: &dyn Notifier,
+        cancel: &CancelSignal,
     ) -> Result<ApplyOutcome, EngineError>;
 
     /// Deliberate, orderly shutdown of an already-running engine — NOT a
@@ -89,6 +115,10 @@ pub enum EngineError {
     /// (`{t:'failed', code, detail, retryable}`, contract app-engine.md §3) —
     /// already a `FailureCause`, no further mapping needed.
     Reported(FailureCause),
+    /// `cancel` was set and the adapter honored it before the point of no
+    /// return (contract app-engine.md §6). Distinct from every other
+    /// variant: this is not a fault, it is the owner's own decision.
+    Cancelled,
 }
 
 impl EngineError {
@@ -120,6 +150,11 @@ impl EngineError {
                 retryable: false,
             },
             EngineError::Reported(cause) => cause.clone(),
+            EngineError::Cancelled => FailureCause {
+                code: FailureCode::CancelledByOwner,
+                message: "cancelado por el dueño".to_string(),
+                retryable: false,
+            },
         }
     }
 }
@@ -138,6 +173,7 @@ impl std::fmt::Display for EngineError {
             }
             EngineError::Protocol(message) => write!(f, "protocol error: {message}"),
             EngineError::Reported(cause) => write!(f, "reported by CLI: {cause:?}"),
+            EngineError::Cancelled => write!(f, "cancelled by owner"),
         }
     }
 }
@@ -260,7 +296,11 @@ pub mod fakes {
             &self,
             action: &RepairAction,
             _notifier: &dyn Notifier,
+            cancel: &CancelSignal,
         ) -> Result<ApplyOutcome, EngineError> {
+            if cancel.is_set() {
+                return Err(EngineError::Cancelled);
+            }
             self.applied.lock().expect("poisoned").push(action.clone());
             let mut responses = self.responses.lock().expect("poisoned");
             let pos = responses.iter().position(|(a, _)| a == action);

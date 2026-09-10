@@ -305,6 +305,47 @@ pub enum FailureCode {
     /// when the bundled `safent` binary predates `--porcelain`/`facts --json`
     /// (pre-T004). Unreachable once every shipped CLI speaks porcelain.
     CliPorcelainUnsupported,
+    /// NOT part of the CLI's vocabulary either — synthesized by `boot.rs`
+    /// when the OWNER cancelled a repair action before its point of no
+    /// return. Deliberately `retryable: false` at the `FailureCause` level
+    /// (auto-repair must never re-fight a deliberate cancel); the owner's
+    /// explicit "Reintentar" still works, because that is a new decision,
+    /// not a retry of the one just cancelled.
+    CancelledByOwner,
+}
+
+impl FailureCode {
+    /// The exact spelling from contract app-engine.md §3 for the 20 CLI
+    /// codes; a snake_case name of our own for the two adapter/boot-only
+    /// extensions (documented at their variant) so the UI still gets a
+    /// stable, closed string to switch on.
+    pub fn wire_name(&self) -> &'static str {
+        match self {
+            FailureCode::UnsupportedOs => "unsupported_os",
+            FailureCode::UnsupportedArch => "unsupported_arch",
+            FailureCode::InsufficientDisk => "insufficient_disk",
+            FailureCode::InsufficientMemory => "insufficient_memory",
+            FailureCode::RuntimeHashMismatch => "runtime_hash_mismatch",
+            FailureCode::MachineCreateFailed => "machine_create_failed",
+            FailureCode::MachineStartFailed => "machine_start_failed",
+            FailureCode::UsernsBlocked => "userns_blocked",
+            FailureCode::HelperDenied => "helper_denied",
+            FailureCode::RegistryUnreachable => "registry_unreachable",
+            FailureCode::DigestMismatch => "digest_mismatch",
+            FailureCode::PullInterrupted => "pull_interrupted",
+            FailureCode::PortExhausted => "port_exhausted",
+            FailureCode::ContainerStartFailed => "container_start_failed",
+            FailureCode::DaemonUnhealthy => "daemon_unhealthy",
+            FailureCode::CompanionNetworkConflict => "companion_network_conflict",
+            FailureCode::CompanionMigrationFailed => "companion_migration_failed",
+            FailureCode::CompanionUnreachable => "companion_unreachable",
+            FailureCode::BackupFailed => "backup_failed",
+            FailureCode::RestoreFailed => "restore_failed",
+            FailureCode::ClockSkew => "clock_skew",
+            FailureCode::CliPorcelainUnsupported => "cli_porcelain_unsupported",
+            FailureCode::CancelledByOwner => "cancelled_by_owner",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -335,11 +376,44 @@ pub enum Stage {
     Cleanup,
 }
 
+impl Stage {
+    /// The exact `StageId` spelling from contract app-engine.md §3 — the
+    /// single source both the Tauri event payload (boot.rs) and any future
+    /// diagnostic serialization use, so that string table exists ONCE.
+    pub fn wire_name(&self) -> &'static str {
+        match self {
+            Stage::Preflight => "preflight",
+            Stage::RuntimeStaging => "runtime_staging",
+            Stage::Machine => "machine",
+            Stage::PullEngine => "pull_engine",
+            Stage::PullCompanion => "pull_companion",
+            Stage::Container => "container",
+            Stage::Health => "health",
+            Stage::CompanionScaffold => "companion_scaffold",
+            Stage::CompanionUp => "companion_up",
+            Stage::CompanionReload => "companion_reload",
+            Stage::Backup => "backup",
+            Stage::Restore => "restore",
+            Stage::Cleanup => "cleanup",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProgressUnit {
     Bytes,
     Layers,
     Steps,
+}
+
+impl ProgressUnit {
+    pub fn wire_name(&self) -> &'static str {
+        match self {
+            ProgressUnit::Bytes => "bytes",
+            ProgressUnit::Layers => "layers",
+            ProgressUnit::Steps => "steps",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -390,6 +464,10 @@ fn allowed(from: EnginePhase, to: EnginePhase) -> bool {
         (EngineProvisioning, EnginePulling) => true,
         (EnginePulling, EngineStarting) => true,
         (EngineStarting, EngineReady) => true,
+        // `up` completed (contract app-engine.md §5) but the secret-fd
+        // closed without a line — FR-012's safety net, reachable on the
+        // VERY FIRST bootstrap, not only after the product was already showing.
+        (EngineStarting, Reconnecting) => true,
         (EngineReady, CompanionProvisioning) => true,
         (EngineReady, Updating) => true,
         (EngineReady, Reconnecting) => true,
@@ -569,6 +647,35 @@ pub enum DomainEvent {
         code: FailureCode,
     },
     WindowNavigated,
+    /// FR-012's safety net: a load without a valid ticket resolves to ONE
+    /// honest state, never a burst of failed requests. Carried on its own
+    /// Tauri channel (`safent://reconnecting`, boot.rs), not
+    /// `safent://engine-event` — the UI treats it as a distinct screen, not
+    /// another stage.
+    Reconnecting {
+        reason: ReconnectReason,
+    },
+}
+
+/// Why the ticket the window was holding is no longer valid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconnectReason {
+    /// `up` finished but the secret fd closed without a line (contract
+    /// app-engine.md §5) — reachable on the very first bootstrap.
+    TokenMissing,
+    /// The engine had to restart while the window was already on
+    /// `EngineReady`; the ticket it minted before is no longer the one the
+    /// engine will accept.
+    EngineRestarted,
+}
+
+impl ReconnectReason {
+    pub fn wire_name(&self) -> &'static str {
+        match self {
+            ReconnectReason::TokenMissing => "token_missing",
+            ReconnectReason::EngineRestarted => "engine_restarted",
+        }
+    }
 }
 
 /// A one-shot bootstrap credential (contract app-engine.md §5). Lives only in

@@ -101,7 +101,11 @@ exit 1
     let driver = EmbeddedCliDriver::new(config(script));
     let notifier = RecordingNotifier::new();
     let outcome = driver
-        .apply(&RepairAction::StageRuntime, &notifier)
+        .apply(
+            &RepairAction::StageRuntime,
+            &notifier,
+            &ports::CancelSignal::new(),
+        )
         .expect("apply should succeed");
     assert!(matches!(outcome, ApplyOutcome::Progressed));
 
@@ -149,7 +153,11 @@ exit 1
     let notifier = RecordingNotifier::new();
     let image = ImageRef::new("ghcr.io/devwspito/safent", "sha256:engine-good").unwrap();
     let err = driver
-        .apply(&RepairAction::PullEngine(image), &notifier)
+        .apply(
+            &RepairAction::PullEngine(image),
+            &notifier,
+            &ports::CancelSignal::new(),
+        )
         .unwrap_err();
     match err {
         EngineError::Reported(cause) => {
@@ -201,7 +209,11 @@ sleep 5
     let notifier = RecordingNotifier::new();
     let started = Instant::now();
     let err = driver
-        .apply(&RepairAction::StageRuntime, &notifier)
+        .apply(
+            &RepairAction::StageRuntime,
+            &notifier,
+            &ports::CancelSignal::new(),
+        )
         .unwrap_err();
     assert!(matches!(err, EngineError::Timeout { .. }), "{err:?}");
     assert!(
@@ -227,7 +239,11 @@ exit 1
     let driver = EmbeddedCliDriver::new(config(script));
     let notifier = RecordingNotifier::new();
     let outcome = driver
-        .apply(&RepairAction::CreateContainer, &notifier)
+        .apply(
+            &RepairAction::CreateContainer,
+            &notifier,
+            &ports::CancelSignal::new(),
+        )
         .expect("apply should succeed");
     match outcome {
         ApplyOutcome::Ready(ticket) => {
@@ -260,7 +276,11 @@ exit 1
     let notifier = RecordingNotifier::new();
     let started = Instant::now();
     let err = driver
-        .apply(&RepairAction::CreateContainer, &notifier)
+        .apply(
+            &RepairAction::CreateContainer,
+            &notifier,
+            &ports::CancelSignal::new(),
+        )
         .unwrap_err();
     assert!(matches!(err, EngineError::Protocol(_)), "{err:?}");
     assert!(started.elapsed() < Duration::from_secs(3));
@@ -299,7 +319,11 @@ fn actions_with_no_cli_mapping_never_spawn_a_process() {
     let notifier = RecordingNotifier::new();
 
     let err = driver
-        .apply(&RepairAction::FocusExistingWindow, &notifier)
+        .apply(
+            &RepairAction::FocusExistingWindow,
+            &notifier,
+            &ports::CancelSignal::new(),
+        )
         .unwrap_err();
     assert!(
         matches!(err, EngineError::UnsupportedByAdapter { .. }),
@@ -307,7 +331,11 @@ fn actions_with_no_cli_mapping_never_spawn_a_process() {
     );
 
     let err = driver
-        .apply(&RepairAction::ReloadCompanionPresence, &notifier)
+        .apply(
+            &RepairAction::ReloadCompanionPresence,
+            &notifier,
+            &ports::CancelSignal::new(),
+        )
         .unwrap_err();
     assert!(
         matches!(err, EngineError::UnsupportedByAdapter { .. }),
@@ -332,7 +360,11 @@ echo '{"t":"done","id":"runtime_staging","ms":1}'
     let driver = EmbeddedCliDriver::new(cfg);
     let notifier = RecordingNotifier::new();
     let started = Instant::now();
-    let result = driver.apply(&RepairAction::StageRuntime, &notifier);
+    let result = driver.apply(
+        &RepairAction::StageRuntime,
+        &notifier,
+        &ports::CancelSignal::new(),
+    );
     assert!(
         result.is_err(),
         "an output flood must not be accepted as success"
@@ -340,5 +372,30 @@ echo '{"t":"done","id":"runtime_staging","ms":1}'
     assert!(
         started.elapsed() < Duration::from_secs(3),
         "must not buffer the whole flood before giving up"
+    );
+}
+
+#[test]
+fn a_preset_cancel_signal_is_honored_before_the_first_line_and_kills_the_child() {
+    let script = fake_cli(
+        r#"
+echo '{"t":"stage","id":"runtime_staging","label":"Preparando","total_bytes":100}'
+sleep 5
+"#,
+    );
+    let driver = EmbeddedCliDriver::new(config(script));
+    let notifier = RecordingNotifier::new();
+    let cancel = ports::CancelSignal::new();
+    cancel.set();
+    let started = Instant::now();
+    let err = driver
+        .apply(&RepairAction::StageRuntime, &notifier, &cancel)
+        .unwrap_err();
+    assert!(matches!(err, EngineError::Cancelled), "{err:?}");
+    assert_eq!(err.to_failure_cause().code, FailureCode::CancelledByOwner);
+    assert!(!err.to_failure_cause().retryable);
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "cancel must be noticed immediately, not after a stall wait"
     );
 }

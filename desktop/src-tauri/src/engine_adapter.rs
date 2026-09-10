@@ -28,7 +28,7 @@ use crate::domain::{
     LocalStateFact, MachineFact, MachineName, MachineProvider, Port, ProgressUnit, RepairAction,
     SemVer, Stage,
 };
-use crate::ports::{ApplyOutcome, EngineDriver, EngineError, EngineProbe, Notifier};
+use crate::ports::{ApplyOutcome, CancelSignal, EngineDriver, EngineError, EngineProbe, Notifier};
 
 /// Everything the adapter needs to talk to ONE bundled CLI. Built once at
 /// boot time from the bundle layout + the runtime manifest (T010, another
@@ -113,12 +113,21 @@ impl EmbeddedCliDriver {
 impl EngineProbe for EmbeddedCliDriver {
     fn observe(&self) -> Result<HostFacts, EngineError> {
         let mut facts: Option<HostFacts> = None;
-        let outcome = self.run_porcelain("facts", &["--json".to_string()], false, |event| {
-            if let WireEvent::Facts { facts: wire } = event {
-                facts = Some(map_host_facts(wire)?);
-            }
-            Ok(())
-        })?;
+        // A pure observation is never cancelled — there is nothing to
+        // interrupt (contract: "facts --json ... No modifica nada").
+        let never_cancelled = CancelSignal::new();
+        let outcome = self.run_porcelain(
+            "facts",
+            &["--json".to_string()],
+            false,
+            &never_cancelled,
+            |event| {
+                if let WireEvent::Facts { facts: wire } = event {
+                    facts = Some(map_host_facts(wire)?);
+                }
+                Ok(())
+            },
+        )?;
         // A successful observation wins even over a nonzero trailing exit
         // (facts --json is documented pure — "no modifica nada"); only when
         // NO facts ever arrived does the exit code decide which error to
@@ -141,13 +150,14 @@ impl EngineDriver for EmbeddedCliDriver {
         &self,
         action: &RepairAction,
         notifier: &dyn Notifier,
+        cancel: &CancelSignal,
     ) -> Result<ApplyOutcome, EngineError> {
         let (verb, args) = cli_invocation_for(action)?;
         let want_secret = verb == "up";
         let mut failure: Option<FailureCause> = None;
         let mut ready = false;
 
-        let outcome = self.run_porcelain(verb, &args, want_secret, |event| {
+        let outcome = self.run_porcelain(verb, &args, want_secret, cancel, |event| {
             match event {
                 WireEvent::Stage {
                     id,
@@ -369,6 +379,7 @@ impl EmbeddedCliDriver {
         verb: &str,
         extra_args: &[String],
         want_secret: bool,
+        cancel: &CancelSignal,
         mut on_event: impl FnMut(WireEvent) -> Result<(), EngineError>,
     ) -> Result<RunOutcome, EngineError> {
         let mut args = extra_args.to_vec();
@@ -408,12 +419,26 @@ impl EmbeddedCliDriver {
         let deadline = Instant::now() + self.config.hard_timeout;
         let mut last_activity = Instant::now();
 
+        // A cancel must be noticed quickly even while the stall-timeout
+        // budget is large (production default 15 s) — never wait a whole
+        // stall window just to notice the owner clicked Cancel.
+        const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(200);
+
         while open_readers > 0 {
+            if cancel.is_set() {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(EngineError::Cancelled);
+            }
             let time_left = deadline.saturating_duration_since(Instant::now());
             if time_left.is_zero() {
                 return Err(kill_and_timeout(&mut child, self.config.hard_timeout));
             }
-            let budget = self.config.stall_timeout.min(time_left);
+            let budget = self
+                .config
+                .stall_timeout
+                .min(time_left)
+                .min(CANCEL_POLL_INTERVAL);
             match rx.recv_timeout(budget) {
                 Ok(ReaderMsg::StdoutLine(line)) => {
                     last_activity = Instant::now();
