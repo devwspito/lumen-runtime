@@ -318,3 +318,104 @@ class TestIsVerbLive:
     def test_independent_per_verb(self) -> None:
         _post("update_system")
         assert ir.is_verb_live("uninstall_system") is False
+
+
+# ---------------------------------------------------------------------------
+# claim_request / resolve_request — T016, the host agent's own consumer
+# (mutually-exclusive claim between `safent agent` and the open app,
+# install-request.md §4; "fallo -> vuelve a pending, no bucle").
+# ---------------------------------------------------------------------------
+
+
+class TestClaimRequest:
+    def test_nothing_to_claim_when_no_marker_exists(self) -> None:
+        assert ir.claim_request("install_companion", claimant="agent-1") is None
+
+    def test_claims_a_pending_request_and_returns_its_slug(self) -> None:
+        _post("install_companion")
+        claimed = ir.claim_request("install_companion", claimant="agent-1")
+        assert claimed is not None
+        assert claimed.verb == "install_companion"
+        assert claimed.slug == "safent-ads"
+
+    def test_verb_with_no_slug_claims_with_slug_none(self) -> None:
+        _post("update_system")
+        claimed = ir.claim_request("update_system", claimant="agent-1")
+        assert claimed is not None
+        assert claimed.slug is None
+
+    def test_claim_file_is_written_0600(self) -> None:
+        _post("install_companion")
+        ir.claim_request("install_companion", claimant="agent-1")
+        claim_path = ir._claim_path("install_companion")
+        assert claim_path.read_text() == "agent-1"
+        assert stat.S_IMODE(claim_path.stat().st_mode) == 0o600
+
+    def test_a_second_claimant_is_refused_while_the_first_claim_is_live(self) -> None:
+        _post("install_companion")
+        first = ir.claim_request("install_companion", claimant="agent-1")
+        second = ir.claim_request("install_companion", claimant="agent-2")
+        assert first is not None
+        assert second is None
+
+    def test_the_same_claimant_can_reclaim_renewing_its_own_claim(self) -> None:
+        """A long-running install must be able to renew its own claim
+        instead of losing it to the OTHER reader mid-flight."""
+        _post("install_companion")
+        first = ir.claim_request("install_companion", claimant="agent-1")
+        second = ir.claim_request("install_companion", claimant="agent-1")
+        assert first is not None
+        assert second is not None
+
+    def test_a_stale_claim_can_be_taken_by_a_new_claimant(self) -> None:
+        _post("install_companion")
+        ir.claim_request("install_companion", claimant="agent-1")
+        claim_path = ir._claim_path("install_companion")
+        old = time.time() - ir._CLAIM_TTL_S - 5
+        os.utime(claim_path, (old, old))
+
+        claimed = ir.claim_request("install_companion", claimant="agent-2")
+        assert claimed is not None
+
+    def test_an_expired_marker_is_not_claimable_and_is_deleted(self) -> None:
+        _post("install_companion")
+        marker_path = ir._marker_path("install_companion")
+        marker = json.loads(marker_path.read_text())
+        marker["expires_at"] = "2000-01-01T00:00:00Z"
+        marker_path.write_text(json.dumps(marker))
+
+        assert ir.claim_request("install_companion", claimant="agent-1") is None
+        assert not marker_path.exists()
+
+
+class TestResolveRequest:
+    def test_success_consumes_the_marker_and_the_claim(self) -> None:
+        _post("install_companion")
+        ir.claim_request("install_companion", claimant="agent-1")
+
+        ir.resolve_request("install_companion", success=True)
+
+        assert not ir._marker_path("install_companion").exists()
+        assert not ir._claim_path("install_companion").exists()
+
+    def test_failure_releases_the_claim_but_keeps_the_marker_for_a_retry(self) -> None:
+        _post("install_companion")
+        ir.claim_request("install_companion", claimant="agent-1")
+
+        ir.resolve_request("install_companion", success=False)
+
+        assert ir._marker_path("install_companion").exists()
+        assert not ir._claim_path("install_companion").exists()
+
+    def test_after_a_failure_another_claimant_can_claim_it(self) -> None:
+        _post("install_companion")
+        ir.claim_request("install_companion", claimant="agent-1")
+        ir.resolve_request("install_companion", success=False)
+
+        claimed = ir.claim_request("install_companion", claimant="agent-2")
+        assert claimed is not None
+
+    def test_resolve_without_a_prior_claim_is_a_safe_no_op(self) -> None:
+        _post("install_companion")
+        ir.resolve_request("install_companion", success=True)  # never raises
+        assert not ir._marker_path("install_companion").exists()

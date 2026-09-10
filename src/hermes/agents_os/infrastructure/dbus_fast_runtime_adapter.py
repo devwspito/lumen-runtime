@@ -1096,6 +1096,26 @@ class Runtime1ServiceInterface(ServiceInterface):
         return json.dumps(result)
 
     @method()
+    async def ReloadCompanionPresence(self, slug: "s") -> "s":  # noqa: N802,F821,UP037
+        """Re-lee companions.json/bearer para *slug* y resiembra + reconecta
+        su entrada MCP SIN reiniciar el daemon (028 T017).
+
+        authZ: SOLO el uid del shell-server (misma frontera que
+        MintCompanionOwnerAssertion) — invocado por el agente anfitrión tras
+        un `safent companion install|repair` con éxito, nunca directamente
+        por el operador. Devuelve JSON {ok, state?, reachable?} o
+        {ok: false, reason: "not_installed"} si el andamiaje aún no valida.
+        """
+        sender_uid = await self._resolve_current_sender_uid()
+        try:
+            result = await self._wiring.reload_companion_presence(
+                slug=slug, sender_uid=sender_uid
+            )
+        except PermissionError as exc:
+            raise DBusError("org.hermes.Error.Unauthorized", str(exc)) from exc
+        return json.dumps(result)
+
+    @method()
     async def SetManagedRemoteEndpoint(  # noqa: N802
         self, slug: "s", url: "s"  # noqa: F821,UP037
     ) -> "s":  # noqa: F821,UP037

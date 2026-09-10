@@ -47,6 +47,19 @@
 # Publishing ghcr.io/devwspito/safent-ads (SAFENT_ADS_IMAGE's default) is
 # the OWNER's own release step, from the ads repo's CI — never done from
 # here or from a developer machine.
+#
+# --scaffold (028 T015): stop after the network/TLS/bearer/companions.json/
+# caps/pg_password steps — every one of them is local and image-independent
+# (no pull, no `podman run` of the ads image). Skips ensure_image,
+# ensure_secrets, ensure_sso_keypair, start_companion and wait_for_health,
+# so the companion's OWN service never comes up. This is what run-safent.sh
+# and the `safent` CLI now call on EVERY Safent start: the four files Safent
+# binds read-only (companions.json, ca.crt, bearer, sso/ads-sso.key) always
+# exist from first boot, so a LATER `safent companion install` only ever
+# writes into mounts that are already there — it never has to recreate
+# Safent's own container. Without --scaffold this script still runs the
+# FULL sequence (today's exact behaviour), used by `safent companion
+# install|repair` (T016) to actually bring the service up.
 set -euo pipefail
 
 readonly COMPANION_SUBNET="10.201.0.0/24"
@@ -64,8 +77,24 @@ readonly SAFENT_ADS_IMAGE="${SAFENT_ADS_IMAGE:-ghcr.io/devwspito/safent-ads:late
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE="${SAFENT_COMPANION_STATE:-$HOME/.safent/companions/ads}"
-RUNTIME="$(command -v podman || command -v docker)"
+# SAFENT_PODMAN wins over PATH resolution — same rule as the `safent` CLI
+# (contracts/app-engine.md §1): the desktop app ships its OWN pinned podman
+# binary and this script must never fall back to whatever a terminal user
+# happens to have on PATH once it is invoked from the embedded CLI
+# (`safent companion install|repair`, T016).
+if [ -n "${SAFENT_PODMAN:-}" ]; then
+  RUNTIME="$SAFENT_PODMAN"
+else
+  RUNTIME="$(command -v podman || command -v docker)"
+fi
 [ -n "$RUNTIME" ] || { echo "provision.sh: need podman or docker" >&2; exit 1; }
+
+SCAFFOLD_ONLY=0
+case "${1:-}" in
+  --scaffold) SCAFFOLD_ONLY=1 ;;
+  "") ;;
+  *) echo "provision.sh: unknown argument '$1' (usage: provision.sh [--scaffold])" >&2; exit 1 ;;
+esac
 
 mkdir -p "$STATE/tls" "$STATE/secrets" "$STATE/sso"
 chmod 0700 "$STATE" "$STATE/secrets" "$STATE/sso"
@@ -290,8 +319,31 @@ merge_vendor_credentials() {
 # PUBLIC_KEY as URL-SAFE base64 (matching the assertion's own <b64url(payload)>
 # encoding, contracts/sso.md §3). `tr '+/' '-_'` converts alphabets without
 # touching the padding — cheap, host-only, no extra dependency.
+# ── 7c. SSO key placeholder (028 T015, scaffold mode) ───────────────────────
+# An EMPTY, correctly-permissioned file so the bind mount run-safent.sh/the
+# `safent` CLI add for /etc/hermes/companions/ads-sso.key always has a
+# source, even before ensure_sso_keypair ever runs (that step needs the ads
+# image, which scaffold mode deliberately never pulls). The daemon's own
+# loader (hermes.agents_os.infrastructure.companion_sso_authority) already
+# fails CLOSED and CLEAN on an empty key (Ed25519PrivateKey.from_private_
+# bytes raises ValueError -> CompanionSsoKeyUnavailableError, no crash, no
+# key material anywhere) — this placeholder is what makes that the observed
+# behaviour instead of a missing bind-mount source. `[ -e ]`, not `[ -f ]`:
+# treats a placeholder OR a real key identically for "already have a file
+# here", `ensure_sso_keypair`'s own idempotency check below distinguishes
+# "real key already generated" (non-empty) from "just the placeholder".
+ensure_sso_placeholder() {
+  [ -e "$STATE/sso/ads-sso.key" ] && return 0
+  : > "$STATE/sso/ads-sso.key"
+  chmod 0400 "$STATE/sso/ads-sso.key"
+}
+
 ensure_sso_keypair() {
-  [ -f "$STATE/sso/ads-sso.key" ] && return 0
+  # -s (non-empty), not -f: a scaffold-mode placeholder (ensure_sso_
+  # placeholder above) is a zero-byte file at this exact path — it must
+  # NOT satisfy this check, or `safent companion install` would see "the
+  # key already exists" and never generate the real one (T015/T016 boundary).
+  [ -s "$STATE/sso/ads-sso.key" ] && return 0
   log "generando par Ed25519 de SSO (puente de sesión, 026)…"
   local keypair seed_std pub_std pub_urlsafe
   # -- (LOW finding, CWE-88): see ensure_secrets's own identical comment.
@@ -406,11 +458,18 @@ ensure_network
 ensure_tls
 ensure_bearer
 write_companions_json
-ensure_image
 ensure_pg_password
+ensure_caps
+ensure_sso_placeholder
+
+if [ "$SCAFFOLD_ONLY" -eq 1 ]; then
+  log "andamiaje listo (red + companions.json + TLS + bearer) — companion NO arrancado (usa 'safent companion install')"
+  exit 0
+fi
+
+ensure_image
 ensure_secrets
 ensure_sso_keypair
-ensure_caps
 start_companion
 wait_for_health
 log "aprovisionamiento OK — $STATE/companions.json listo para el bind read-only"

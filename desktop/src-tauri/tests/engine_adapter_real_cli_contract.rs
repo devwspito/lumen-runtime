@@ -84,8 +84,11 @@ echo "$@" >> "$FAKE_PODMAN_LOG"
 
 case "$1" in
   inspect)
-    if [ "$2" = "-f" ]; then
-      case "$3" in
+    shift
+    # BKP-01: the CLI pins `inspect --type container`; accept the flag pair.
+    if [ "$1" = "--type" ]; then shift 2; fi
+    if [ "$1" = "-f" ]; then
+      case "$2" in
         '{{.State.Running}}')
           [ "$FAKE_CONTAINER_EXISTS" = "true" ] || exit 1
           echo "$FAKE_CONTAINER_RUNNING"; exit 0 ;;

@@ -60,6 +60,16 @@ CLI_URL="${SAFENT_CLI_URL:-https://raw.githubusercontent.com/devwspito/safent-ru
 # seccomp profile below (image > raw GitHub > cache), so there is exactly
 # ONE implementation of provisioning, never a copy embedded in this CLI.
 COMPANION_STATE="${SAFENT_COMPANION_STATE:-$SAFENT_STATE_HOME/companions/ads}"
+# Exported (not just a local shell var): provision.sh runs as a SEPARATE
+# process and only ever reads SAFENT_COMPANION_STATE itself — it has no idea
+# SAFENT_STATE_HOME exists. Without this export, a caller that sets
+# SAFENT_STATE_HOME but not SAFENT_COMPANION_STATE (the desktop app's own
+# sandboxed profile dir, app-engine.md §1) gets a silent split-brain: this
+# CLI computes COMPANION_STATE/the bind-mount paths from SAFENT_STATE_HOME,
+# while provision.sh independently falls back to $HOME/.safent/companions/ads
+# and writes there instead — the binds then point at a directory nothing
+# ever populated.
+export SAFENT_COMPANION_STATE="$COMPANION_STATE"
 COMPANION_BIN_DIR="$SAFENT_STATE_HOME/companions/ads/bin"
 COMPANION_RAW_BASE="${SAFENT_COMPANION_URL_BASE:-https://raw.githubusercontent.com/devwspito/safent-runtime/main/ops/container/companions/ads}"
 COMPANION_RUN_ARGS=""
@@ -130,6 +140,22 @@ _ENTERPRISE_MARKER="/var/lib/hermes/instance/.enterprise"
 # untouched and a future per-instance image override stays a one-line change.
 _image() {
   echo "$IMAGE"
+}
+
+# Per-instance host-agent identifiers (T003, matrix 025 UPD-06). The
+# DEFAULT instance (SAFENT_NAME=safent, what get-safent.sh installs) keeps
+# today's EXACT label/unit name unchanged — zero migration for the common
+# single-instance case. Any OTHER named instance (multi-instance testing,
+# a second paired tenant on the same host) gets its OWN suffixed
+# identifier, so a scoped `safent uninstall` for one instance can never
+# disable or delete ANOTHER instance's agent — the bug UPD-06 reproduced
+# live (uninstalling a test instance would have torn down a real,
+# unrelated agent from a prior install on the same host).
+_agent_label() {
+  [ "$NAME" = "safent" ] && echo "run.safent.agent" || echo "run.safent.agent.$NAME"
+}
+_agent_unit() {
+  [ "$NAME" = "safent" ] && echo "safent-agent.service" || echo "safent-agent-$NAME.service"
 }
 
 # macOS: the cage runs inside a podman machine, which MUST be rootful.
@@ -211,12 +237,19 @@ _fetch_companion_file() {
   return 1
 }
 
-# Provision the safent-ads companion (024) BEFORE _run: companions.json has
+# Scaffold the safent-ads companion (024) BEFORE _run: companions.json has
 # to exist for the read-only bind _run adds. Mirrors run-safent.sh's own
 # companion phase exactly — same provision.sh, fetched rather than shipped a
 # second time in this CLI. NEVER fatal to Safent's own boot (FR-3): any
 # failure here just leaves COMPANION_RUN_ARGS empty and _run starts without
 # --network/the companion binds, same as --no-companion.
+#
+# --scaffold (028 T015): network + TLS + bearer + companions.json only —
+# local, image-independent, always fast. The companion's actual SERVICE
+# (image pull, secrets, compose up) is now a SEPARATE, explicit step
+# (`safent companion install|repair`, T016), never bundled into every
+# Safent start — so installing Anuncios later never has to recreate this
+# container: the bind-mount sources scaffolded here already exist.
 _provision_companion() {
   COMPANION_RUN_ARGS=""
   [ "$NO_COMPANION" -eq 0 ] || return 0
@@ -234,10 +267,10 @@ _provision_companion() {
   # §2) in EITHER mode — non-porcelain `up`/`url` also only ever print the
   # final URL on stdout, never provisioning chatter. Its exit status (the
   # only thing this `if` actually needs) is untouched by the redirect.
-  if "$COMPANION_BIN_DIR/provision.sh" >&2; then
+  if "$COMPANION_BIN_DIR/provision.sh" --scaffold >&2; then
     COMPANION_RUN_ARGS="--network safent-companions -v ${COMPANION_STATE}/companions.json:/etc/hermes/companions.json:ro -v ${COMPANION_STATE}/tls/ca.crt:/etc/hermes/companions/ads-ca.crt:ro -v ${COMPANION_STATE}/bearer:/etc/hermes/companions/ads.bearer:ro -v ${COMPANION_STATE}/sso/ads-sso.key:/etc/hermes/companions/ads-sso.key:ro"
   else
-    echo "[!] Companion provisioning failed — starting Safent without it (FR-3)." >&2
+    echo "[!] Companion scaffolding failed — starting Safent without it (FR-3)." >&2
   fi
 }
 
@@ -449,14 +482,14 @@ _ensure_agent() {
   mkdir -p "$HOME/.safent" 2>/dev/null || true
   case "$OS" in
     Darwin)
-      _pl="$HOME/Library/LaunchAgents/run.safent.agent.plist"
+      _pl="$HOME/Library/LaunchAgents/$(_agent_label).plist"
       if [ ! -f "$_pl" ] || ! grep -q "$self" "$_pl" 2>/dev/null; then
         mkdir -p "$HOME/Library/LaunchAgents" 2>/dev/null || return 0
         cat > "$_pl" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>Label</key><string>run.safent.agent</string>
+  <key>Label</key><string>$(_agent_label)</string>
   <key>ProgramArguments</key><array><string>$self</string><string>agent</string></array>
   <key>EnvironmentVariables</key>
   <dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/opt/podman/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
@@ -474,9 +507,10 @@ PLIST
     Linux)
       if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
         _u="$HOME/.config/systemd/user"
-        if [ ! -f "$_u/safent-agent.service" ]; then
+        _unit="$_u/$(_agent_unit)"
+        if [ ! -f "$_unit" ]; then
           mkdir -p "$_u" 2>/dev/null || true
-          cat > "$_u/safent-agent.service" <<UNIT
+          cat > "$_unit" <<UNIT
 [Unit]
 Description=Safent UI-triggered update agent
 [Service]
@@ -487,7 +521,7 @@ RestartSec=10
 WantedBy=default.target
 UNIT
           systemctl --user daemon-reload >/dev/null 2>&1 || true
-          systemctl --user enable --now safent-agent.service >/dev/null 2>&1 \
+          systemctl --user enable --now "$(_agent_unit)" >/dev/null 2>&1 \
             && echo "[ok] UI-triggered updates enabled (systemd --user)." || true
         fi
       fi
@@ -543,6 +577,13 @@ _sha256() {
 # below (fixed, known shape — no general JSON parser needed in POSIX sh).
 _manifest_field() {
   sed -n "s/.*\"$2\": *\"\([^\"]*\)\".*/\1/p" "$1" | head -1
+}
+
+# Same idea for an unquoted JSON boolean (true/false) — used to read
+# machine.json's own "adopted" field (data-model.md, written by the desktop
+# app's bootstrap service, RT-DESK — never by this CLI).
+_json_bool_field() {
+  sed -n "s/.*\"$2\": *\(true\|false\).*/\1/p" "$1" | head -1
 }
 
 cmd_backup() {
@@ -769,20 +810,86 @@ cmd_logs() { "$RT" logs -f "$NAME"; }
 # the daemon). The backend's POST /api/v1/system/update touches this exact path.
 _UPDATE_FLAG="/var/lib/hermes/instance/.update-requested"
 _UNINSTALL_FLAG="/var/lib/hermes/instance/.uninstall-requested"
+
+# ---- install-request marker consumption (T016, contracts/install-request.md) ----
+# `install_companion`/`repair_companion` are the NEW closed-vocabulary markers
+# (install_requests.py, T006) — a separate mechanism from the legacy flat
+# _UPDATE_FLAG/_UNINSTALL_FLAG above (which this loop keeps watching
+# unchanged; both are dual-written by the daemon today, see that module's
+# own docstring). `install_request_agent_cli` is the ONE implementation of
+# the marker's claim/expiry/consume rules — this loop never re-parses the
+# marker file itself, exactly the "misma implementacion" install-request.md
+# §4 requires of its two readers (this agent, and the open app).
+_AGENT_CLAIMANT="safent-agent-$$"
+
+# Claims *verb*'s live request, if any. Prints the claimed slug (may be
+# empty) to stdout and returns 0; returns 1 with no output when there is
+# nothing to claim right now (no live request, or someone else — the open
+# app — already holds a live claim).
+_claim_install_request() {
+  "$RT" exec "$NAME" python3 -m hermes.shell_server.install_request_agent_cli \
+    claim "$1" --claimant "$_AGENT_CLAIMANT" 2>/dev/null
+}
+
+# Releases *verb*'s claim; on success also consumes the marker so it is
+# never re-run. Best-effort: a failure to reach the daemon here must never
+# crash the agent loop — the marker's own TTL is the backstop.
+_resolve_install_request() {
+  "$RT" exec "$NAME" python3 -m hermes.shell_server.install_request_agent_cli \
+    resolve "$1" "--$2" >/dev/null 2>&1 || true
+}
+
+# One verb, one action: claim -> run the action -> resolve success/failure.
+# Never loops on its own — the outer `cmd_agent` while-loop's `sleep 20`
+# already paces every retry, and a failure leaves the marker `pending`
+# (not re-claimed until the NEXT iteration), so a persistently-failing
+# install polls at the loop's own cadence, never in a tight retry storm.
+#
+# The action runs in a SUBSHELL `( "$2" )`, not a plain call: porcelain
+# failures (_die_porcelain, cmd_companion_install/repair's own failure
+# path) call `exit`, which is correct when that verb runs as its OWN
+# top-level `safent companion install` process, but would otherwise kill
+# THIS whole long-running agent loop too — a subshell scopes that `exit`
+# to just the one attempt.
+_handle_install_request() {  # $1=verb $2=action-function-name
+  _running || return 0
+  _claim_install_request "$1" >/dev/null || return 0
+  echo "[*] $1 requested from the UI — applying…"
+  if ( "$2" ); then
+    _resolve_install_request "$1" success
+  else
+    echo "[!] $1 failed; it stays pending and will be retried." >&2
+    _resolve_install_request "$1" failure
+  fi
+}
+
+# One pass over every marker this agent watches — extracted from cmd_agent's
+# loop so it is independently callable (SAFENT_AGENT_ONCE below, and tests).
+_agent_tick() {
+  # Uninstall wins over update — checked first; it removes everything (incl. this agent).
+  if _running && "$RT" exec "$NAME" test -f "$_UNINSTALL_FLAG" 2>/dev/null; then
+    echo "[*] Uninstall requested from the UI — removing Safent…"
+    cmd_uninstall
+    exit 0
+  fi
+  if _running && "$RT" exec "$NAME" test -f "$_UPDATE_FLAG" 2>/dev/null; then
+    "$RT" exec "$NAME" rm -f "$_UPDATE_FLAG" 2>/dev/null || true
+    echo "[*] Update requested from the UI — applying..."
+    cmd_update || echo "[!] Update failed; re-request it from the UI to retry."
+  fi
+  _handle_install_request install_companion cmd_companion_install
+  _handle_install_request repair_companion cmd_companion_repair
+}
+
 cmd_agent() {
-  echo "[*] Safent update agent running (watches for UI-triggered updates/uninstall)."
+  echo "[*] Safent update agent running (watches for UI-triggered updates/uninstall/companion installs)."
   while :; do
-    # Uninstall wins over update — checked first; it removes everything (incl. this agent).
-    if _running && "$RT" exec "$NAME" test -f "$_UNINSTALL_FLAG" 2>/dev/null; then
-      echo "[*] Uninstall requested from the UI — removing Safent…"
-      cmd_uninstall
-      exit 0
-    fi
-    if _running && "$RT" exec "$NAME" test -f "$_UPDATE_FLAG" 2>/dev/null; then
-      "$RT" exec "$NAME" rm -f "$_UPDATE_FLAG" 2>/dev/null || true
-      echo "[*] Update requested from the UI — applying..."
-      cmd_update || echo "[!] Update failed; re-request it from the UI to retry."
-    fi
+    _agent_tick
+    # Test-only escape hatch (same "env var flips a non-interactive mode"
+    # shape as SAFENT_NO_BROWSER/SAFENT_NO_SELF_UPDATE above): run exactly
+    # one pass instead of looping forever, so the marker-consumption logic
+    # is testable without waiting through a real sleep cycle.
+    [ "${SAFENT_AGENT_ONCE:-0}" = "1" ] && return 0
     sleep 20
   done
 }
@@ -863,20 +970,51 @@ _companion_update_env() {
   export SAFENT_STATE SAFENT_ADS_IMAGE ADS_POSTGRES_PASSWORD
 }
 
-# Tear down the safent-ads companion (024): compose down its four services
-# and remove the fixed network, using the SAME cached compose.yaml
-# provisioning used to start it (nothing rebuilt here). Best-effort — a
-# companion that was never provisioned (no cached compose.yaml) is a no-op.
-# $STATE itself (TLS, secrets, caps.yaml) is NOT touched here: it is removed
-# below by the same `rm -rf "$SECCOMP_DIR"` that already wipes every other
-# piece of local Safent state (there is no partial-uninstall mode in this
-# CLI today — see cmd_uninstall's own doc comment).
-_uninstall_companion() {
-  [ -f "$COMPANION_COMPOSE" ] || return 0
-  echo "[*] Removing the safent-ads companion…"
-  _companion_env
-  "$RT" compose -p safent-ads -f "$COMPANION_COMPOSE" down >/dev/null 2>&1 || true
-  "$RT" network rm "$COMPANION_NETWORK" >/dev/null 2>&1 || true
+# T003/UPD-06: `safent-companions` is a HOST-GLOBAL network — every Safent
+# instance on this host that ever joined it (`--network safent-companions`
+# in `_run`) shares the ONE network, regardless of which instance's
+# companion provisioned it. A scoped uninstall must never rm it while
+# another instance's container (or another instance's companion) is still
+# attached — `podman ps --filter network=…` lists every CONTAINER on it,
+# running or not, which is a portable (podman AND docker), engine-version-
+# independent way to answer "is anything still using this" without parsing
+# `network inspect`'s own (less stable) Containers map shape.
+_remove_companion_network_if_unused() {
+  "$RT" network inspect "$COMPANION_NETWORK" >/dev/null 2>&1 || return 0
+  _attached="$("$RT" ps -a --filter "network=$COMPANION_NETWORK" --format '{{.ID}}' 2>/dev/null || true)"
+  if [ -z "$_attached" ]; then
+    "$RT" network rm "$COMPANION_NETWORK" >/dev/null 2>&1 || true
+  else
+    echo "[*] Keeping network '$COMPANION_NETWORK' — still in use by another instance." >&2
+  fi
+}
+
+# Tear down the safent-ads companion (024): compose down its four services,
+# using the SAME cached compose.yaml provisioning used to start it (nothing
+# rebuilt here), then remove the fixed network ONLY if nothing else is
+# still attached to it. Best-effort — a companion that was never
+# provisioned (no cached compose.yaml) is a no-op.
+#
+# $STATE (TLS, secrets, caps.yaml, companions.json) and the three podman
+# volumes (db-data, broker-sock, credential-store — CLI-12's own matrix
+# nuance) are NOT touched here unless *purge*=1: an owner reaching for
+# `safent uninstall` (no --purge) wants the software gone, not necessarily
+# the campaign history/credentials re-generated from scratch on the next
+# install.
+_uninstall_companion() {  # $1: 1 to also purge state + volumes, 0 to keep them
+  _purge="${1:-0}"
+  if [ -f "$COMPANION_COMPOSE" ]; then
+    echo "[*] Removing the safent-ads companion…"
+    _companion_env
+    "$RT" compose -p safent-ads -f "$COMPANION_COMPOSE" down >/dev/null 2>&1 || true
+  fi
+  _remove_companion_network_if_unused
+  if [ "$_purge" -eq 1 ]; then
+    for _v in safent-ads-companion-db-data safent-ads-companion-broker-sock safent-ads-companion-credential-store; do
+      "$RT" volume rm "$_v" >/dev/null 2>&1 || true
+    done
+    rm -rf "$COMPANION_STATE" 2>/dev/null || true
+  fi
 }
 
 # ---- companion subcommands (T193): status|update|rotate|remove -------------
@@ -916,6 +1054,74 @@ _companion_health_code() {
     --cacert "$COMPANION_STATE/tls/ca.crt" \
     --resolve "$COMPANION_HOST:$COMPANION_PORT:$COMPANION_IP" \
     "https://$COMPANION_HOST:$COMPANION_PORT/mcp/health" 2>/dev/null || true
+}
+
+# ---- companion install|repair (T016) ---------------------------------------
+# Both converge to the SAME target state: provision.sh is already a full
+# reconciler (every one of its steps is "generate/start if absent, skip if
+# already done" — network, TLS, bearer, secrets, SSO keypair, migrations,
+# compose up are ALL idempotent by construction, see provision.sh's own
+# header). `install` (nothing provisioned yet) and `repair` (network/volumes/
+# DB/bearer/SSO half-provisioned, or the compose stack simply unhealthy)
+# therefore share ONE implementation — install-request.md's per-verb TTL
+# (30 min vs 15 min) is the real distinction between the two, not the work
+# itself. `--purge`-style destructive behaviour never lives here.
+#
+# Runs the (potentially minutes-long) image pull + compose up in the
+# background and emits a porcelain heartbeat at least every 5s while it is
+# alive — app-engine.md §3 NFR-001/002 requires progress at least that
+# often, and provision.sh itself is an opaque subprocess with no
+# finer-grained hook. Polls every 1s (not 5s): the loop condition is
+# checked BEFORE each sleep, so a 5s poll would force every call — even one
+# wrapping a sub-second operation — to pay a full 5s tax before ever
+# noticing the child already exited.
+_run_with_heartbeat() {
+  "$@" >&2 &
+  _hb_pid=$!
+  _hb_elapsed=0
+  while kill -0 "$_hb_pid" 2>/dev/null; do
+    sleep 1
+    _hb_elapsed=$((_hb_elapsed + 1))
+    [ $((_hb_elapsed % 5)) -eq 0 ] && _stage_progress "$_hb_elapsed" "" seconds
+  done
+  wait "$_hb_pid"
+}
+
+_companion_install_or_repair() {
+  mkdir -p "$COMPANION_BIN_DIR" 2>/dev/null || true
+  for _cf in provision.sh compose.yaml caps.template.yaml; do
+    _fetch_companion_file "$_cf" || _die_porcelain companion_network_conflict "No se pudo obtener $_cf" true
+  done
+
+  _stage companion_scaffold "Preparando el andamiaje del companion"
+  "$COMPANION_BIN_DIR/provision.sh" --scaffold >&2 \
+    || _die_porcelain companion_network_conflict "No se pudo preparar la red/estado del companion" true
+  _stage_done
+
+  _stage companion_up "Instalando el companion"
+  _run_with_heartbeat "$COMPANION_BIN_DIR/provision.sh" \
+    || _die_porcelain companion_migration_failed "El companion no arranco" true
+  _stage_done
+
+  _stage companion_reload "Registrando el companion en Safent"
+  if _running; then
+    "$RT" exec -u hermes "$NAME" python3 -m hermes.shell_server.companion_reload_cli \
+      reload safent-ads >&2 \
+      || echo "[!] No se pudo recargar el companion en caliente en Safent — 'safent restart' lo recoge igualmente (029 CL-002)." >&2
+  fi
+  _stage_done
+
+  [ "$PORCELAIN" -eq 1 ] || return 0
+}
+
+cmd_companion_install() {
+  _companion_install_or_repair
+  [ "$PORCELAIN" -eq 1 ] || echo "[ok] Companion instalado."
+}
+
+cmd_companion_repair() {
+  _companion_install_or_repair
+  [ "$PORCELAIN" -eq 1 ] || echo "[ok] Companion reparado."
 }
 
 cmd_companion_status() {
@@ -1099,63 +1305,127 @@ cmd_companion_rotate() {
   echo "    Restart Safent so the daemon re-reads them:  safent restart"
 }
 
-# Compose down + remove the fixed network — mirrors _uninstall_companion
-# exactly, except $STATE (TLS/secrets/caps.yaml) survives unless --purge:
-# an owner reaching for THIS verb wants the companion gone, not necessarily
-# its history/config re-generated from scratch on the next `safent update`.
+# Delegates to `_uninstall_companion` — the ONE implementation of "tear
+# down the companion" (compose down, network-only-if-unused, and, with
+# --purge, the three podman volumes too). CLI-12 nuance (matrix 025, T003):
+# --purge used to leave the campaign database + broker-sock + credential-
+# store volumes AND the network behind — both are gone now, without this
+# verb re-implementing the teardown a second time.
 cmd_companion_remove() {
-  if [ -f "$COMPANION_COMPOSE" ]; then
-    echo "[*] Stopping the companion..."
-    _companion_env
-    "$RT" compose -p safent-ads -f "$COMPANION_COMPOSE" down >/dev/null 2>&1 || true
-  fi
-  "$RT" network rm "$COMPANION_NETWORK" >/dev/null 2>&1 || true
   if [ "${1:-}" = "--purge" ]; then
-    rm -rf "$COMPANION_STATE" 2>/dev/null || true
+    _uninstall_companion 1
     echo "[ok] Companion removed and state purged ($COMPANION_STATE)."
   else
+    _uninstall_companion 0
     echo "[ok] Companion removed. State kept at $COMPANION_STATE (use --purge to delete it too)."
   fi
 }
 
 cmd_companion() {
   case "${1:-}" in
+    install) cmd_companion_install ;;
+    repair) cmd_companion_repair ;;
     status) cmd_companion_status ;;
     update) cmd_companion_update ;;
     rotate) cmd_companion_rotate ;;
     remove) cmd_companion_remove "${2:-}" ;;
     *)
-      echo "Usage: safent companion status|update|rotate|remove [--purge]" >&2
+      echo "Usage: safent companion install|repair|status|update|rotate|remove [--purge]" >&2
       exit 1
       ;;
   esac
 }
 
-# Remove Safent from the machine: the container, the companion, its data
-# volume, the seccomp cache, the UI-update agent, and the CLI itself. Leaves
-# podman/docker installed (they are general tools you may use elsewhere).
-# Triggerable from the UI (POST /system/uninstall → marker → the agent runs
-# this) or by hand: `safent uninstall`.
+# T003 (matrix 025 UPD-06): "machine (macOS) only if it is ours" —
+# $SAFENT_STATE_HOME/machine.json is written by the DESKTOP APP's bootstrap
+# service (RT-DESK) when it creates or adopts a podman machine; a bare
+# terminal install never writes it, so this is a no-op there.
+# `adopted=true` means an EXISTING machine was found and used as-is
+# (plan.md: "la ajena no se toca" — a foreign machine is never touched);
+# `adopted=false` means WE created it, so uninstalling removes what this
+# installation created.
+_uninstall_machine_if_ours() {
+  [ "$OS" = Darwin ] || return 0
+  _mj="$SAFENT_STATE_HOME/machine.json"
+  [ -f "$_mj" ] || return 0
+  _m_name="$(_manifest_field "$_mj" name)"
+  [ -n "$_m_name" ] || return 0
+  [ "$(_json_bool_field "$_mj" adopted)" = "true" ] && return 0
+  "$RT" machine rm -f "$_m_name" >/dev/null 2>&1 || true
+}
+
+# Remove Safent from the machine, SCOPED TO THIS INSTALLATION
+# (SAFENT_NAME/SAFENT_STATE_HOME) — corrects UPD-06 (matrix 025): the old
+# unconditional version disabled/deleted ANOTHER instance's host agent and
+# the shared CLI binary regardless of $NAME, and always removed the
+# companion network even while another instance was still attached to it.
+#
+# `--scope this-install` is the only scope this CLI understands
+# (app-engine.md §4's own verb shape, `uninstall --scope this-install`) —
+# accepted (and, from the embedded CLI, required), rejected if given
+# anything else. There is no OTHER mode: "this installation only" is
+# simply the correct behaviour, not one of several supported ones.
+#
+# Default (no --purge): removes the SOFTWARE — this instance's container,
+# the companion stack (its network only if nothing else is still attached
+# to it), the podman machine only if THIS installation created it, the
+# host agent unit/plist scoped to this instance's name, and the cached
+# companion provisioning scripts — but KEEPS DATA: the Safent data volume,
+# the companion's three podman volumes (including the campaign database,
+# CLI-12's own nuance), and $SAFENT_STATE_HOME (TLS/secrets/bearer/SSO/
+# backups). `--purge` deletes all of that too, for real, and the final
+# line says exactly what was removed.
+#
+# Triggerable from the UI (install-request `uninstall_system` -> `safent
+# agent` runs this) or by hand: `safent uninstall [--purge]`.
 cmd_uninstall() {
-  echo "[*] Uninstalling Safent…"
-  _uninstall_companion
+  _scope="this-install"
+  _purge=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --scope) _scope="${2:-}"; shift 2 ;;
+      --scope=*) _scope="${1#--scope=}"; shift ;;
+      --purge) _purge=1; shift ;;
+      *) echo "[x] Unknown uninstall option: $1" >&2; exit 1 ;;
+    esac
+  done
+  if [ "$_scope" != "this-install" ]; then
+    echo "[x] Unsupported --scope '$_scope' (only 'this-install' is supported)." >&2
+    exit 1
+  fi
+
+  echo "[*] Uninstalling Safent (instance: $NAME)…"
   "$RT" rm -f "$NAME" >/dev/null 2>&1 || true
-  "$RT" volume rm "$DATA_VOLUME" >/dev/null 2>&1 || true
-  rm -rf "$SECCOMP_DIR" 2>/dev/null || true
+  _uninstall_companion "$_purge"
+  _uninstall_machine_if_ours
+  rm -rf "$COMPANION_BIN_DIR" 2>/dev/null || true
   case "$OS" in
     Darwin)
-      launchctl unload "$HOME/Library/LaunchAgents/run.safent.agent.plist" 2>/dev/null || true
-      rm -f "$HOME/Library/LaunchAgents/run.safent.agent.plist" 2>/dev/null || true
+      launchctl unload "$HOME/Library/LaunchAgents/$(_agent_label).plist" >/dev/null 2>&1 || true
+      rm -f "$HOME/Library/LaunchAgents/$(_agent_label).plist" 2>/dev/null || true
       ;;
     Linux)
-      systemctl --user disable --now safent-agent.service >/dev/null 2>&1 || true
-      rm -f "$HOME/.config/systemd/user/safent-agent.service" 2>/dev/null || true
+      systemctl --user disable --now "$(_agent_unit)" >/dev/null 2>&1 || true
+      rm -f "$HOME/.config/systemd/user/$(_agent_unit)" 2>/dev/null || true
       ;;
   esac
-  rm -rf "$HOME/.safent" 2>/dev/null || true
-  # Remove the CLI last (safe to unlink a running script on Unix).
-  rm -f /opt/homebrew/bin/safent /usr/local/bin/safent "$HOME/.local/bin/safent" "$HOME/bin/safent" 2>/dev/null || true
-  echo "[ok] Safent uninstalled. (podman/docker were left installed.)"
+  # The CLI binary and the DEFAULT-name agent are shared, host-level
+  # plumbing — only the default instance (what get-safent.sh installs)
+  # owns them. A named/secondary instance (multi-instance testing, a
+  # second tenant on the same host) must never remove what other
+  # instances still depend on.
+  if [ "$NAME" = "safent" ]; then
+    rm -f /opt/homebrew/bin/safent /usr/local/bin/safent "$HOME/.local/bin/safent" "$HOME/bin/safent" 2>/dev/null || true
+  fi
+
+  if [ "$_purge" -eq 1 ]; then
+    "$RT" volume rm "$DATA_VOLUME" >/dev/null 2>&1 && echo "[ok] Removed data volume: $DATA_VOLUME"
+    rm -rf "$SAFENT_STATE_HOME" 2>/dev/null || true
+    echo "[ok] Safent uninstalled and purged (state, data volume and companion volumes removed)."
+  else
+    echo "[ok] Safent uninstalled. Kept: data volume ($DATA_VOLUME), companion state and volumes (use --purge to delete them too)."
+  fi
+  echo "    (podman/docker were left installed.)"
 }
 
 # ---- porcelain mode (T004): NDJSON on stdout — contracts/app-engine.md ----
@@ -1514,7 +1784,11 @@ safent - control your local Safent
   safent logs       follow the container journal
   safent pair <code>   associate with an enterprise tenant (same image, associate mode)
   safent unpair        remove the enterprise association (reverts to community edition)
-  safent uninstall     remove Safent (container + data + CLI + agent; keeps podman/docker)
+  safent uninstall [--purge]
+                       remove THIS installation's software (container, companion
+                       stack, host agent, CLI); keeps your data volume + companion
+                       state unless --purge, which deletes those too. Never touches
+                       another instance or podman/docker itself.
 
   safent backup [dir]             stop cleanly, archive the data volume + companion
                                    state (secrets) + seccomp cache into one 0600 file
@@ -1524,10 +1798,12 @@ safent - control your local Safent
                                    `safent backup`, then restart. Refuses to overwrite
                                    an existing data volume unless --force is given
 
-  safent companion status            is the companion up? containers, /mcp/health
-  safent companion update            pull the latest companion image and recreate it
-  safent companion rotate            issue a new /mcp bearer on both sides, restart ads-api
-  safent companion remove [--purge]  stop + remove the companion (keeps its state unless --purge)
+  safent companion install            install the companion (idempotent — safe to re-run)
+  safent companion repair             reconcile a half-provisioned companion (same as install)
+  safent companion status             is the companion up? containers, /mcp/health
+  safent companion update             pull the latest companion image and recreate it
+  safent companion rotate             issue a new /mcp bearer on both sides, restart ads-api
+  safent companion remove [--purge]   stop + remove the companion (keeps its state unless --purge)
 
   safent brake release   release the emergency brake without MFA (host access == owner;
                           use only when MFA isn't enrolled yet and no device password
@@ -1568,7 +1844,7 @@ case "${1:-open}" in
   companion|compañero)         cmd_companion "${2:-}" "${3:-}" ;;
   pair|vincular)               cmd_pair "${2:-}" ;;
   unpair|desvincular)          cmd_unpair ;;
-  uninstall|desinstalar)       cmd_uninstall ;;
+  uninstall|desinstalar)       shift; cmd_uninstall "$@" ;;
   backup|respaldo)             cmd_backup "${2:-}" ;;
   restore|restaura)            shift; cmd_restore "$@" ;;
   facts)                       cmd_facts ;;

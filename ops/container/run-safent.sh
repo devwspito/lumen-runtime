@@ -49,11 +49,16 @@
 #        en su lugar" on the same card — plan.md D-A4).
 #
 # Safent Ads (MCP campaign tools, Google/Meta) is PREINSTALLED as a companion
-# (024): this script provisions it (network + CA + bearer + compose up, see
-# ops/container/companions/ads/provision.sh) BEFORE starting Safent, then
-# joins Safent to the fixed `safent-companions` network and binds the four
-# read-only files under /etc/hermes/companions.json — no URL to paste. If
-# provisioning fails (subnet/port already taken — never re-chosen, see
+# (024): this script always scaffolds it (network + CA + bearer +
+# companions.json — see ops/container/companions/ads/provision.sh
+# --scaffold, 028 T015) BEFORE starting Safent, then joins Safent to the
+# fixed `safent-companions` network and binds the four read-only files
+# under /etc/hermes/companions.json — no URL to paste. Scaffolding is local
+# and image-independent (no pull, no compose up): the companion's actual
+# SERVICE only comes up on an explicit `safent companion install|repair`
+# (T016) — Safent's own container is never recreated for that, because the
+# bind-mount sources already exist from this scaffold step. If scaffolding
+# itself fails (subnet/port already taken — never re-chosen, see
 # provision.sh), Safent still starts, just without the companion (FR-3); the
 # owner can fall back to a self-hosted MCP URL via Herramientas -> "Safent
 # Ads" -> Conectar (hermes.shell_server.managed_remote_endpoints), or skip
@@ -148,7 +153,7 @@ if [ "$NO_COMPANION" -eq 0 ]; then
   if [ -z "${SAFENT_ADS_IMAGE:-}" ] && "$RUNTIME" image inspect safent-ads:local >/dev/null 2>&1; then
     export SAFENT_ADS_IMAGE=safent-ads:local
   fi
-  if "$HERE/companions/ads/provision.sh"; then
+  if "$HERE/companions/ads/provision.sh" --scaffold; then
     COMPANION_RUN_ARGS=(
       --network safent-companions
       -v "${COMPANION_STATE}/companions.json:/etc/hermes/companions.json:ro"
