@@ -22,6 +22,17 @@ use window_policy::WindowPolicy;
 // into the running app's Builder is bootstrap work for the T011 lane.
 mod update;
 
+// Bootstrap engine (specs/028-safent-app-nativa, T007/T008/T009/T011): pure
+// domain + reconciler + ports/adapter + the observe-plan-apply loop, wired
+// into main() below behind SAFENT_NEW_BOOT=1 until T012/T013 consume its
+// events (see the setup() comment). Independently compiled and tested either way.
+mod boot;
+mod domain;
+mod engine_adapter;
+mod ports;
+mod reconcile;
+mod selftest;
+
 const BOOTSTRAP_URL: &str =
     "https://raw.githubusercontent.com/devwspito/safent-runtime/main/get-safent.sh";
 
@@ -533,7 +544,22 @@ fn start_update_checker(window: &tauri::WebviewWindow) {
     });
 }
 
+/// `--selftest` / `--selftest=companion`: runs boot.rs's loop headlessly and
+/// exits — checked BEFORE `tauri::Builder` is ever touched, so this needs no
+/// display server (run over SSH on the owner's Mac). Any other argv (none,
+/// `--help`, a Tauri-internal flag) falls through to the normal windowed app.
+fn selftest_arg() -> Option<bool> {
+    match std::env::args().nth(1).as_deref() {
+        Some("--selftest") => Some(false),
+        Some("--selftest=companion") => Some(true),
+        _ => None,
+    }
+}
+
 fn main() {
+    if let Some(want_companion) = selftest_arg() {
+        std::process::exit(selftest::run(want_companion));
+    }
     let policy = WindowPolicy::new();
 
     tauri::Builder::default()
@@ -547,9 +573,16 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             install_podman,
             read_host_clipboard,
-            write_host_clipboard
+            write_host_clipboard,
+            boot::cancel_bootstrap,
+            boot::retry_bootstrap
         ])
         .setup(move |app| {
+            if std::env::var("SAFENT_NEW_BOOT").is_ok() {
+                boot::start(app.handle().clone());
+                return Ok(());
+            }
+
             // NOTE: do NOT replace the default macOS menu. A custom menu that drops the
             // standard Edit submenu breaks keyboard routing to WKWebView entirely (no
             // typing anywhere). The Cmd+V-into-Live/Teaching paste must be solved in the
