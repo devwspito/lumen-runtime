@@ -526,10 +526,15 @@ def fake_cli_bin_dir(tmp_path: Path) -> Path:
     return bin_dir
 
 
-def _companion_state(tmp_path: Path, *, provisioned: bool) -> Path:
+def _companion_state(tmp_path: Path, *, provisioned: bool, with_image_marker: bool = True) -> Path:
     """A minimal $COMPANION_STATE — only what the CLI's own verbs read
-    (bearer, secrets/api.env, tls/ca.crt, sso/ads-sso.key), never
-    provision.sh's full output."""
+    (bearer, secrets/api.env, tls/ca.crt, sso/ads-sso.key, image), never
+    provision.sh's full output.
+
+    with_image_marker=False models a companion missing $STATE/image (a
+    companion provisioned before CLI-10's fix, or the marker deleted/lost)
+    — security review 2026-09-10 (MEDIUM finding): status/rotate/remove
+    must now refuse rather than guess a hard-coded default in that case."""
     state_dir = tmp_path / "state"
     state_dir.mkdir()
     if provisioned:
@@ -546,6 +551,8 @@ def _companion_state(tmp_path: Path, *, provisioned: bool) -> Path:
         (state_dir / "sso").mkdir()
         (state_dir / "sso" / "ads-sso.key").write_text("old-sso-seed\n")
         (state_dir / "sso" / "ads-sso.key").chmod(0o400)
+        if with_image_marker:
+            (state_dir / "image").write_text("safent-ads:test-fake")
     return state_dir
 
 
@@ -813,6 +820,169 @@ class TestCompanionUpdateMigrationGuard:
             podman_log=tmp_path / "podman.log",
         )
         assert result.returncode == 0, result.stderr
+
+    def test_unreadable_history_refuses_instead_of_proceeding_when_db_rev_is_known(
+        self, tmp_path: Path, fake_cli_bin_dir: Path
+    ) -> None:
+        """Security review 2026-09-10 (MEDIUM finding, CWE-754): this used
+        to fail OPEN — an unreadable history "proceeded without the guard".
+        Once db_rev is known (the DB has been migrated), an unreadable
+        history for the TARGET image is now a refusal, not a shrug: we
+        cannot prove the image is safe, and the downside of a wrong guess
+        (ads-api down) is exactly what this guard exists to prevent."""
+        state_dir = _companion_state(tmp_path, provisioned=True)
+        home_dir = tmp_path / "home"
+        _companion_bin_dir(home_dir, provisioned=True)
+        podman_log = tmp_path / "podman.log"
+        result = _run_companion(
+            "update",
+            fake_bin_dir=fake_cli_bin_dir,
+            state_dir=state_dir,
+            home_dir=home_dir,
+            podman_log=podman_log,
+            extra_env={"FAKE_DB_REVISION": "0033_crm_bridge_health"},  # no FAKE_ALEMBIC_HISTORY
+        )
+        assert result.returncode != 0
+        assert "refusing to update against an unverifiable image" in result.stderr
+        log = podman_log.read_text()
+        assert "up -d" not in log
+
+    def test_match_is_word_bounded_not_a_bare_substring(
+        self, tmp_path: Path, fake_cli_bin_dir: Path
+    ) -> None:
+        """Security review 2026-09-10 (MEDIUM finding): `case "$history" in
+        *"$db_rev"*)` matched a db_rev that merely APPEARED inside an
+        unrelated line — e.g. as a substring of a longer revision id or a
+        commit message. `0033` must not be satisfied by a history that only
+        mentions `00337_unrelated`."""
+        state_dir = _companion_state(tmp_path, provisioned=True)
+        home_dir = tmp_path / "home"
+        _companion_bin_dir(home_dir, provisioned=True)
+        result = _run_companion(
+            "update",
+            fake_bin_dir=fake_cli_bin_dir,
+            state_dir=state_dir,
+            home_dir=home_dir,
+            podman_log=tmp_path / "podman.log",
+            extra_env={
+                "FAKE_DB_REVISION": "0033",
+                "FAKE_ALEMBIC_HISTORY": "0032_x -> 00337_unrelated, an unrelated later revision",
+            },
+        )
+        assert result.returncode != 0
+        assert "does not know revision '0033'" in result.stderr
+
+    def test_rotate_is_guarded_too(self, tmp_path: Path, fake_cli_bin_dir: Path) -> None:
+        """Security review 2026-09-10 (MEDIUM finding): the guard used to
+        sit ONLY in `update` — `rotate` recreates ads-api via
+        --force-recreate just the same and needs the same protection."""
+        state_dir = _companion_state(tmp_path, provisioned=True)
+        home_dir = tmp_path / "home"
+        _companion_bin_dir(home_dir, provisioned=True)
+        podman_log = tmp_path / "podman.log"
+        result = _run_companion(
+            "rotate",
+            fake_bin_dir=fake_cli_bin_dir,
+            state_dir=state_dir,
+            home_dir=home_dir,
+            podman_log=podman_log,
+            extra_env={
+                "FAKE_DB_REVISION": "0033_crm_bridge_health",
+                "FAKE_ALEMBIC_HISTORY": "0001_init -> 0002_accounts, add accounts table",
+            },
+        )
+        assert result.returncode != 0
+        assert "OLDER than the database" in result.stderr
+        log = podman_log.read_text()
+        assert "--force-recreate" not in log
+
+
+class TestMissingImageMarkerFailsClosed:
+    """Security review 2026-09-10 (MEDIUM finding, CWE-754): `_persisted_
+    ads_image` used to fall back to the hard-coded ghcr.io/…/safent-ads:
+    latest default when $STATE/image was absent — deleting that ONE file
+    (0700 dir, no integrity protection) silently restored the exact CLI-10
+    divergence this whole fix set out to close. status/rotate/remove must
+    now refuse with a clear recovery step instead of guessing; `update`
+    alone keeps the historical fallback (it is the one verb allowed to
+    CHOOSE an image, so falling back to the published default there is a
+    deliberate bootstrap, not a guess)."""
+
+    def test_status_refuses_without_the_marker(
+        self, tmp_path: Path, fake_cli_bin_dir: Path
+    ) -> None:
+        state_dir = _companion_state(tmp_path, provisioned=True, with_image_marker=False)
+        home_dir = tmp_path / "home"
+        _companion_bin_dir(home_dir, provisioned=True)
+        result = _run_companion(
+            "status",
+            fake_bin_dir=fake_cli_bin_dir,
+            state_dir=state_dir,
+            home_dir=home_dir,
+            podman_log=tmp_path / "podman.log",
+        )
+        assert result.returncode != 0
+        assert "refusing to guess the companion's image" in result.stderr
+        assert "safent companion update" in result.stderr
+
+    def test_rotate_refuses_without_the_marker(
+        self, tmp_path: Path, fake_cli_bin_dir: Path
+    ) -> None:
+        state_dir = _companion_state(tmp_path, provisioned=True, with_image_marker=False)
+        home_dir = tmp_path / "home"
+        _companion_bin_dir(home_dir, provisioned=True)
+        podman_log = tmp_path / "podman.log"
+        result = _run_companion(
+            "rotate",
+            fake_bin_dir=fake_cli_bin_dir,
+            state_dir=state_dir,
+            home_dir=home_dir,
+            podman_log=podman_log,
+        )
+        assert result.returncode != 0
+        assert "refusing to guess the companion's image" in result.stderr
+        # Refuses BEFORE rotating anything — no bearer/SSO files touched.
+        assert "old-bearer-value" == (state_dir / "bearer").read_text().strip()
+
+    def test_remove_refuses_without_the_marker(
+        self, tmp_path: Path, fake_cli_bin_dir: Path
+    ) -> None:
+        state_dir = _companion_state(tmp_path, provisioned=True, with_image_marker=False)
+        home_dir = tmp_path / "home"
+        _companion_bin_dir(home_dir, provisioned=True)
+        result = _run_companion(
+            "remove",
+            fake_bin_dir=fake_cli_bin_dir,
+            state_dir=state_dir,
+            home_dir=home_dir,
+            podman_log=tmp_path / "podman.log",
+        )
+        assert result.returncode != 0
+        assert "refusing to guess the companion's image" in result.stderr
+
+    def test_update_still_bootstraps_with_the_published_default(
+        self, tmp_path: Path, fake_cli_bin_dir: Path
+    ) -> None:
+        """The one deliberate exception — update is ALLOWED to guess,
+        because guessing is the whole point of this verb: it always PICKS
+        an image (explicit override or the published default) and then
+        PERSISTS its choice, closing the gap for every future verb."""
+        state_dir = _companion_state(tmp_path, provisioned=True, with_image_marker=False)
+        home_dir = tmp_path / "home"
+        _companion_bin_dir(home_dir, provisioned=True)
+        podman_log = tmp_path / "podman.log"
+        result = _run_companion(
+            "update",
+            fake_bin_dir=fake_cli_bin_dir,
+            state_dir=state_dir,
+            home_dir=home_dir,
+            podman_log=podman_log,
+            extra_env={"SAFENT_ADS_IMAGE": ""},  # no explicit override either
+        )
+        assert result.returncode == 0, result.stderr
+        assert (state_dir / "image").read_text() == "ghcr.io/devwspito/safent-ads:latest"
+        log = podman_log.read_text()
+        assert "pull ghcr.io/devwspito/safent-ads:latest" in log
 
 
 class TestCompanionRotate:

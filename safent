@@ -768,15 +768,25 @@ _companion_env_common() {
 }
 
 # The image ref `provision.sh` persisted at $COMPANION_STATE/image on the
-# last provisioning run (CLI-10) — falls back to the historical hard-coded
-# default only for a companion provisioned before that fix ever wrote the
-# marker.
+# last provisioning run (CLI-10).
+#
+# Security review 2026-09-10 (MEDIUM finding): this used to fall back to
+# the hard-coded ghcr.io/…/safent-ads:latest default when the marker file
+# was absent — deleting that ONE file (0700 dir, no integrity protection,
+# same owner as `safent` itself) silently restored the EXACT CLI-10
+# divergence this whole fix set out to close (status/rotate/remove
+# recreating against a DIFFERENT image than what is actually running).
+# Fail closed instead: refuse with a clear recovery step rather than guess.
+# `safent companion update` is the ONE place a missing marker is still a
+# legitimate bootstrap case (see _companion_update_env) — never here.
 _persisted_ads_image() {
   if [ -f "$COMPANION_STATE/image" ]; then
     cat "$COMPANION_STATE/image"
-  else
-    echo "ghcr.io/devwspito/safent-ads:latest"
+    return 0
   fi
+  echo "[x] $COMPANION_STATE/image not found — refusing to guess the companion's image." >&2
+  echo "    Run 'safent companion update' once to record it, then retry." >&2
+  exit 1
 }
 
 # Exports the three vars compose.yaml interpolates (SAFENT_STATE,
@@ -802,11 +812,22 @@ _companion_env() {
 # `safent companion update`'s own resolution: an explicit SAFENT_ADS_IMAGE
 # from the caller's env WINS (that is how an owner asks for a specific new
 # image); with none given, keep whatever is already persisted — a plain
-# re-pull/refresh of the same tag, never a silent switch to the hard-coded
-# default.
+# re-pull/refresh of the same tag. `update` is the ONE place a missing
+# marker is still a legitimate bootstrap (recovering a companion whose
+# $STATE/image was lost, or a companion provisioned before CLI-10 ever
+# wrote one) — deliberately does NOT call the now-fail-closed
+# _persisted_ads_image (that helper is for status/rotate/remove, which
+# must NEVER guess); falls back to the published default INLINE instead,
+# same historical shape, only reachable from this one explicit verb.
 _companion_update_env() {
   _companion_env_common
-  SAFENT_ADS_IMAGE="${SAFENT_ADS_IMAGE:-$(_persisted_ads_image)}"
+  if [ -n "${SAFENT_ADS_IMAGE:-}" ]; then
+    : # explicit override from the caller — use it as-is
+  elif [ -f "$COMPANION_STATE/image" ]; then
+    SAFENT_ADS_IMAGE="$(cat "$COMPANION_STATE/image")"
+  else
+    SAFENT_ADS_IMAGE="ghcr.io/devwspito/safent-ads:latest"
+  fi
   export SAFENT_STATE SAFENT_ADS_IMAGE ADS_POSTGRES_PASSWORD
 }
 
@@ -898,10 +919,18 @@ cmd_companion_status() {
 # history` reads only the image's own migration scripts (no DB connection,
 # no --network needed) — if the database's current revision never appears
 # in it, *image* cannot possibly upgrade past it: refuse before recreating
-# anything. A DB with no alembic_version row yet (brand new) or a history
-# command we can't run for an unrelated reason are NOT treated as "older" —
-# this is a targeted safety rail for the one failure mode CLI-10 reproduced,
-# not a general substitute for `provision.sh`'s own idempotent DB setup.
+# anything.
+#
+# Security review 2026-09-10 (MEDIUM finding, CWE-754): this used to fail
+# OPEN twice — an unreadable `history` (image inspection failed for ANY
+# reason) proceeded "without the guard", and the match itself was a bare
+# substring (`case "$history" in *"$db_rev"*)`), so a db_rev that happened
+# to appear inside an unrelated line (revision-message text, another
+# revision's hash as a substring) satisfied it wrongly. Now: ONLY a
+# genuinely brand-new database (no alembic_version row at all — nothing
+# to compare yet, not a failure) skips the guard; once db_rev is read
+# successfully, an unreadable history is a REFUSAL, not a shrug, and the
+# match is word-bounded (`grep -qw`, not a substring).
 _refuse_if_image_predates_the_database() {
   image="$1"
   db_rev="$("$RT" compose -p safent-ads -f "$COMPANION_COMPOSE" exec -T ads-db \
@@ -913,17 +942,16 @@ _refuse_if_image_predates_the_database() {
   fi
   history="$("$RT" run --rm --network none "$image" alembic history 2>/dev/null || true)"
   if [ -z "$history" ]; then
-    echo "[!] Could not read '$image' migration history — proceeding without the guard." >&2
+    echo "[x] Could not read '$image' migration history — refusing to update against an unverifiable image." >&2
+    echo "    The database is already at revision '$db_rev'; retry once the image can be inspected." >&2
+    exit 1
+  fi
+  if printf '%s\n' "$history" | grep -qw -- "$db_rev"; then
     return 0
   fi
-  case "$history" in
-    *"$db_rev"*) return 0 ;;
-    *)
-      echo "[x] '$image' does not know revision '$db_rev' (already applied to the database)." >&2
-      echo "    That image is OLDER than the database — refusing to update (it would break ads-api/ads-worker)." >&2
-      exit 1
-      ;;
-  esac
+  echo "[x] '$image' does not know revision '$db_rev' (already applied to the database)." >&2
+  echo "    That image is OLDER than the database — refusing to update (it would break ads-api/ads-worker)." >&2
+  exit 1
 }
 
 # Pull the owner's published companion image and recreate its containers —
@@ -969,6 +997,14 @@ cmd_companion_rotate() {
     echo "[x] $api_env not found — cannot rotate (companion secrets missing)." >&2
     exit 1
   fi
+  # Resolve (and, on a missing $STATE/image marker, fail closed) BEFORE
+  # touching anything — security review 2026-09-10 follow-up: _companion_env
+  # used to run only right before the SSO-keygen step, well after the
+  # bearer was already rotated on disk; a missing marker would then leave
+  # the companion in a half-rotated state (new bearer, old SSO key) instead
+  # of refusing cleanly up front.
+  _companion_env
+
   echo "[*] Rotating the companion bearer..."
   new_bearer="$(openssl rand -hex 32)"
   printf '%s' "$new_bearer" > "$COMPANION_STATE/bearer.tmp"
@@ -985,7 +1021,6 @@ cmd_companion_rotate() {
   mv -f "$tmp_env" "$api_env"
 
   echo "[*] Rotating the SSO Ed25519 keypair (026)..."
-  _companion_env
   sso_keypair="$("$RT" run --rm --network none "$SAFENT_ADS_IMAGE" \
     python -m safent_ads.tools.gen_keys)"
   sso_seed="$(printf '%s\n' "$sso_keypair" | sed -n 's/^ADS_APPROVAL_SIGNING_KEY=//p')"
@@ -1011,6 +1046,13 @@ cmd_companion_rotate() {
   ' "$api_env" > "$tmp_env2"
   chmod 0600 "$tmp_env2"
   mv -f "$tmp_env2" "$api_env"
+
+  # Security review 2026-09-10 (MEDIUM finding): rotate recreates ads-api
+  # via --force-recreate below — the SAME guard `update` uses, applied here
+  # too, so a persisted image that has somehow drifted behind the
+  # database (e.g. provision.sh re-running with a stale SAFENT_ADS_IMAGE)
+  # is caught before ads-api restarts against it, not after.
+  _refuse_if_image_predates_the_database "$SAFENT_ADS_IMAGE"
 
   echo "[*] Restarting ads-api with the new token..."
   "$RT" compose -p safent-ads -f "$COMPANION_COMPOSE" up -d --force-recreate ads-api \
