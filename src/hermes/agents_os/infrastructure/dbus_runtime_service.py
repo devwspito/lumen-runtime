@@ -5833,10 +5833,22 @@ async def _probe_anthropic_messages_api(
     auto-activated (PROV-03, specs/025-safent-repaso matriz-final-39eeb8e).
 
     Returns (ok, error, code) — same contract as _nous_validate_model_string.
+
+    Journal: unlike every other provider (routed through httpx/the openai SDK,
+    both of which log their own request line), this probe used aiohttp
+    directly and left ZERO trace in the journal — the one provider whose bug
+    was the exact endpoint it hit had no observable evidence of what it
+    actually called (specs/025-safent-repaso matriz-final-39eeb8e
+    re-verificación d2eb8c6). Logs exactly one structured line per probe —
+    provider id, endpoint host+path, HTTP status, classified `code` — never
+    the API key or the response body.
     """
     import aiohttp  # noqa: PLC0415
+    from urllib.parse import urlsplit  # noqa: PLC0415
 
     url = f"{(base_url or _ANTHROPIC_DEFAULT_BASE_URL).rstrip('/')}{_ANTHROPIC_MESSAGES_PATH}"
+    parsed_url = urlsplit(url)
+    endpoint = f"{parsed_url.netloc}{parsed_url.path}"
     headers = {
         "x-api-key": api_key or "",
         "anthropic-version": _ANTHROPIC_API_VERSION,
@@ -5854,12 +5866,31 @@ async def _probe_anthropic_messages_api(
             status = resp.status
             text = (await resp.text())[:300]
     except Exception as exc:  # noqa: BLE001 — surface the REAL network error
+        logger.info(
+            "hermes.providers.probe_completed",
+            extra={
+                "provider_id": "anthropic",
+                "endpoint": endpoint,
+                "status": None,
+                "code": None,
+            },
+        )
         raw = str(exc).strip()
         return False, (raw[:300] if raw else type(exc).__name__), None
 
+    code = None if status == 200 else _classify_probe_http_status(status)
+    logger.info(
+        "hermes.providers.probe_completed",
+        extra={
+            "provider_id": "anthropic",
+            "endpoint": endpoint,
+            "status": status,
+            "code": code,
+        },
+    )
     if status == 200:
         return True, None, None
-    return False, (text or f"HTTP {status}"), _classify_probe_http_status(status)
+    return False, (text or f"HTTP {status}"), code
 
 
 async def _nous_validate_model_string(
