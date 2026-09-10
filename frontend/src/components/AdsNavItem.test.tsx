@@ -1,7 +1,7 @@
 import { act } from 'react-dom/test-utils'
 import { createRoot, type Root } from 'react-dom/client'
 import { MemoryRouter } from 'react-router-dom'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import React from 'react'
 
 // Same minimal-deps style as InboundDelegationCard.test.tsx — plain
@@ -9,6 +9,15 @@ import React from 'react'
 // context (MemoryRouter); useT() falls back to its default context value
 // (locale "es") with no I18nProvider, exactly like the other test in this
 // project that calls useT() unwrapped.
+//
+// not_installed now also mounts CompanionInstallAction (029), which polls
+// GET /system/requests via api/client — mocked here so these tests stay
+// network-free like the rest of the suite.
+const { postInstallRequest, getInstallRequests } = vi.hoisted(() => ({
+  postInstallRequest: vi.fn(),
+  getInstallRequests: vi.fn(),
+}))
+vi.mock('../api/client', () => ({ postInstallRequest, getInstallRequests }))
 
 import { AdsNavItem, isAdsBlocked } from './AdsNavItem'
 import type { AdsAvailability } from '../hooks/useAdsAvailability'
@@ -48,6 +57,8 @@ describe('AdsNavItem', () => {
   let root: Root
 
   beforeEach(() => {
+    postInstallRequest.mockReset()
+    getInstallRequests.mockReset().mockResolvedValue({ requests: [] })
     container = document.createElement('div')
     document.body.appendChild(container)
     root = createRoot(container)
@@ -129,4 +140,30 @@ describe('AdsNavItem', () => {
       expect(reasonEl?.className).toContain('sr-only')
     },
   )
+
+  it('029 FR-001: not_installed also renders the shared "Instalar" action, alongside the always-present link', async () => {
+    postInstallRequest.mockResolvedValue({
+      accepted: true,
+      request: { verb: 'install_companion', state: 'pending', expires_at: 't' },
+    })
+    render(availability('unavailable', 'not_installed'))
+
+    const link = container.querySelector('a[href="/anuncios"]')
+    expect(link).not.toBeNull() // the link never disappears, even with the action present
+    const installBtn = Array.from(container.querySelectorAll('button'))
+      .find(b => b.textContent === 'Instalar')
+    expect(installBtn).not.toBeUndefined()
+
+    await act(async () => {
+      installBtn!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await Promise.resolve()
+    })
+    expect(postInstallRequest).toHaveBeenCalledWith('install_companion', { slug: 'safent-ads' })
+  })
+
+  it('unreachable/unauthorized do NOT render the install action (only not_installed does)', () => {
+    render(availability('unavailable', 'unreachable'))
+    expect(Array.from(container.querySelectorAll('button')).some(b => b.textContent === 'Instalar')).toBe(false)
+    expect(Array.from(container.querySelectorAll('button')).some(b => b.textContent === 'Reparar')).toBe(false)
+  })
 })

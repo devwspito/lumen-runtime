@@ -58,6 +58,9 @@ import type {
   UsageDimension,
   AgentStatsResponse,
   AdsBridgeSessionResponse,
+  HostVerb,
+  InstallRequestResponse,
+  InstallRequestsListResponse,
 } from './types'
 
 // Mirrors the timeout strategy in vanilla api.js: snappy GETs fail fast;
@@ -468,6 +471,34 @@ export function connectManagedRemote(slug: string, url: string, force = false): 
 export function mintAdsBridgeSession(): Promise<AdsBridgeSessionResponse> {
   return request<AdsBridgeSessionResponse>('/ads/bridge/session', { method: 'POST' })
     .catch(() => ({ status: 'unavailable', reason: 'unreachable' }))
+}
+
+// ── Install requests (028/029, contracts/install-request.md) ───────────────────
+// The sandbox leaves a marker; the host agent (or the app itself) claims and
+// fulfils it. Shared by the Ads companion install/repair action (029) and the
+// system update/uninstall footer (028) — one contract, one client surface.
+
+export function postInstallRequest(
+  verb: HostVerb,
+  opts: { slug?: 'safent-ads'; retention?: 'keep' | 'purge' } = {},
+): Promise<InstallRequestResponse> {
+  return request<InstallRequestResponse>('/system/requests', {
+    method: 'POST',
+    body: JSON.stringify({ verb, ...opts }),
+  }).catch((e) => {
+    // 409 = "a live request for this verb already exists" — the contract's own
+    // idempotency signal (install-request.md §1.5), not a failure: the caller
+    // adopts the existing request instead of showing an error (FR-008).
+    if (e instanceof ApiError && e.status === 409 && e.body && typeof e.body === 'object') {
+      return e.body as InstallRequestResponse
+    }
+    throw e
+  })
+}
+
+export function getInstallRequests(): Promise<InstallRequestsListResponse> {
+  return request<InstallRequestsListResponse>('/system/requests')
+    .catch(() => ({ requests: [] }))
 }
 
 // ── Tasks ─────────────────────────────────────────────────────────────────────

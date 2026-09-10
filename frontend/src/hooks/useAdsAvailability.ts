@@ -10,6 +10,11 @@
  * Polls POST /api/v1/ads/bridge/session — same call AdsView's first paint
  * would otherwise have to make, so polling it from the sidebar means the
  * bridge cookie is already warm by the time the owner clicks through.
+ *
+ * Also consumed by CompanionInstallAction/useCompanionInstall (029 FR-001):
+ * `reason` selects "Instalar" vs "Reparar", and `status === 'ready'` is the
+ * one signal allowed to end an install flow — an install-request reaching
+ * `applied` is NOT enough on its own (contracts/install-request.md §5).
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { mintAdsBridgeSession } from '../api/client'
