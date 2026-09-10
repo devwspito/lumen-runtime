@@ -138,24 +138,63 @@ correct fit and has a direct precedent (browser).
    return to the agent (capped, truncation flagged) → WORM audit entry recorded.
 5. Any later `tailnet_ssh`/`tailnet_file_get`/`tailnet_file_put` call to `db1.<suffix>`,
    in any conversation, flows with no card until the owner revokes it
-   (`JsonHostAllowlistStore.revoke`, exposed via a policy screen — presentation layer
-   not built in this lane, see Deferred).
+   (`JsonHostAllowlistStore.revoke`, exposed via `DELETE /api/v1/tailnet/ssh-hosts/{host}`
+   — see Cableado below).
 
 ## Deferred / follow-ups
 
 - **Containerfile**: add `openssh-client` (see above) — ops-owned file, not edited here.
 - **Vault-backed SSH key identity**: not trivial, deferred (Tailscale SSH covers the
   owner's stated need without it).
-- **Owner-facing allow-list management UI** (list/revoke hosts outside the approval
-  card flow): `JsonHostAllowlistStore.revoke()` exists; no HTTP endpoint/frontend wired
-  — small, self-contained follow-up (mirrors `shell_server/egress_api.py`'s grant
-  endpoints).
-- **Live LLM-tool-call wiring**: this repo's native tool catalog is defined in the
-  external, separately-versioned `hermes-agent` package (pinned in the Containerfile,
-  `NousResearch/hermes-agent`); every comparable native-shaped tool (`ha_call_service`,
-  `send_message`, `browser_*`) has its schema/dispatch there too, with THIS repo
-  supplying only governance + (for those tools) no in-repo executor either. Wiring
-  `tailnet_ssh`'s LLM-visible schema so Nous actually calls `TailnetSshUseCase` is the
-  same class of follow-up any new native-shaped tool needs — out of this lane's scope;
-  `TailnetSshUseCase`/`TailnetFileGetUseCase`/`TailnetFilePutUseCase` are the
-  ready-to-wire handlers.
+- ~~**Owner-facing allow-list management UI**~~ — done, see Cableado below
+  (`GET`/`DELETE /api/v1/tailnet/ssh-hosts`, Seguridad → Tailnet →
+  "Equipos con SSH aprobado").
+- ~~**Live LLM-tool-call wiring**~~ — done, see Cableado below. It turned out NOT to
+  need the external `hermes-agent` native catalog after all: `tailnet_ssh` is not a
+  native-shaped tool the way `ha_call_service`/`browser_*` are — it is a
+  `CapabilityRegistry`-routed tool, the SAME class as `memory`/`delegate_to_colleague`,
+  and this repo already had a generic mechanism (`runtime/capability_tool_specs.py`)
+  for injecting THAT class of tool into the LLM schema without touching the external
+  package. `TailnetSshUseCase`/`TailnetFileGetUseCase`/`TailnetFilePutUseCase` remain
+  exactly the handlers this wiring calls — nothing about them changed.
+
+## Cableado
+
+El camino completo, chat → tool → broker → gate → executor: el modelo ve
+`tailnet_ssh`/`tailnet_file_get`/`tailnet_file_put` en su esquema porque
+`capability_registry.py` los registra como `ExtendedCapabilityBinding`
+(`surface_kind=SurfaceKind.TAILNET_SSH`, `risk=LOW`, `auto_executable=True`)
+y `runtime/capability_tool_specs.py` traduce esa entrada a un `ToolSpec` con
+el JSON schema de este documento — el mismo mecanismo genérico que ya
+exponía `memory` o `navigate_app`, no uno nuevo. Al llamarla, Nous invoca
+primero `security_hook.make_pre_tool_call_hook`, cuyo Paso 1.6-tailnet_ssh
+(`_resolve_tailnet_ssh_consent`) es el ÚNICO punto de autorización: host
+nunca aprobado + conversación activa → tarjeta; sin conversación → bloqueo en
+frío; host ya en `JsonHostAllowlistStore` → pasa sin fricción. Solo si este
+paso lo permite se invoca el handler del `ToolSpec`, que arma un
+`ToolCallProposal` (`op=<nombre de la tool>`) y lo despacha a
+`CapabilityBroker.dispatch`; el binding es `risk=LOW`/`auto_executable=True`
+a propósito, para que el broker NO vuelva a pedir su propio HITL por-llamada
+— lo que la sección "Rejected alternative" de arriba rechazó fue dejar que
+ESE HITL gobernara el permiso por-host, no el mecanismo de enrutar el
+despacho ya autorizado por un `SurfaceAdapterPort`, que es el mismo patrón
+de `memory`/el navegador y aquí no reintroduce una segunda tarjeta. El
+broker delega en `SurfaceAdapterDispatcher`, que resuelve
+`SurfaceKind.TAILNET_SSH` a `TailnetSshSurfaceAdapter` (compuesto en
+`runtime/__main__.py` con `SubprocessSshExecutor`,
+`StatusJsonTailnetDirectory` y `HashChainAuditPort`), y este llama — vía
+`asyncio.to_thread`, porque la ejecución es síncrona y puede tardar hasta
+300s — al caso de uso (`TailnetSshUseCase`/`TailnetFileGetUseCase`/
+`TailnetFilePutUseCase`), que resuelve el host, ejecuta `ssh` y audita en el
+hash-chain WORM (`AuditKind.TAILNET_SSH_EXECUTED`); el resultado vuelve tal
+cual al modelo. Para revocar, el dueño usa "Equipos con SSH aprobado" en
+Seguridad → Tailnet, que llama a `DELETE /api/v1/tailnet/ssh-hosts/{host}`
+(`shell_server/tailnet/api.py`) — exige TOTP vía `require_owner_mfa` y luego
+llama a `JsonHostAllowlistStore.revoke(host)` sobre el MISMO fichero que lee
+el Paso 1.6, así que la siguiente llamada a ese host vuelve a pedir
+aprobación; esta revocación queda logueada pero, a diferencia de la
+ejecución SSH, todavía NO entra en el hash-chain WORM — `shell_server` corre
+en un proceso separado del daemon que posee la clave de firma del audit
+chain, y cerrar ese hueco exige un mutator D-Bus hacia el daemon o compartir
+la clave entre procesos, ninguna de las dos trivial; queda como follow-up
+marcado, no resuelto aquí en silencio.
