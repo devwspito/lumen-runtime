@@ -694,12 +694,20 @@ fn desired_machine_spec() -> Option<MachineSpec> {
     }
 }
 
-/// Resolves the bundled runtime's paths for a windowed run: `resources/
-/// runtime/<target-triple>/` is the declared bundle layout (T010, `desktop/
-/// RUNTIME-BUNDLE.md` — not yet in this worktree), read off the Tauri
-/// resource dir. Thin wrapper over `resolve_config_with_fallback` (this
-/// module's only Tauri-dependent path-resolution code) — `selftest.rs` calls
-/// that one directly, with no `AppHandle` to ask.
+/// Resolves the bundled runtime's paths for a windowed run, read off the
+/// Tauri resource dir. `desktop/RUNTIME-BUNDLE.md`'s own documented formula
+/// — verified there against the real `glob` crate, not assumed — is
+/// `resource_dir().join("runtime").join("podman")`, NO target-triple
+/// component: `bundle.resources`'s single glob pattern flattens the
+/// per-triple staged tree (`resources/runtime/<triple>/{bin,libexec,etc}/...`,
+/// what `stage-runtime.sh` produces) into `$RESOURCES/runtime/<basename>` —
+/// only one triple's files ever ship in a given build, so there is nothing
+/// left to select between at runtime. `selftest.rs`'s own fallback already
+/// gets this right (`exe.parent().join("runtime")`, no triple either); this
+/// function's extra `.join(target_triple())` was the odd one out and would
+/// have looked for the runtime one directory too deep in a real packaged
+/// app. Thin wrapper over `resolve_config_with_fallback` (this module's only
+/// Tauri-dependent path-resolution code).
 pub fn resolve_config(
     app: &AppHandle,
     engine_image: ImageRef,
@@ -708,8 +716,8 @@ pub fn resolve_config(
     let fallback = app
         .path()
         .resource_dir()
-        .map(|dir| dir.join("runtime").join(target_triple()))
-        .unwrap_or_else(|_| PathBuf::from("runtime").join(target_triple()));
+        .map(|dir| dir.join("runtime"))
+        .unwrap_or_else(|_| PathBuf::from("runtime"));
     resolve_config_with_fallback(fallback, engine_image, companion_image)
 }
 
@@ -748,32 +756,6 @@ pub fn home_dir() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
-}
-
-fn target_triple() -> &'static str {
-    // Rust's own target-triple naming (T010's declared bundle convention),
-    // for the platforms spec 028 serves (research.md "Decisión: Windows" —
-    // not yet; Mac Intel is Out of Scope).
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    {
-        "aarch64-apple-darwin"
-    }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    {
-        "x86_64-unknown-linux-gnu"
-    }
-    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-    {
-        "aarch64-unknown-linux-gnu"
-    }
-    #[cfg(not(any(
-        all(target_os = "macos", target_arch = "aarch64"),
-        all(target_os = "linux", target_arch = "x86_64"),
-        all(target_os = "linux", target_arch = "aarch64"),
-    )))]
-    {
-        "unsupported"
-    }
 }
 
 #[cfg(test)]
