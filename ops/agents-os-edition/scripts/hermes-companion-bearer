@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""hermes-companion-bearer — stage the companion bearer where the daemon can read it (024).
+"""hermes-companion-bearer — stage companion secrets where the daemon can read them
+(024 bearer, 026 SSO private key).
 
 WHY A SHIM AND NOT A MODE/GROUP CHANGE ON THE HOST FILE
 ------------------------------------------------------
@@ -25,6 +26,18 @@ group `hermes`). tmpfs => gone on reboot, re-staged from the mount every boot,
 so a rotated bearer takes effect on the next boot with no extra plumbing and
 no copy is ever persisted to disk (INV-4).
 
+The 026 SSO private key (`/etc/hermes/companions/ads-sso.key`, contracts/
+sso.md §3, provisioned 0400 by provision.sh's `ensure_sso_keypair`) has the
+EXACT same problem — `CompanionSsoAuthority` runs inside this same daemon
+process, same uid 880, same unreadable-mount shape — so this script stages
+it too, at
+
+    /run/hermes/companions/ads-sso.key   0440 root:hermes
+
+Fixed path, not per-slug (there is exactly one companion today). Before this,
+`MintCompanionOwnerAssertion` read the raw mount directly and always raised
+`PermissionError` — `/ads/*` 503'd on every request (ADS-02).
+
 Exit code is ALWAYS 0 — a companion is optional infrastructure and this must
 never block the daemon's boot (FR-3). The unit also uses `-` for the same
 reason; both belts, on purpose.
@@ -35,9 +48,12 @@ from __future__ import annotations
 import grp
 import os
 import sys
+from pathlib import Path
 
 from hermes.shell_server.companions import (  # noqa: E402
     COMPANION_RUNTIME_BEARER_DIR,
+    COMPANION_RUNTIME_SSO_KEY_PATH,
+    COMPANION_SSO_KEY_MOUNT_PATH,
     load_companions,
     read_companion_bearer,
     runtime_bearer_path,
@@ -62,8 +78,37 @@ def main() -> int:
         _write_secret(runtime_bearer_path(slug), bearer, gid)
         staged += 1
     _purge_stale(set(endpoints), gid)
-    print(f"[companion-bearer] {staged} bearer(s) staged for uid/gid {_DAEMON_GROUP}")
+    sso_staged = _stage_sso_key(gid)
+    print(
+        f"[companion-bearer] {staged} bearer(s), {sso_staged} sso key(s) "
+        f"staged for uid/gid {_DAEMON_GROUP}"
+    )
     return 0
+
+
+def _stage_sso_key(gid: int) -> int:
+    """Copy the 026 SSO private key from its read-only mount, same as a
+    bearer. Reads the mount directly (never a previous boot's staged copy —
+    same rotation argument as `prefer_runtime_copy=False` above). Absent
+    mount (no companion, or provisioning failed, FR-3) => purge any stale
+    copy and stage nothing; never raises (caller is fail-soft)."""
+    try:
+        key = Path(COMPANION_SSO_KEY_MOUNT_PATH).read_text(encoding="utf-8").strip()
+    except OSError:
+        key = ""
+    if not key:
+        _remove_if_present(COMPANION_RUNTIME_SSO_KEY_PATH)
+        print("[companion-bearer] no SSO key at its mount", file=sys.stderr)
+        return 0
+    _write_secret(COMPANION_RUNTIME_SSO_KEY_PATH, key, gid)
+    return 1
+
+
+def _remove_if_present(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 def _ensure_dir(gid: int) -> None:
