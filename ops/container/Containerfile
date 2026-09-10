@@ -74,7 +74,7 @@ ENV HERMES_AGENT_SRC=/usr/lib/hermes-agent
 COPY ops/hermes-agent.lock /tmp/hermes-agent.lock
 RUN HERMES_AGENT_COMMIT="$(tr -d ' \t\n\r' < /tmp/hermes-agent.lock)" \
     && mkdir -p "${HERMES_AGENT_SRC}" \
-    && curl -fsSL "https://github.com/NousResearch/hermes-agent/archive/${HERMES_AGENT_COMMIT}.tar.gz" \
+    && curl -fsSL --retry 5 --retry-delay 20 --retry-all-errors "https://github.com/NousResearch/hermes-agent/archive/${HERMES_AGENT_COMMIT}.tar.gz" \
        | tar -xz --strip-components=1 -C "${HERMES_AGENT_SRC}" \
     && rm -rf "${HERMES_AGENT_SRC}/tests" "${HERMES_AGENT_SRC}/website" "${HERMES_AGENT_SRC}/contributors" \
               "${HERMES_AGENT_SRC}/mcp-research-data" "${HERMES_AGENT_SRC}/evals" \
