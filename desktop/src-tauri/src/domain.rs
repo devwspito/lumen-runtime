@@ -322,6 +322,16 @@ pub enum FailureCode {
     /// explicit "Reintentar" still works, because that is a new decision,
     /// not a retry of the one just cancelled.
     CancelledByOwner,
+    /// NOT part of the CLI's vocabulary either — synthesized by `boot.rs`
+    /// when the SAME `RepairAction` reports success (`ApplyOutcome::
+    /// Progressed`) twice in a row against UNCHANGED `HostFacts`: a
+    /// successful-but-ineffective repair is indistinguishable from a hang
+    /// to the owner, and is a DIFFERENT failure mode than
+    /// `EngineLifecycle::fail`'s existing guard, which only ever sees
+    /// `Err`s. Verified live: `cmd_stage_runtime` as a no-op (no bundled
+    /// manifest) looped ~400 times in 90s, never erroring, never
+    /// progressing — specs/028-safent-app-nativa/verificacion-paquete-linux.md.
+    RepairIneffective,
 }
 
 impl FailureCode {
@@ -354,6 +364,7 @@ impl FailureCode {
             FailureCode::ClockSkew => "clock_skew",
             FailureCode::CliPorcelainUnsupported => "cli_porcelain_unsupported",
             FailureCode::CancelledByOwner => "cancelled_by_owner",
+            FailureCode::RepairIneffective => "repair_ineffective",
         }
     }
 }

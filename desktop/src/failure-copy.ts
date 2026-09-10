@@ -105,6 +105,10 @@ const COPY: Record<FailureCode, FailureCopy> = {
     headline: 'Safent no pudo entenderse con lo que hay instalado en este equipo.',
     hint: 'Vuelve a intentarlo. Si sigue fallando, descarga Safent de nuevo desde la página oficial.',
   },
+  repair_ineffective: {
+    headline: 'Safent no consiguió avanzar en este equipo.',
+    hint: 'Vuelve a intentarlo. Si sigue fallando, exporta el diagnóstico.',
+  },
 }
 
 const FALLBACK: FailureCopy = {
