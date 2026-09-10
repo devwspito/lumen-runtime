@@ -64,13 +64,11 @@ class TestDelegateToColleagueCapabilityBindingStillForcesHitl:
 # ---------------------------------------------------------------------------
 # safent-ads companion (024/T091/T194) — MFA tier
 #
-# Only apply_defensive_action is MFA-tier: it is the SOLE ads write tool that
-# reaches the real ad platform directly (never a pending row awaiting a
-# SEPARATE human approval, unlike propose_*/withdraw_proposal — see
-# tool_delicacy._MFA_TIER_ADS_COMPANION's docstring for the full rationale
-# and tests/unit/capabilities/test_broker_approval_override.py for the
-# mechanism this feeds (capability_broker._needs_hitl's "auto" override can
-# never re-widen an MFA-tier tool).
+# Ninguna tool del companion es MFA-tier: propose_*/withdraw_proposal crean
+# una fila pendiente que aprueba un humano por otro canal, y
+# apply_defensive_action solo admite lower_budget|pause tras el chokepoint del
+# companion. El eje `approval` del overlay decide (ver tool_delicacy.py y
+# test_broker_approval_override.py::TestT194AdsApplyDefensiveActionHonoursApprovalAxis).
 # ---------------------------------------------------------------------------
 
 
