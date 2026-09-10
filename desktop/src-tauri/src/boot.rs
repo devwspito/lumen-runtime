@@ -410,7 +410,7 @@ impl BootService {
 // caller of `start`; nothing above this line needs Tauri to compile or test.
 // ===========================================================================
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tauri::{AppHandle, Emitter, Listener, Manager};
 
@@ -758,12 +758,12 @@ fn desired_machine_spec() -> Option<MachineSpec> {
 /// per-triple staged tree (`resources/runtime/<triple>/{bin,libexec,etc}/...`,
 /// what `stage-runtime.sh` produces) into `$RESOURCES/runtime/<basename>` —
 /// only one triple's files ever ship in a given build, so there is nothing
-/// left to select between at runtime. `selftest.rs`'s own fallback already
-/// gets this right (`exe.parent().join("runtime")`, no triple either); this
-/// function's extra `.join(target_triple())` was the odd one out and would
-/// have looked for the runtime one directory too deep in a real packaged
-/// app. Thin wrapper over `resolve_config_with_fallback` (this module's only
-/// Tauri-dependent path-resolution code).
+/// left to select between at runtime. Thin wrapper over
+/// `resolve_config_with_fallback` (this module's only Tauri-dependent
+/// path-resolution code); the `unwrap_or_else` branch (Tauri itself failing
+/// to report a resource dir, an edge case it guards against once packaged
+/// correctly) falls back to the SAME structural resolver `selftest.rs` uses
+/// (`runtime_dir_next_to_exe`) rather than a bare relative literal.
 pub fn resolve_config(
     app: &AppHandle,
     engine_image: ImageRef,
@@ -773,8 +773,40 @@ pub fn resolve_config(
         .path()
         .resource_dir()
         .map(|dir| dir.join("runtime"))
-        .unwrap_or_else(|_| PathBuf::from("runtime"));
+        .unwrap_or_else(|_| {
+            std::env::current_exe()
+                .map(|exe| runtime_dir_next_to_exe(&exe))
+                .unwrap_or_else(|_| PathBuf::from("runtime"))
+        });
     resolve_config_with_fallback(fallback, engine_image, companion_image)
+}
+
+/// Shared, structural resolver for "where does the runtime this executable
+/// ships with live" — the ONE place both `resolve_config`'s own fallback-of-
+/// a-fallback and `selftest.rs::run_to_ready` (headless: no `AppHandle`, no
+/// window, no resource bundle to ask Tauri for) derive it from
+/// `std::env::current_exe()`.
+///
+/// MAC-04 (verificacion-mac-1.md): before this fix `selftest.rs` computed
+/// `exe.parent().join("runtime")` unconditionally — correct for the Linux/
+/// `.deb` layout (`safent-desktop` really does sit directly next to
+/// `runtime/`) but WRONG for a macOS `.app`: the executable lives at
+/// `Contents/MacOS/<bin>`, and every shipped resource — `runtime/` included
+/// — is a SIBLING of `MacOS/` at `Contents/Resources/`, a directory
+/// `Contents/MacOS/runtime` is never created inside. Detects the bundle
+/// shape STRUCTURALLY (the executable's parent directory is literally named
+/// `MacOS`, exactly how every Apple bundle names it, Tauri's bundler
+/// included) rather than `cfg!(target_os)`, so both layouts are exercised by
+/// the SAME test binary regardless of which OS runs it.
+pub fn runtime_dir_next_to_exe(exe: &Path) -> PathBuf {
+    let bin_dir = exe.parent().unwrap_or(exe);
+    let is_macos_bundle = bin_dir.file_name().and_then(|n| n.to_str()) == Some("MacOS");
+    if is_macos_bundle {
+        if let Some(contents_dir) = bin_dir.parent() {
+            return contents_dir.join("Resources").join("runtime");
+        }
+    }
+    bin_dir.join("runtime")
 }
 
 /// `SAFENT_RUNTIME_DIR`/`SAFENT_CLI_PATH`/`SAFENT_PODMAN_PATH`/
@@ -839,6 +871,31 @@ mod tests {
             min_free_disk_bytes: Bytes(4 * GIB),
             min_total_memory_bytes: Bytes(8 * GIB),
         }
+    }
+
+    /// MAC-04: the Linux/.deb layout — `safent-desktop` sits directly next
+    /// to `runtime/`, no bundle indirection at all.
+    #[test]
+    fn runtime_dir_next_to_exe_uses_the_bin_dir_directly_on_a_linux_layout() {
+        let exe = Path::new("/opt/Safent/safent-desktop");
+        assert_eq!(
+            runtime_dir_next_to_exe(exe),
+            PathBuf::from("/opt/Safent/runtime")
+        );
+    }
+
+    /// MAC-04 (verificacion-mac-1.md): the macOS `.app` layout — the
+    /// executable lives at `Contents/MacOS/<bin>`; `runtime/` is a SIBLING
+    /// of `MacOS/` at `Contents/Resources/runtime`, never inside `MacOS/`
+    /// itself. Before this fix, `selftest.rs` resolved
+    /// `Contents/MacOS/runtime` here — a path that is never created.
+    #[test]
+    fn runtime_dir_next_to_exe_finds_resources_sibling_on_a_macos_bundle_layout() {
+        let exe = Path::new("/Applications/Safent.app/Contents/MacOS/safent-desktop");
+        assert_eq!(
+            runtime_dir_next_to_exe(exe),
+            PathBuf::from("/Applications/Safent.app/Contents/Resources/runtime")
+        );
     }
 
     fn converged_facts() -> HostFacts {

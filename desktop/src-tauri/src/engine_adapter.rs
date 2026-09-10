@@ -105,8 +105,20 @@ impl EmbeddedCliDriver {
         if let Some(secret) = secret {
             secret.install(&mut cmd);
         }
-        spawn_with_etxtbsy_retry(&mut cmd)
-            .map_err(|e| EngineError::Io(format!("no pude ejecutar '{verb}': {e}")))
+        spawn_with_etxtbsy_retry(&mut cmd).map_err(|e| {
+            // MAC-04 (verificacion-mac-1.md): ENOENT here means the bundled
+            // CLI does not exist at the resolved path — a packaging/path
+            // defect no retry can ever fix, not the generic transient `Io`
+            // the daemon-unhealthy/retryable classification below is for.
+            if e.kind() == std::io::ErrorKind::NotFound {
+                EngineError::CliNotFound {
+                    path: self.config.cli_path.clone(),
+                    verb: verb.to_string(),
+                }
+            } else {
+                EngineError::Io(format!("no pude ejecutar '{verb}': {e}"))
+            }
+        })
     }
 }
 
@@ -846,6 +858,52 @@ mod os_vocabulary_tests {
         assert_eq!(map_os("linux"), HostOs::Linux);
         assert_eq!(map_os("windows"), HostOs::Unsupported);
         assert_eq!(map_os(""), HostOs::Unsupported);
+    }
+}
+
+/// MAC-04 (verificacion-mac-1.md): a missing CLI binary (the exact shape of
+/// `selftest.rs` resolving `Contents/MacOS/runtime` on a real macOS `.app`,
+/// where the CLI actually ships at `Contents/Resources/runtime/…`) must
+/// never surface as a retryable `daemon_unhealthy` — that is an infinite
+/// no-progress loop against a path that can never start existing. This test
+/// exercises the REAL `spawn` path (no fake CLI script at all: the whole
+/// point is that nothing exists at `cli_path`), not just the classification
+/// table in isolation.
+#[cfg(test)]
+mod missing_cli_tests {
+    use super::*;
+    use crate::ports::EngineProbe;
+
+    #[test]
+    fn observe_against_a_missing_cli_binary_is_non_retryable_cli_porcelain_unsupported() {
+        let dir = std::env::temp_dir().join(format!(
+            "safent-missing-cli-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let engine_image = ImageRef::new("ghcr.io/devwspito/safent", "sha256:engine-good").unwrap();
+        let config = EmbeddedCliConfig::with_defaults(
+            dir.join("safent-does-not-exist"),
+            dir.join("podman-does-not-exist"),
+            dir.join("state"),
+            engine_image,
+            None,
+        );
+        let driver = EmbeddedCliDriver::new(config);
+
+        let err = driver
+            .observe()
+            .expect_err("a missing CLI binary must not observe successfully");
+        let cause = err.to_failure_cause();
+
+        assert_eq!(cause.code, FailureCode::CliPorcelainUnsupported);
+        assert!(
+            !cause.retryable,
+            "a missing executable never fixes itself on retry: {cause:?}"
+        );
     }
 }
 

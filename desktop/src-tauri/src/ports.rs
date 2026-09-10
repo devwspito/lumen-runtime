@@ -3,6 +3,7 @@
 //! `engine_adapter.rs` implements these against the embedded CLI; `boot.rs`
 //! depends only on the traits; tests depend on the fakes at the bottom.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -97,8 +98,19 @@ pub enum EngineError {
     /// No output for longer than the configured stall timeout, or the whole
     /// invocation ran past its hard cap.
     Timeout { after: Duration },
-    /// Could not even spawn/read/write the child process.
+    /// Could not even spawn/read/write the child process — a TRANSIENT
+    /// condition worth retrying (e.g. a pipe read failing mid-stream).
     Io(String),
+    /// `spawn` itself failed with `ErrorKind::NotFound`: the CLI binary
+    /// does not exist at `path`. Distinct from the generic `Io` on purpose
+    /// (MAC-04, verificacion-mac-1.md): a missing executable is a
+    /// packaging/path defect that retrying can NEVER fix by itself — before
+    /// this variant existed, `selftest.rs` resolving `Contents/MacOS/
+    /// runtime` on a real macOS `.app` (the CLI actually ships at
+    /// `Contents/Resources/runtime/…`) surfaced as `daemon_unhealthy`/
+    /// `retryable:true`, an infinite no-progress retry loop against a path
+    /// that could never start existing.
+    CliNotFound { path: PathBuf, verb: String },
     /// stdout produced a line that is not a valid `EngineEvent` (contract
     /// app-engine.md §3) — most commonly because the installed CLI predates
     /// `--porcelain` (pre-T004) and printed its usual human text instead.
@@ -143,6 +155,19 @@ impl EngineError {
                 message: message.clone(),
                 retryable: true,
             },
+            // Same honest, non-retryable classification the CLI's own
+            // pre-`--porcelain` case gets: the bundled `safent` this
+            // adapter needs is not usable as shipped, just for a different
+            // reason (absent vs. too old) — MAC-04.
+            EngineError::CliNotFound { path, verb } => FailureCause {
+                code: FailureCode::CliPorcelainUnsupported,
+                message: format!(
+                    "no se encontró el CLI empaquetado en {} (verbo '{verb}') \
+                     — el paquete está incompleto o mal resuelto",
+                    path.display()
+                ),
+                retryable: false,
+            },
             EngineError::ProcessExited { stderr_tail, .. } => FailureCause {
                 code: FailureCode::DaemonUnhealthy,
                 message: stderr_tail.clone(),
@@ -178,6 +203,9 @@ impl std::fmt::Display for EngineError {
         match self {
             EngineError::Timeout { after } => write!(f, "timed out after {after:?}"),
             EngineError::Io(message) => write!(f, "io error: {message}"),
+            EngineError::CliNotFound { path, verb } => {
+                write!(f, "cli not found at {} for verb '{verb}'", path.display())
+            }
             EngineError::UnexpectedOutput { line } => write!(f, "unexpected output: {line}"),
             EngineError::ProcessExited { code, stderr_tail } => {
                 write!(f, "process exited with {code:?}: {stderr_tail}")
