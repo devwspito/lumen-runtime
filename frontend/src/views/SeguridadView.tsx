@@ -1388,11 +1388,20 @@ function TailnetDisconnectForm({ busy, onDisconnect }: TailnetDisconnectFormProp
   )
 }
 
-type TailnetUiState = 'not_configured' | 'connecting' | 'connected'
+// 025 hallazgo D: `configured` now means LOGGED IN (== online, see
+// tailnet/api.py's _read_status) — it can no longer stand in for "an attempt
+// is in flight". `last_attempt` (mirrored from the root helper's own verdict
+// via the status watcher, contracts.md §2) is what tells 'connecting'
+// (staged, no verdict yet) apart from 'failed' (verdict: key rejected) —
+// a rejected key must never read as 'connected'.
+type TailnetUiState = 'not_configured' | 'connecting' | 'failed' | 'connected'
 
 function tailnetUiState(status: TailnetStatus | null): TailnetUiState {
-  if (!status?.configured) return 'not_configured'
-  return status.online ? 'connected' : 'connecting'
+  if (!status) return 'not_configured'
+  if (status.online) return 'connected'
+  if (status.last_attempt?.ok === false) return 'failed'
+  if (status.last_attempt) return 'connecting'
+  return 'not_configured'
 }
 
 const TAILNET_POLL_INTERVAL_MS = 5000
@@ -1441,6 +1450,10 @@ export function TailnetSection() {
   }
 
   const uiState = tailnetUiState(status)
+  // Only a genuinely established session (or one actively establishing) has
+  // anything to show a MagicDNS suffix / peer list / disconnect form for —
+  // 'failed' means the key was rejected, there is nothing connected to leave.
+  const showsSessionInfo = uiState === 'connecting' || uiState === 'connected'
 
   return (
     <section className="cv-section">
@@ -1452,17 +1465,22 @@ export function TailnetSection() {
           </div>
         ) : (
           <>
-            <p className={s['sectionCard__intro']}>
+            <p
+              className={s['sectionCard__intro']}
+              style={uiState === 'failed' ? { color: 'var(--color-danger)' } : undefined}
+              role={uiState === 'failed' ? 'alert' : undefined}
+            >
               {uiState === 'not_configured' && 'Conecta este agente a la tailnet del dueño para que alcance servicios internos gobernados.'}
               {uiState === 'connecting' && 'Conectando…'}
+              {uiState === 'failed' && 'Clave rechazada — revisa la clave e inténtalo de nuevo.'}
               {uiState === 'connected' && `Conectado como ${status?.node_name} en ${status?.tailnet}`}
             </p>
 
-            {uiState === 'not_configured' && (
+            {(uiState === 'not_configured' || uiState === 'failed') && (
               <TailnetConnectForm busy={busy} onConnect={handleConnect} />
             )}
 
-            {uiState !== 'not_configured' && status?.magicdns_suffix && (
+            {showsSessionInfo && status?.magicdns_suffix && (
               <>
                 <div className={s.subLabel} style={{ marginTop: 'var(--space-4)' }}>
                   Sufijo MagicDNS
@@ -1493,7 +1511,7 @@ export function TailnetSection() {
               </>
             )}
 
-            {uiState !== 'not_configured' && (
+            {showsSessionInfo && (
               <div style={{ marginTop: 'var(--space-4)' }}>
                 <TailnetDisconnectForm busy={busy} onDisconnect={handleDisconnect} />
               </div>

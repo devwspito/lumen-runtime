@@ -16,7 +16,13 @@
 # egress lane's readers are already implemented against this exact shape).
 # Names/online ONLY — never a key, IP, tag or version fingerprint:
 #   {"node_name": str, "magicdns_suffix": str, "tailnet": str, "online": bool,
-#    "peers": [{"name": str, "online": bool}, ...]}
+#    "peers": [{"name": str, "online": bool}, ...],
+#    "last_attempt": {"at": str, "ok": bool, "error_kind": str|null} | absent}
+#
+# last_attempt (025 hallazgo D) is MIRRORED, not produced here — it's whatever
+# hermes-tailscale-control last wrote to last-attempt.json (no key material),
+# folded in verbatim so `configured`/`online` can genuinely mean "logged in"
+# without losing the "a connect attempt just failed" signal a reader needs.
 #
 # On any read/parse failure this tick is SKIPPED (never overwritten with a
 # guess) — the previous good document's mtime is the staleness signal, not a
@@ -43,6 +49,13 @@ logger = logging.getLogger("hermes-tailscale-status-watcher")
 RUNTIME_DIR = Path(os.environ.get("HERMES_TAILSCALE_RUNTIME_DIR", "/run/hermes/tailscale"))
 TS_SOCKET = Path(os.environ.get("HERMES_TAILSCALE_SOCKET", str(RUNTIME_DIR / "tailscaled.sock")))
 STATUS_FILE = RUNTIME_DIR / "status.json"
+# 025 hallazgo D: hermes-tailscale-control (root, connect/disconnect) writes
+# its own connect verdict here — WITHOUT any key material — instead of
+# touching status.json directly (this watcher is the ONLY status.json
+# writer, spec 022 contracts.md §2). Mirrored into status.json's own
+# last_attempt field below so a rejected key is distinguishable from
+# "never tried" and from "online" by the ONE file every reader polls.
+LAST_ATTEMPT_FILE = RUNTIME_DIR / "last-attempt.json"
 
 _TS_BIN = os.environ.get("HERMES_TAILSCALE_BIN", "tailscale")
 _INTERVAL_SECONDS = float(os.environ.get("HERMES_TAILSCALE_STATUS_INTERVAL", "20"))
@@ -126,6 +139,26 @@ def _write_status_json(payload: dict) -> None:
     tmp.rename(STATUS_FILE)
 
 
+def _read_last_attempt() -> dict | None:
+    """Read hermes-tailscale-control's connect verdict (spec 022 contracts.md
+    §2's last_attempt mirror). Fail-soft: missing, corrupt, or wrong-shaped
+    -> None — status.json simply omits last_attempt that tick, same
+    "never overwrite with a guess" policy as the rest of this watcher.
+    """
+    try:
+        data = json.loads(LAST_ATTEMPT_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    at = data.get("at")
+    ok = data.get("ok")
+    if not isinstance(at, str) or not isinstance(ok, bool):
+        return None
+    error_kind = data.get("error_kind")
+    return {"at": at, "ok": ok, "error_kind": error_kind if isinstance(error_kind, str) else None}
+
+
 def refresh_once() -> bool:
     """One heartbeat tick. Returns True iff status.json was (re)written.
 
@@ -147,7 +180,11 @@ def refresh_once() -> bool:
         return False
     if not isinstance(data, dict):
         return False
-    _write_status_json(status_document(data))
+    doc = status_document(data)
+    last_attempt = _read_last_attempt()
+    if last_attempt is not None:
+        doc["last_attempt"] = last_attempt
+    _write_status_json(doc)
     return True
 
 

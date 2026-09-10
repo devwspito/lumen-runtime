@@ -41,7 +41,8 @@ a small oneshot/loop driven by `tailscale status --json` over the local
   "peers": [
     { "name": "laptop", "online": true },
     { "name": "server", "online": false }
-  ]
+  ],
+  "last_attempt": { "at": "2026-09-10T14:03:00+00:00", "ok": false, "error_kind": "tailscale_up_failed" }
 }
 ```
 
@@ -52,6 +53,32 @@ a small oneshot/loop driven by `tailscale status --json` over the local
 - `peers` — **names and online state only.** Never include peer IPs, tags, key
   fingerprints, or OS/version — those are not needed by any consumer and widen
   what a compromised reader of this file learns about the tailnet topology.
+- `last_attempt` — **optional** (absent/`null` until a connect has ever been
+  staged). The verdict of the most recent `POST /connect` (025 hallazgo D:
+  `hermes-tailscale-control` fails 5/5 on a rejected key, but this script does
+  NOT write status.json — so without this field a rejected key was
+  indistinguishable from "never tried", and the OLD `configured` definition
+  ["status.json exists"] read `true` even though the node never logged in).
+  Written by `hermes-tailscale-control` to a SEPARATE file,
+  `/run/hermes/tailscale/last-attempt.json` (`{"at", "ok", "error_kind"}`,
+  0644, no key material — see §3.1), and mirrored verbatim into status.json
+  by the status watcher on its next tick (single-writer discipline: the
+  control script never touches status.json itself).
+  - `at` — ISO 8601 timestamp of the attempt.
+  - `ok` — `true` if `tailscale up` succeeded, `false` otherwise.
+  - `error_kind` — `null` on success; `"tailscale_up_failed"` on failure (the
+    control script does not currently distinguish rejected-key from
+    network/timeout failures — all collapse to this one value).
+
+**`configured` (REQUIRED semantics — 025 hallazgo D):** `configured` means
+**logged in**, i.e. `configured == online`, as reported by the status
+watcher. It does **not** mean "status.json exists" — the watcher writes this
+file as soon as `hermes-tailscaled.service` starts, independent of whether
+`tailscale up` ever succeeded, so "file exists" was never a safe proxy for
+"connected". A caller wanting to distinguish "never configured" from "a
+connect attempt is pending" from "a connect attempt failed" must look at
+`last_attempt`, not `configured` alone (see `hermes.shell_server.tailnet.api`
+`_read_status` / the egress lane's `tailnetUiState`).
 
 **REQUIRED ops-lane tmpfiles change:** `/run/hermes/tailscale` is currently
 0700 `hermes-tailscale:hermes-tailscale`. Under that mode, **no other uid can
@@ -141,6 +168,12 @@ Root-helper responsibilities (ops lane, `scripts/hermes-tailscale-control`):
 6. **Never** put the key in argv, `Environment=`, or any log line — the
    `file:<path>` auth-key form exists in `tailscale up` exactly so the key
    never appears in `ps`/`journalctl`.
+7. Write the verdict (success or failure) to
+   `/run/hermes/tailscale/last-attempt.json` — `{"at", "ok", "error_kind"}`,
+   0644, **no key material** — for the status watcher to mirror into
+   status.json's `last_attempt` (§2, 025 hallazgo D). This script does NOT
+   write status.json directly (single-writer discipline stays with the
+   watcher).
 
 The egress lane **additionally** persists an encrypted copy in the
 `SecretsVault` (AES-GCM under `master.key`) at

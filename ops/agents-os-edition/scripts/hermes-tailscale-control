@@ -74,6 +74,15 @@ TS_SOCKET = Path(os.environ.get("HERMES_TAILSCALE_SOCKET", str(RUNTIME_DIR / "ta
 STATUS_FILE = RUNTIME_DIR / "status.json"
 ENABLED_MARKER = STATE_DIR / "enabled"
 
+# 025 hallazgo D: a rejected auth_key made `tailscale up` fail 5/5 yet
+# GET /tailnet still reported configured:true, because status.json (written
+# by the low-privilege watcher, NOT this script) exists regardless of login
+# outcome. This script records its OWN connect verdict here — no key
+# material, ever — the watcher mirrors it into status.json's last_attempt
+# field on its next tick (single-writer discipline: this script must NOT
+# touch status.json itself).
+LAST_ATTEMPT_FILE = RUNTIME_DIR / "last-attempt.json"
+
 # Private tmp location the helper itself controls (contracts.md §3.1 step 2) —
 # under PrivateTmp=yes this /tmp is a fresh, isolated mount, invisible to every
 # other process on the host (root included) once the unit exits. NEVER
@@ -217,6 +226,26 @@ def _write_enabled_marker() -> None:
     tmp.write_text("1\n", encoding="utf-8")
     os.chmod(tmp, 0o644)
     tmp.rename(ENABLED_MARKER)
+
+
+def _write_last_attempt(*, ok: bool, error_kind: str | None) -> None:
+    """Record this connect attempt's verdict for the status watcher to mirror
+    into status.json (025 hallazgo D). NEVER the auth_key — `at`/`ok`/
+    `error_kind` only. 0644 (world-readable, no secret) so the low-privilege
+    watcher — a DIFFERENT uid — can read it back.
+    """
+    from datetime import UTC, datetime  # noqa: PLC0415
+
+    payload = json.dumps({
+        "at": datetime.now(tz=UTC).isoformat(),
+        "ok": ok,
+        "error_kind": error_kind,
+    })
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = LAST_ATTEMPT_FILE.with_suffix(".tmp")
+    tmp.write_text(payload, encoding="utf-8")
+    os.chmod(tmp, 0o644)
+    tmp.rename(LAST_ATTEMPT_FILE)
 
 
 # --------------------------------------------------------------------------
@@ -366,8 +395,10 @@ def _connect(staged: dict) -> bool:
         _shred(AUTHKEY_FILE)
     if ok:
         logger.info("tailnet connect: tailscale up succeeded")
+        _write_last_attempt(ok=True, error_kind=None)
     else:
         logger.warning("tailnet connect: tailscale up failed after retries")
+        _write_last_attempt(ok=False, error_kind="tailscale_up_failed")
     return ok
 
 

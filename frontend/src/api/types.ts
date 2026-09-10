@@ -380,13 +380,23 @@ export interface TailnetPeer {
   online: boolean
 }
 
+export interface TailnetLastAttempt {
+  at: string
+  ok: boolean
+  error_kind: string | null
+}
+
 export interface TailnetStatus {
+  // 025 hallazgo D: `configured` means LOGGED IN (== online) — see
+  // tailnet/api.py's _read_status. Use last_attempt to distinguish
+  // "never tried" from "pending" from "the key was rejected".
   configured: boolean
   online: boolean
   node_name: string | null
   magicdns_suffix: string | null
   tailnet: string | null
   peers: TailnetPeer[]
+  last_attempt: TailnetLastAttempt | null
 }
 
 /** Emergency brake — freno de emergencia. Engaging needs no MFA; releasing does. */

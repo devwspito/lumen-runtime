@@ -80,6 +80,7 @@ def paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     socket_path = runtime_dir / "tailscaled.sock"
     authkey_file = private_tmp_dir / "hermes-tailscale-authkey"
     kill_switch_result_file = control_dir / "kill-switch-result.json"
+    last_attempt_file = runtime_dir / "last-attempt.json"
 
     monkeypatch.setattr(mod, "STAGE_DIR", control_dir)
     monkeypatch.setattr(mod, "STAGE_FILE", stage_file)
@@ -90,6 +91,7 @@ def paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(mod, "TS_SOCKET", socket_path)
     monkeypatch.setattr(mod, "AUTHKEY_FILE", authkey_file)
     monkeypatch.setattr(mod, "KILL_SWITCH_RESULT_FILE", kill_switch_result_file)
+    monkeypatch.setattr(mod, "LAST_ATTEMPT_FILE", last_attempt_file)
 
     return {
         "control_dir": control_dir,
@@ -98,6 +100,7 @@ def paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         "stage_file": stage_file,
         "status_file": status_file,
         "enabled_marker": enabled_marker,
+        "last_attempt_file": last_attempt_file,
         "socket_path": socket_path,
         "authkey_file": authkey_file,
         "private_tmp_dir": private_tmp_dir,
@@ -260,6 +263,51 @@ class TestConnect:
         """contracts.md §3.1 step 2: NEVER back into /run/hermes/tailscale
         (shared, 0711 since §2) — a private location the helper alone controls."""
         assert str(paths["runtime_dir"]) not in str(mod.AUTHKEY_FILE)
+
+
+# ---------------------------------------------------------------------------
+# last_attempt (025 hallazgo D): a rejected key must NOT read as "configured"
+# — this script records its own verdict, the status watcher mirrors it.
+# ---------------------------------------------------------------------------
+
+
+class TestConnectLastAttempt:
+    def test_success_writes_ok_true_no_error_kind(self, paths: dict) -> None:
+        with patch.object(mod, "_tailscale_up_with_retry", return_value=True):
+            mod._connect({"auth_key": "tskey-abc123"})
+        result = json.loads(paths["last_attempt_file"].read_text(encoding="utf-8"))
+        assert result["ok"] is True
+        assert result["error_kind"] is None
+        assert result["at"]
+
+    def test_failure_writes_ok_false_with_error_kind(self, paths: dict) -> None:
+        with patch.object(mod, "_tailscale_up_with_retry", return_value=False):
+            mod._connect({"auth_key": "tskey-abc123"})
+        result = json.loads(paths["last_attempt_file"].read_text(encoding="utf-8"))
+        assert result["ok"] is False
+        assert result["error_kind"] == "tailscale_up_failed"
+
+    def test_last_attempt_never_contains_the_auth_key(self, paths: dict) -> None:
+        with patch.object(mod, "_tailscale_up_with_retry", return_value=False):
+            mod._connect({"auth_key": "tskey-should-never-appear-here"})
+        raw = paths["last_attempt_file"].read_text(encoding="utf-8")
+        assert "tskey" not in raw
+        assert "should-never-appear" not in raw
+
+    def test_last_attempt_file_is_0644(self, paths: dict) -> None:
+        with patch.object(mod, "_tailscale_up_with_retry", return_value=True):
+            mod._connect({"auth_key": "tskey-abc123"})
+        mode = stat.S_IMODE(paths["last_attempt_file"].stat().st_mode)
+        assert mode == 0o644
+
+    def test_a_later_success_overwrites_an_earlier_failure(self, paths: dict) -> None:
+        with patch.object(mod, "_tailscale_up_with_retry", return_value=False):
+            mod._connect({"auth_key": "tskey-first-rejected"})
+        assert json.loads(paths["last_attempt_file"].read_text(encoding="utf-8"))["ok"] is False
+
+        with patch.object(mod, "_tailscale_up_with_retry", return_value=True):
+            mod._connect({"auth_key": "tskey-second-accepted"})
+        assert json.loads(paths["last_attempt_file"].read_text(encoding="utf-8"))["ok"] is True
 
 
 # ---------------------------------------------------------------------------

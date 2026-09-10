@@ -747,6 +747,7 @@ const TAILNET_UNCONFIGURED: TailnetStatus = {
   magicdns_suffix: null,
   tailnet: null,
   peers: [],
+  last_attempt: null,
 }
 
 /** Current tailnet status. Falls back to "not configured" on any fetch error
