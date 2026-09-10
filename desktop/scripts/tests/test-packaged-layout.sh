@@ -1,47 +1,64 @@
 #!/usr/bin/env bash
-# test-packaged-layout.sh — packaged-layout contract test (packaging review
-# item 1, specs/028-safent-app-nativa/verificacion-paquete-linux.md
-# "Comprobación 2"): asserts the EXACT set of files + hashes stage-runtime.sh
-# produces under resources/runtime/<triple>/ includes the safent CLI + host
-# launcher + companion provisioning assets, not just podman — the concrete
-# regression a real signed package shipped with (the CLI was in NO package;
-# `boot.rs::resolve_config` had nothing to invoke).
+# test-packaged-layout.sh — packaged-layout contract test, covering TWO
+# independent regressions found against the same staged tree by two lanes:
 #
-# Runs the REAL stage-runtime.sh for the CURRENT host's own Linux triple
-# (network-touching — same as a real CI matrix leg; skips outright on a
-# non-Linux host or an unsupported arch instead of guessing).
+# 1. (packaging review item 1, specs/028-safent-app-nativa/
+#    verificacion-paquete-linux.md "Comprobación 2") a signed package shipped
+#    with NO safent CLI anywhere inside it — boot.rs::resolve_config had
+#    nothing to invoke. Asserts the safent CLI + host launcher + companion
+#    provisioning assets are present, hash-matched in BOTH
+#    runtime-bundle.json and runtime-manifest.lock's .app_files, and
+#    executable where required.
+# 2. (a real macOS notarytool rejection, validation #12) every binary inside
+#    a raw download archive (krunkit-podman-unsigned-1.3.2.tgz) staged
+#    UNDER resources/runtime/ got bundled and inspected unsigned alongside
+#    its own extracted/signed copy. Asserts resources/runtime/ contains
+#    ONLY extracted files — no archive/.part/dotdir anywhere — and that
+#    stage-runtime.sh's download cache lives outside it entirely.
+#
+# Runs the REAL stage-runtime.sh, from a clean slate (so regression 2's
+# "nothing leaked" claim means something — a stale archive from a PREVIOUS
+# run must not be able to hide behind an early idempotent skip), for the
+# current host's own Linux triple by default (network-touching — same as a
+# real CI matrix leg) or an explicit $1 override; skips outright on a
+# non-Linux host or an unsupported arch instead of guessing.
 set -euo pipefail
 
 TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(cd "$TESTS_DIR/.." && pwd)"
 DESKTOP_DIR="$(cd "$SCRIPTS_DIR/.." && pwd)"
 LOCKFILE="$DESKTOP_DIR/runtime-manifest.lock"
+RESOURCES_ROOT="$DESKTOP_DIR/src-tauri/resources/runtime"
 
 fail() { echo "[x] $*" >&2; exit 1; }
 pass() { echo "[ok] $*"; }
 
-case "$(uname -s)" in
-  Linux) ;;
-  *) echo "[skip] test-packaged-layout.sh only covers Linux triples on this host ($(uname -s))"; exit 0 ;;
-esac
-case "$(uname -m)" in
-  aarch64) TARGET=aarch64-unknown-linux-gnu ;;
-  x86_64)  TARGET=x86_64-unknown-linux-gnu ;;
-  *) echo "[skip] unsupported arch for this test: $(uname -m)"; exit 0 ;;
-esac
+if [ -n "${1:-}" ]; then
+  TARGET="$1"
+else
+  case "$(uname -s)" in
+    Linux) ;;
+    *) echo "[skip] test-packaged-layout.sh only covers Linux triples on this host ($(uname -s)) unless given an explicit target"; exit 0 ;;
+  esac
+  case "$(uname -m)" in
+    aarch64) TARGET=aarch64-unknown-linux-gnu ;;
+    x86_64)  TARGET=x86_64-unknown-linux-gnu ;;
+    *) echo "[skip] unsupported arch for this test: $(uname -m)"; exit 0 ;;
+  esac
+fi
 
-DEST="$DESKTOP_DIR/src-tauri/resources/runtime/$TARGET"
+DEST="$RESOURCES_ROOT/$TARGET"
 MANIFEST="$DEST/runtime-bundle.json"
+CACHE_DIR="$DESKTOP_DIR/.cache/runtime-downloads/$TARGET"
+
+echo "[*] cleaning $DEST and $CACHE_DIR for a genuinely fresh run" >&2
+rm -rf "$DEST" "$CACHE_DIR"
 
 "$SCRIPTS_DIR/stage-runtime.sh" "$TARGET" >&2
 
 [ -f "$MANIFEST" ] || fail "no runtime-bundle.json under $DEST after staging"
 
-# 1. The exact five app files (the regression this test guards) must be
-#    present, executable where expected, and hash-match BOTH records:
-#    runtime-bundle.json (what cmd_stage_runtime verifies at the owner's
-#    first real run) and runtime-manifest.lock's .app_files (provenance,
-#    recomputed from this same checkout).
+# ---- regression 1: the safent CLI + neighbors must be in the package -----
 EXPECTED_APP_FILES="safent run-safent.sh provision.sh compose.yaml caps.template.yaml"
 for name in $EXPECTED_APP_FILES; do
   [ -f "$DEST/$name" ] || fail "expected app file missing from staged tree: $name"
@@ -55,10 +72,8 @@ for name in $EXPECTED_APP_FILES; do
   [ -n "$lock_sha" ] || fail "runtime-manifest.lock .app_files has no entry for $name"
   [ "$lock_sha" = "$got_sha" ] || fail "$name: staged sha256 disagrees with runtime-manifest.lock's .app_files record"
 done
-pass "all 5 app files present, executable-flagged where required, hash-matched in both records: $EXPECTED_APP_FILES"
+pass "all 5 app files present, hash-matched in both records: $EXPECTED_APP_FILES"
 
-# 2. safent/run-safent.sh/provision.sh must be individually executable
-#    (0755) — a non-executable CLI is exactly as useless as a missing one.
 for name in safent run-safent.sh provision.sh; do
   mode="$(jq -r --arg p "$name" '.entries[] | select(.path == $p) | .mode' "$MANIFEST")"
   [ "$mode" = "0755" ] || fail "$name: runtime-bundle.json records mode $mode, want 0755"
@@ -66,13 +81,14 @@ for name in safent run-safent.sh provision.sh; do
 done
 pass "safent/run-safent.sh/provision.sh are 0755 in both the manifest and on disk"
 
-# 3. The pinned podman toolchain from runtime-manifest.lock's .targets[] is
-#    STILL there too — this test guards the NEW files, not at the expense of
-#    the existing ones. Staged tree is still NESTED (bin/libexec/etc/) —
-#    Tauri's own bundle.resources glob is what flattens it at package time —
-#    so presence on disk is checked at the lock's own (nested) path, while
-#    runtime-bundle.json's RECORD of it (what cmd_stage_runtime trusts) is
-#    checked by the post-flatten flat basename.
+# ---- the pinned podman toolchain is still there too (not at the expense
+#      of the new files) — containers.conf is special-cased: it is
+#      deliberately patched post-verification (stage-runtime.sh's
+#      _patch_containers_conf: helper_binaries_dir + default_rootless_
+#      network_cmd + lock_type), so its lock entry pins the PRISTINE
+#      upstream download on purpose and the staged file never matches that
+#      again — checked against containers_conf_patch instead, same special
+#      case as _already_staged() itself. ----------------------------------
 n="$(jq -r --arg t "$TARGET" '.targets[$t].entries | length' "$LOCKFILE")"
 i=0
 while [ "$i" -lt "$n" ]; do
@@ -81,13 +97,11 @@ while [ "$i" -lt "$n" ]; do
   base="$(basename "$path")"
   [ -f "$DEST/$path" ] || fail "podman toolchain file missing from staged tree: $path"
   if [ "$path" = "etc/containers/containers.conf" ]; then
-    # Deliberately patched post-verification (stage-runtime.sh's own
-    # _patch_bundled_containers_conf, packaging review item 3: lock_type =
-    # "file" so the bundled podman never collides with the host's own on
-    # /dev/shm) — its lock entry pins the PRISTINE upstream download on
-    # purpose, so the staged (patched) file never matches it again; same
-    # special case as _already_staged() itself.
+    patched_sha="$(jq -r --arg t "$TARGET" '.targets[$t].containers_conf_patch.sha256' "$LOCKFILE")"
+    got_sha="$(sha256sum "$DEST/$path" | awk '{print $1}')"
+    [ "$got_sha" = "$patched_sha" ] || fail "$path: staged sha256 disagrees with runtime-manifest.lock's containers_conf_patch"
     grep -q '^lock_type = "file"' "$DEST/$path" || fail "$path: not patched with lock_type"
+    grep -q '^helper_binaries_dir' "$DEST/$path" || fail "$path: not patched with helper_binaries_dir"
     i=$((i + 1))
     continue
   fi
@@ -99,12 +113,34 @@ while [ "$i" -lt "$n" ]; do
 done
 pass "all $n pinned podman toolchain entries from runtime-manifest.lock present (nested on disk, flattened in runtime-bundle.json)"
 
-# 4. Every entry runtime-bundle.json claims must be exactly what cmd_stage_runtime
-#    would later verify+copy — total entry count is podman entries + pasta
-#    symlink-as-copy + the 5 app files (no extras, nothing silently dropped).
 total="$(jq '.entries | length' "$MANIFEST")"
 want_total=$((n + 1 + 5)) # +1 for bin/pasta (staged as a real copy, not counted in .targets[].entries)
 [ "$total" -eq "$want_total" ] || fail "runtime-bundle.json has $total entries, want $want_total ($n podman + 1 pasta + 5 app files)"
 pass "runtime-bundle.json entry count matches exactly: $total"
 
-echo "[ok] test-packaged-layout.sh: packaged layout for $TARGET is contract-complete"
+# ---- regression 2: no raw archives/partials/dotdirs under resources/ -----
+FORBIDDEN_PATTERNS=('*.tgz' '*.tar.gz' '*.zip' '*.pkg' '*.part' '*.verified')
+found=0
+for pattern in "${FORBIDDEN_PATTERNS[@]}"; do
+  while IFS= read -r -d '' hit; do
+    echo "    forbidden: $hit (matches $pattern)" >&2
+    found=1
+  done < <(find "$RESOURCES_ROOT" -iname "$pattern" -print0)
+done
+[ "$found" -eq 0 ] || fail "found archive/partial/marker file(s) under $RESOURCES_ROOT — these get bundled and break notarization"
+pass "no archive extensions anywhere under resources/runtime/"
+
+while IFS= read -r -d '' d; do
+  fail "dotdir under resources/runtime/: $d — bundle.resources' glob matches dot-entries too, this gets bundled"
+done < <(find "$RESOURCES_ROOT" -type d -name '.*' -print0)
+pass "no .cache (or any dotdir) anywhere under resources/runtime/"
+
+[ -d "$CACHE_DIR" ] || fail "expected a cache dir at $CACHE_DIR — did CACHE_DIR move back under resources/runtime/?"
+cache_file_count="$(find "$CACHE_DIR" -type f | wc -l | tr -d ' ')"
+[ "$cache_file_count" -gt 0 ] || fail "expected at least one cached archive under $CACHE_DIR"
+case "$CACHE_DIR" in
+  "$RESOURCES_ROOT"*) fail "CACHE_DIR ($CACHE_DIR) is under resources/runtime/ ($RESOURCES_ROOT) — this is exactly the bug" ;;
+esac
+pass "cache dir ($cache_file_count file(s)) confirmed outside resources/runtime/: $CACHE_DIR"
+
+echo "[ok] test-packaged-layout.sh: packaged layout for $TARGET is contract-complete (app files + clean resources tree)"

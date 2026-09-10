@@ -66,6 +66,18 @@ DESKTOP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$DESKTOP_DIR/.." && pwd)"
 LOCKFILE="$DESKTOP_DIR/runtime-manifest.lock"
 RESOURCES_ROOT="$DESKTOP_DIR/src-tauri/resources/runtime"
+# Outside resources/runtime/ ENTIRELY, on purpose (see CACHE_DIR below): a
+# real macOS notarization run (notarytool) rejected the app because raw
+# download archives (krunkit-podman-unsigned-1.3.2.tgz) were being bundled
+# alongside their own extracted/signed contents — Apple's tooling opens
+# archives and inspects what's inside them too. bundle.resources' own glob
+# is `resources/runtime/*/**/*`, which matches ANY first path segment
+# including a dotdir (the `glob` crate does not exclude dot-entries from `*`
+# by default) — so a cache nested ANYWHERE under resources/runtime/, even in
+# a gitignored dotdir, still gets swept into the .app. Never put download
+# state under resources/runtime/ again; see tests/test-packaged-layout.sh.
+# CACHE_DIR itself is assigned below, once $TARGET is validated (it is
+# per-target: $DESKTOP_DIR/.cache/runtime-downloads/$TARGET).
 
 # The `safent` CLI + its host launcher + the companion's provisioning assets
 # are PART OF THIS REPO (unlike podman: a pinned third party) — no network
@@ -86,14 +98,13 @@ APP_FILES=(
   "ops/container/companions/ads/compose.yaml"
   "ops/container/companions/ads/caps.template.yaml"
 )
-# Persistent across runs (on purpose — see header): a killed script resumes
-# an in-flight archive/image download from here instead of restarting it.
-CACHE_DIR="$RESOURCES_ROOT/.cache"
 
 # shellcheck source=lib/fetch-verified.sh
 source "$SCRIPT_DIR/lib/fetch-verified.sh"
 # shellcheck source=lib/normalize-staged-tree.sh
 source "$SCRIPT_DIR/lib/normalize-staged-tree.sh"
+# shellcheck source=lib/patch-containers-conf.sh
+source "$SCRIPT_DIR/lib/patch-containers-conf.sh"
 
 TARGET="${1:-}"
 case "$TARGET" in
@@ -134,6 +145,12 @@ case "$TARGET" in
 esac
 
 DEST="$RESOURCES_ROOT/$TARGET"
+# Persistent across runs (on purpose — a killed script resumes an in-flight
+# archive/image download from here instead of restarting it): gitignored,
+# but NOT under resources/runtime/ — see the comment on RESOURCES_ROOT above.
+# The pipeline lane's `actions/cache` step must key/cache THIS path, not the
+# old resources/runtime/.cache/ one.
+CACHE_DIR="$DESKTOP_DIR/.cache/runtime-downloads/$TARGET"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT INT TERM
 
@@ -149,16 +166,19 @@ _already_staged() {
   for ((i = 0; i < n; i++)); do
     path="$(jq -r ".targets[\$t].entries[$i].path" --arg t "$TARGET" "$LOCKFILE")"
     want_sha="$(jq -r ".targets[\$t].entries[$i].sha256" --arg t "$TARGET" "$LOCKFILE")"
-    [ -f "$DEST/$path" ] || return 1
-    if [ "$path" = "etc/containers/containers.conf" ]; then
-      # This ONE entry is deliberately patched post-verification
-      # (_patch_bundled_containers_conf) — its lock hash pins the
-      # PRISTINE upstream download (needed to verify the fresh tarball
-      # extraction), which the STAGED, patched file will never match
-      # again. "Already staged" for this file means "already patched".
-      grep -q '^lock_type = "file"' "$DEST/$path" || return 1
-      continue
+    # etc/containers/containers.conf is rewritten in place by
+    # _patch_containers_conf after extraction (see there) — on disk it is
+    # NEVER the pristine upstream original this entry's own hash pins, so
+    # check it against containers_conf_patch's hash instead (the hash of
+    # the FULL patched content — helper_binaries_dir + default_rootless_
+    # network_cmd + lock_type together — so a match here already proves
+    # every one of those three landed correctly, not just one of them).
+    # macOS has no such entry at all, hence the existence check.
+    if [ "$path" = "etc/containers/containers.conf" ] && \
+       jq -e '.targets[$t].containers_conf_patch // empty' --arg t "$TARGET" "$LOCKFILE" >/dev/null 2>&1; then
+      want_sha="$(jq -r '.targets[$t].containers_conf_patch.sha256' --arg t "$TARGET" "$LOCKFILE")"
     fi
+    [ -f "$DEST/$path" ] || return 1
     got_sha="$(SHA256 "$DEST/$path")"
     [ "$got_sha" = "$want_sha" ] || return 1
   done
@@ -236,30 +256,66 @@ _stage_linux() {
   ln -sf passt "$DEST/bin/pasta"
   echo "    linked bin/pasta -> bin/passt"
 
-  _patch_bundled_containers_conf
+  _patch_containers_conf
 }
 
-# A bundled STATIC (musl) podman and the host's own (glibc) podman/docker,
-# run as the same uid, collide on ONE shared /dev/shm lock segment sized
-# differently by each libc's pthread_mutex_t layout — reproduced live:
-# "failed to open 2048 locks in /libpod_rootless_lock_1000: numerical
-# result out of range" (specs/028-safent-app-nativa/
-# verificacion-paquete-linux.md §"Pasada 1"). The upstream tarball's own
-# containers.conf verified-and-staged just above is patched here (its
-# hash re-pinned right after, below) to add `lock_type = "file"` — file
-# locks per storage tree, no shared-by-uid segment at all. `safent` points
-# CONTAINERS_CONF at this bundled file (never the host's own
-# ~/.config/containers/) whenever SAFENT_PODMAN is set, and generates a
-# private graphroot/runroot under $SAFENT_STATE_HOME at runtime (the OTHER
-# half of this fix — storage.conf can't be patched here: those paths are
-# only known once the app actually runs).
-_patch_bundled_containers_conf() {
+# containers.conf, as extracted above (verified against its OWN entries[]
+# sha256 — the pristine upstream original), needs TWO independent fixes
+# before it is fit to ship, found by two different lanes against the same
+# file:
+#
+# 1. It does not point podman at ITS OWN bundled netavark/aardvark-dns/
+#    rootlessport: without this, a host that happens to already have podman
+#    installed silently uses THAT copy instead (confirmed on this DGX:
+#    podman fell back to the system's netavark 1.4.0 instead of the bundled
+#    2.1.0) — exactly the "depends on what happens to already be on the
+#    machine" failure the whole point of bundling exists to avoid. $BINDIR
+#    is containers-common's OWN token (pkg/config/config.go,
+#    FindHelperBinary) for "the directory containing the CURRENTLY RUNNING
+#    podman binary", resolved fresh at runtime via os.Executable() — not
+#    baked in at stage time, so the same staged file is correct BOTH here
+#    (resources/runtime/<target>/) and wherever the app later deploys the
+#    bundle for real (~/.safent/runtime/<version>/, per data-model.md).
+#    default_rootless_network_cmd = "pasta" is already podman 6.1.1's own
+#    default (RELEASE_NOTES.md) — set explicitly anyway so the product does
+#    not silently change behavior if a future podman release changes it.
+# 2. A bundled STATIC (musl) podman and the host's own (glibc) podman/
+#    docker, run as the same uid, collide on ONE shared /dev/shm rootless
+#    lock segment sized differently by each libc's pthread_mutex_t layout —
+#    reproduced live: "failed to open 2048 locks in
+#    /libpod_rootless_lock_1000: numerical result out of range"
+#    (specs/028-safent-app-nativa/verificacion-paquete-linux.md §"Pasada
+#    1"). `lock_type = "file"` switches to per-storage-tree file locks —
+#    no segment shared by uid at all, so no collision is possible.
+#
+# Both append into the SAME [engine] section (via the sed `a` command,
+# which inserts immediately after the `[engine]` header regardless of what
+# a previous call already inserted there) before the network-cmd fix adds
+# its own new [network] section at the very end — order between the two
+# [engine] keys does not matter, but both MUST land before any later
+# section header or they would silently become that section's keys
+# instead. Appends, never overwrites the pre-existing keys — the whole
+# result is verified against its OWN pinned hash (containers_conf_patch in
+# the lock file), separate from the upstream original's entries[] hash,
+# because this is OUR generated content, not a re-check of the same bytes.
+_patch_containers_conf() {
   local conf="$DEST/etc/containers/containers.conf"
-  [ -f "$conf" ] || { echo "[x] expected $conf to already be staged" >&2; exit "$EXIT_STAGE"; }
-  grep -q '^lock_type' "$conf" && return 0
-  printf '\n# Added by stage-runtime.sh — see its own comment for why.\nlock_type = "file"\n' >> "$conf"
-  chmod 0644 "$conf"
-  echo "    patched etc/containers/containers.conf (lock_type = \"file\")"
+  local want_sha want_size
+  want_sha="$(jq -r '.targets[$t].containers_conf_patch.sha256' --arg t "$TARGET" "$LOCKFILE")"
+  want_size="$(jq -r '.targets[$t].containers_conf_patch.size_bytes' --arg t "$TARGET" "$LOCKFILE")"
+
+  patch_containers_conf_for_bundled_helpers "$conf" || exit "$EXIT_STAGE"
+  patch_containers_conf_for_isolated_locks "$conf" || exit "$EXIT_STAGE"
+
+  local got_sha got_size
+  got_sha="$(SHA256 "$conf")"
+  got_size="$(_filesize "$conf")"
+  if [ "$got_sha" != "$want_sha" ] || [ "$got_size" != "$want_size" ]; then
+    rm -f "$conf"
+    echo "[x] patched containers.conf does not match runtime-manifest.lock's containers_conf_patch (sha256 or size) — refusing to keep it." >&2
+    exit "$EXIT_STAGE"
+  fi
+  echo "    patched etc/containers/containers.conf (helper_binaries_dir + default_rootless_network_cmd + lock_type, $got_size bytes, sha256 verified)"
 }
 
 # ---- aarch64-apple-darwin: expand the official .pkg (never install it) + VM ---
