@@ -1631,13 +1631,18 @@ class DbusRuntimeServiceWiring:
         D-Bus (nunca del LLM — Transport docstring lo exige).
 
         env (BYOK): diccionario opcional de variables de entorno BYOK para el
-        servidor. Solo se permiten claves en _MCP_BYOK_ENV_KEYS; claves
-        arbitrarias son rechazadas (no silenciadas) para evitar inyección.
-        OD_DAEMON_URL se valida como URL http(s). El token OD_API_TOKEN se
-        persiste cifrado en la config y nunca se registra en claro en logs.
-        HOME/MCP_REMOTE_CONFIG_DIR/XDG_CONFIG_HOME pasan la validación (R16)
-        pero el LAUNCHER decide el HOME real del hijo MCP — ver el comentario
-        de _MCP_BYOK_ENV_KEYS.
+        servidor. Cada clave debe cumplir _MCP_ENV_KEY_PATTERN y no estar en
+        el deny-list (_MCP_ENV_DENY_EXACT/_MCP_ENV_DENY_PREFIXES) — ver
+        _validate_mcp_env; una clave que no cumpla es rechazada (no
+        silenciada) para evitar inyección. OD_DAEMON_URL se valida como URL
+        http(s). Los valores nunca se registran en claro en logs (solo los
+        NOMBRES de clave, p.ej. byok_keys=[...]). HOME SÍ pasa esta
+        validación (R16: rechazarla aquí tumbaría todo el draft de un
+        servidor OAuth-bridge cuyo McpSpec.env la incluya) pero el LAUNCHER
+        decide siempre el HOME real del hijo MCP y nunca reenvía el que el
+        caller haya puesto aquí — mismo patrón para
+        MCP_REMOTE_CONFIG_DIR/XDG_CONFIG_HOME (validadas aquí, nunca
+        reenviadas por el launcher).
         """
         self._authorize_and_resolve(sender_uid, operation="add_mcp_server")
         if self._mcp_manager is None:
@@ -7118,72 +7123,76 @@ def _prefetch_git_mcp(server_id: str, git_spec: str) -> None:
     )
 
 
-# BYOK env keys permitted in MCP server entries. Mirrors _ALLOWED_ENV_KEYS in
-# hermes-mcp-launcher — both gates must stay in sync; a key allowed here but
-# not in the launcher will be silently discarded at spawn time.
-# Expanding this set is a security-posture decision: add only named, bounded
-# variables for specific published MCP servers; never allow arbitrary keys.
+# MCP-05 root cause (spec 025 matriz, fixed): the fixed frozenset below WAS
+# the allowlist ("BYOK env keys permitted in MCP server entries") — the
+# form's OWN placeholder (McpView.tsx, `mcp.env.label`: "BRAVE_API_KEY=br-
+# xxx") named a key that was never IN it, so anyone who followed the UI's own
+# example got a raw 400 back. A hand-curated per-server allowlist can never
+# keep up with "any published MCP server that needs one bounded secret" — the
+# fix is a VALIDATED PATTERN (any plausible env-var name) plus a DENY-list of
+# names that are actually dangerous to hand an MCP child, not a per-service
+# allowlist that must be edited (in TWO files, this one and hermes-mcp-
+# launcher's _ALLOWED_ENV_KEYS, "both gates must stay in sync") every time a
+# new server ships.
+_MCP_ENV_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{2,63}$")
+
+# Exact names a caller must never be able to set — each one either re-points
+# a resource the launcher/daemon ALREADY pins correctly for every MCP child
+# (PATH, NODE_OPTIONS — see hermes-mcp-launcher's own _ALWAYS_FORWARDED_ENV_KEYS
+# comment) or is a network interception knob (the http(s)_proxy family — a
+# BYOK secret's own traffic could be MITM'd through it).
 #
-# 2026-07-07 (R16) — HOME/MCP_REMOTE_CONFIG_DIR/XDG_CONFIG_HOME: OAuth-bridge
-# servers (mcp-remote, used by the managed-remote "safent-control" MCP) write a
-# local token cache and need a writable HOME. These are validated HERE (so a
-# bundle/BYOK draft carrying them does not hard-fail add_mcp_server wholesale —
-# see _validate_mcp_env, which rejects the ENTIRE draft on any unrecognised
-# key) but are DELIBERATELY NOT mirrored into the launcher's
-# _ALLOWED_ENV_KEYS for HOME: the launcher's own unit env already pins a
-# writable, group-writable HOME (/var/lib/hermes/mcp-home) for every MCP
-# child, and letting a caller (even a signed cloud bundle) override it risks
-# repointing HOME at a path the jailed MCP child cannot write (exactly the
-# EACCES this class of bug produces — see hermes-mcp-launcher's own comment
-# on _ALLOWED_ENV_KEYS). MCP_REMOTE_CONFIG_DIR/XDG_CONFIG_HOME are validated
-# here but likewise not forwarded by the launcher: they fall back to
-# $HOME/.mcp-auth / $HOME/.config, both writable once HOME is launcher-pinned.
-_MCP_BYOK_ENV_KEYS: frozenset[str] = frozenset({
-    "OD_DAEMON_URL",
-    "OD_API_TOKEN",
-    "OD_AUTH_MODE",
-    "OD_BASIC_USER",
-    "OD_BASIC_PASS",
-    # Curated pack (published servers, named/bounded BYOK secrets — mirror in
-    # hermes-mcp-launcher._ALLOWED_ENV_KEYS):
-    # REPLICATE_API_TOKEN — Replicate MCP (replicate-mcp): imagen + vídeo.
-    # CONTEXT7_API_KEY    — Context7 MCP: docs de librerías al día para código.
-    "REPLICATE_API_TOKEN",
-    "CONTEXT7_API_KEY",
-    # Ruflo MCP (ruflo): endpoint OpenAI-compatible → enruta a nuestro LLM nativo.
-    "OPENAI_BASE_URL",
-    "OPENAI_API_KEY",
-    # OAuth-bridge servers (mcp-remote / safent-control). NOT mirrored into the
-    # launcher's _ALLOWED_ENV_KEYS — see the block comment above.
-    "HOME",
-    "MCP_REMOTE_CONFIG_DIR",
-    "XDG_CONFIG_HOME",
-    # safent-ads companion (024): declared-empty placeholders in the seeded
-    # entry, filled at connect time from hermes.shell_server.companions (see
-    # _mcp_connect) — never from a caller-supplied value (ADS_BEARER can only
-    # ever be FILLED here, the same fill-only discipline as OPENAI_API_KEY
-    # above; a caller passing a non-empty value would be ignored, not trusted).
-    "ADS_BEARER",
-    "NODE_EXTRA_CA_CERTS",
+# HOME is deliberately NOT here (R16, test_r16_mcp_bridge_handshake.py::
+# TestByokEnvKeysAcceptOAuthBridgeVars): the cloud's McpSpec.env for a
+# MANAGED_REMOTE/OAuth-bridge server (mcp-remote) legitimately carries HOME —
+# rejecting it HERE would hard-fail the entire add_mcp_server draft before it
+# ever reaches scan/prefetch/connect (R16's original root cause #1), not just
+# leave HOME unused. It is still NEVER honoured as an override: the launcher
+# (hermes-mcp-launcher._is_allowed_env_key) denies it independently and
+# always forwards its OWN HOME instead (_ALWAYS_FORWARDED_ENV_KEYS) — the
+# same two-gate split this whole module's docstring already describes for
+# every other BYOK key, just with the accept/forward decision on opposite
+# sides for this one name.
+_MCP_ENV_DENY_EXACT: frozenset[str] = frozenset({
+    "PATH", "NODE_OPTIONS",
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "FTP_PROXY",
 })
+# Prefixes a caller must never be able to set: LD_* (dynamic linker — library
+# injection/preload into whatever the launcher execs), PYTHON* (interpreter
+# path/startup hijack), HERMES_* (impersonates the daemon's OWN config
+# surface — every Environment= this product's units set is HERMES_* or one
+# of the exact names above), SSL_CERT_* (TLS trust store override — a way to
+# MITM an MCP server's own outbound TLS).
+_MCP_ENV_DENY_PREFIXES: tuple[str, ...] = ("LD_", "PYTHON", "HERMES_", "SSL_CERT_")
+
+
+def _is_denied_mcp_env_key(key: str) -> bool:
+    """Case-insensitive on purpose: the allow PATTERN only ever matches
+    upper-case names, but the deny-list must not be dodged by a caller
+    exploiting some future loosening of that pattern (defense in depth —
+    matches this module's own fail-closed-on-both-sides style)."""
+    upper = key.upper()
+    return upper in _MCP_ENV_DENY_EXACT or upper.startswith(_MCP_ENV_DENY_PREFIXES)
 
 
 def _validate_mcp_env(raw: object) -> dict[str, str]:
     """Validate and sanitise a caller-supplied BYOK env dict.
 
-    Returns a clean dict whose keys are a subset of _MCP_BYOK_ENV_KEYS and
-    whose values are non-empty strings. Raises ValueError on any violation.
+    Returns a clean dict of str->non-empty-str. Raises ValueError on any
+    violation — the message never echoes a VALUE, only key names and the
+    rule that rejected them (values are secrets; never logged in clear).
 
     Security invariants:
-      - Only explicitly allowlisted keys pass through; arbitrary keys are
-        rejected, not silently dropped — fail-loud on unknown keys so
-        callers notice misconfiguration rather than silently missing env.
+      - A key must match _MCP_ENV_KEY_PATTERN (`^[A-Z][A-Z0-9_]{2,63}$` —
+        the shape of every real env-var name a published MCP server's docs
+        ever ask for) AND must not be on the deny-list
+        (_MCP_ENV_DENY_EXACT / _MCP_ENV_DENY_PREFIXES) — fail-loud on
+        anything else so callers notice misconfiguration rather than
+        silently missing env.
       - Values must be strings; empty strings are rejected (would confuse the
         MCP server just as much as missing env vars).
       - OD_DAEMON_URL must parse as an http(s) URL (scheme + netloc present).
         This prevents open-design-mcp from being pointed at file://, data://, etc.
-      - OD_API_TOKEN is passed through opaquely; it MUST NOT be logged in
-        clear — callers must use the masked helpers below.
     """
     if not isinstance(raw, dict):
         raise ValueError("env debe ser un diccionario str→str")
@@ -7191,11 +7200,13 @@ def _validate_mcp_env(raw: object) -> dict[str, str]:
     for key, val in raw.items():
         if not isinstance(key, str):
             raise ValueError(f"clave de env no es string: {key!r}")
-        if key not in _MCP_BYOK_ENV_KEYS:
+        if not _MCP_ENV_KEY_PATTERN.match(key):
             raise ValueError(
                 f"clave de env no permitida: {key!r} "
-                f"(allowlist: {sorted(_MCP_BYOK_ENV_KEYS)})"
+                f"(debe cumplir {_MCP_ENV_KEY_PATTERN.pattern!r})"
             )
+        if _is_denied_mcp_env_key(key):
+            raise ValueError(f"clave de env no permitida: {key!r} (reservada por el sistema)")
         if not isinstance(val, str) or not val:
             raise ValueError(f"valor de env para {key!r} debe ser string no vacío")
         if key == "OD_DAEMON_URL":
