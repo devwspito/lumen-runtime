@@ -373,6 +373,22 @@ export interface EgressModeResponse {
   blocklist_count?: number
 }
 
+// ── Governed tailnet (spec 022) ─────────────────────────────────────────────
+
+export interface TailnetPeer {
+  name: string
+  online: boolean
+}
+
+export interface TailnetStatus {
+  configured: boolean
+  online: boolean
+  node_name: string | null
+  magicdns_suffix: string | null
+  tailnet: string | null
+  peers: TailnetPeer[]
+}
+
 export interface PendingApproval {
   proposal_id: string
   kind?: string

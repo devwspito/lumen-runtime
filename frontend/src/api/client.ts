@@ -32,6 +32,7 @@ import type {
   EgressDomainsResponse,
   EgressMode,
   EgressModeResponse,
+  TailnetStatus,
   PendingApproval,
   InboundDelegation,
   MfaStatus,
@@ -720,6 +721,43 @@ export function unblockEgressDomain(domain: string): Promise<unknown> {
   return request<unknown>('/egress/deny/remove', {
     method: 'POST',
     body: JSON.stringify({ domain }),
+  })
+}
+
+// ── Governed tailnet (spec 022) ─────────────────────────────────────────────
+
+const TAILNET_UNCONFIGURED: TailnetStatus = {
+  configured: false,
+  online: false,
+  node_name: null,
+  magicdns_suffix: null,
+  tailnet: null,
+  peers: [],
+}
+
+/** Current tailnet status. Falls back to "not configured" on any fetch error
+ * (mirrors listEgressDomains) so a transient backend hiccup never crashes the card. */
+export function getTailnetStatus(): Promise<TailnetStatus> {
+  return request<TailnetStatus>('/tailnet').catch(() => TAILNET_UNCONFIGURED)
+}
+
+export function getTailnetPeers(): Promise<{ peers: TailnetStatus['peers'] }> {
+  return request<{ peers: TailnetStatus['peers'] }>('/tailnet/peers').catch(() => ({ peers: [] }))
+}
+
+/** Stage a tailnet connect. The key is never echoed back by the backend. */
+export function connectTailnet(authKey: string): Promise<{ staged: boolean }> {
+  return request<{ staged: boolean }>('/tailnet/connect', {
+    method: 'POST',
+    body: JSON.stringify({ auth_key: authKey }),
+  })
+}
+
+/** Stage a tailnet disconnect — gated by the device password (PAM, root helper). */
+export function disconnectTailnet(password: string): Promise<{ staged: boolean }> {
+  return request<{ staged: boolean }>('/tailnet/disconnect', {
+    method: 'POST',
+    body: JSON.stringify({ password }),
   })
 }
 
