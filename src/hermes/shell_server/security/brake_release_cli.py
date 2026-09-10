@@ -48,6 +48,8 @@ import argparse
 import asyncio
 import sys
 
+from hermes.tasks.domain.ports import AgentPauseProvenance
+
 _WELL_KNOWN_NAME = "org.hermes.Runtime"
 _OBJECT_PATH = "/org/hermes/Runtime"
 _INTERFACE_NAME = "org.hermes.Runtime1"
@@ -59,8 +61,11 @@ _DBUS_CALL_TIMEOUT_S = 8.0
 # incident review can tell "released via host CLI, no MFA" apart from a
 # TOTP/device-password release (security_api.py's own "totp"/
 # "device_password" reasons). Matched by
-# tests/unit/shell_server/test_brake_release_cli.py.
-_RELEASE_REASON = "host_cli"
+# tests/unit/shell_server/test_brake_release_cli.py. Reuses the shared
+# AgentPauseProvenance enum (025 re-verificación d2eb8c6) — same closed
+# vocabulary AGENT_PAUSED now also draws from, so pause and resume are never
+# fed two independently-drifting sets of provenance strings.
+_RELEASE_REASON = AgentPauseProvenance.HOST_CLI
 
 
 async def _release_brake() -> bool:

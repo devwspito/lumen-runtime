@@ -70,6 +70,58 @@ class TestGetKillSwitchStatus:
         assert status["reason"] == "prueba"
 
 
+class TestRequestPauseProvenance:
+    """025 re-verificación d2eb8c6 (menor nuevo): AGENT_PAUSED had no closed
+    provenance vocabulary — only `actor` (uid) and whatever free text the
+    caller wrote distinguished two pauses of different origin. request_pause
+    now derives AgentPauseProvenance from the ALREADY-authorized sender_uid:
+    proxy_uid (the REST API via the shell-server) => api; any direct
+    authorized uid (host/TUI) => host_cli."""
+
+    @pytest.mark.asyncio
+    async def test_direct_authorized_uid_gets_host_cli_provenance(
+        self, tmp_path: Path
+    ) -> None:
+        state = InMemoryAgentState()
+        wiring = _make_wiring(tmp_path, agent_state=state)
+
+        await wiring.request_pause(reason="freno", sender_uid=_OPERATOR_UID)
+
+        assert state.pause_calls[-1]["provenance"] == "host_cli"
+
+    @pytest.mark.asyncio
+    async def test_proxy_uid_with_valid_token_gets_api_provenance(
+        self, tmp_path: Path
+    ) -> None:
+        from hermes.shell_server.security.operator_token import (
+            OperatorTokenMinter,
+            OperatorTokenVerifier,
+        )
+
+        vault = SecretsVault(master_key=os.urandom(32))
+        repo = SQLiteProviderRepository(db_path=tmp_path / "providers.db", vault=vault)
+        signing_key = os.urandom(32)
+        minter = OperatorTokenMinter(signing_key=signing_key, expiry_s=30)
+        verifier = OperatorTokenVerifier(signing_key=signing_key)
+        proxy_uid = 880
+        state = InMemoryAgentState()
+        wiring = DbusRuntimeServiceWiring(
+            agent_state=state,
+            approval_gate=_NullApprovalGate(),
+            authorized_uids=frozenset({_OPERATOR_UID}),
+            provider_repo=repo,
+            proxy_uid=proxy_uid,
+            operator_token_verifier=verifier,
+        )
+        token = minter.mint(operator_id=str(UUID(int=_OPERATOR_UID)), operation="request_pause")
+
+        await wiring.request_pause(
+            reason="freno via api", sender_uid=proxy_uid, operator_token=token
+        )
+
+        assert state.pause_calls[-1]["provenance"] == "api"
+
+
 class TestRequestPauseCancelsLiveTurns:
     @pytest.mark.asyncio
     async def test_pause_requests_cancellation_of_live_task(self, tmp_path: Path) -> None:

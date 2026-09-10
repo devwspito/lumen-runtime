@@ -169,13 +169,21 @@ class TestApplyDispatch:
         assert rc == 0
         mock_disconnect.assert_called_once()
 
-    def test_disconnect_with_wrong_password_never_calls_disconnect(self) -> None:
+    def test_disconnect_with_wrong_password_never_calls_disconnect_and_exits_0(
+        self,
+    ) -> None:
+        """025 re-verificación d2eb8c6 (menor nuevo): a rejected PAM password
+        is a normal, fail-closed policy outcome — the caller (tailnet/api.py)
+        never inspects this unit's exit code, it polls GET /tailnet instead —
+        not a systemd unit failure. Before this fix rc==1 left
+        hermes-tailscale-control.service `failed` permanently after every
+        single wrong-password attempt."""
         with (
             patch.object(mod, "_verify_password_pam", return_value=False),
             patch.object(mod, "_disconnect") as mock_disconnect,
         ):
             rc = mod._apply({"action": "disconnect", "password": "wrong"})
-        assert rc == 1
+        assert rc == 0
         mock_disconnect.assert_not_called()
 
     def test_disconnect_without_password_rejected_before_pam(self) -> None:
@@ -195,10 +203,20 @@ class TestApplyDispatch:
             rc = mod._apply({"action": "kill_switch_release", "password": "correct"})
         assert rc == 0
 
-    def test_kill_switch_release_with_wrong_password_returns_1(self, paths: dict) -> None:
+    def test_kill_switch_release_with_wrong_password_returns_0_not_a_unit_failure(
+        self, paths: dict
+    ) -> None:
+        """025 re-verificación d2eb8c6 (FALLA menor): a rejected release is
+        reported via kill-switch-result.json (security_api.py polls THAT
+        file, never the unit's exit code/systemctl Result) — reproduced live
+        on the DGX as hermes-tailscale-control.service stuck `failed`
+        forever after a single wrong-password attempt. Exit 0; the true
+        verdict still lands in the result file."""
         with patch.object(mod, "_verify_password_pam", return_value=False):
             rc = mod._apply({"action": "kill_switch_release", "password": "wrong"})
-        assert rc == 1
+        assert rc == 0
+        result = json.loads(paths["kill_switch_result_file"].read_text(encoding="utf-8"))
+        assert result["ok"] is False
 
     def test_unknown_action_returns_1_without_pam(self) -> None:
         with patch.object(mod, "_verify_password_pam") as mock_pam:

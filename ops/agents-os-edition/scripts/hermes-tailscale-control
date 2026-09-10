@@ -471,7 +471,16 @@ def _apply(staged: dict) -> int:
         return 0 if _connect(staged) else 1
 
     if action == "kill_switch_release":
-        return 0 if _kill_switch_release(staged) else 1
+        # A rejected release (bad device password) is a normal, expected,
+        # fail-closed policy outcome — reported via _write_kill_switch_result,
+        # which _kill_switch_release() writes unconditionally. It is NOT a
+        # systemd unit failure: exit 0 regardless of the verdict, or a
+        # rejected release leaves hermes-tailscale-control.service in
+        # `failed` state permanently (specs/025-safent-repaso matriz-final-
+        # 39eeb8e re-verificación d2eb8c6). Unexpected exceptions still
+        # propagate uncaught here and fail the unit — fail-fast preserved.
+        _kill_switch_release(staged)
+        return 0
 
     # disconnect mutates state away from a tailnet the owner is actively on —
     # same device-password PAM gate as hermes-remote-access-control.
@@ -481,8 +490,13 @@ def _apply(staged: dict) -> int:
         return 1
 
     if not _verify_password_pam(LOGIN_USER, password):
+        # Same reasoning as kill_switch_release above: a wrong device
+        # password is a normal, fail-closed policy rejection (the caller
+        # polls GET /tailnet to confirm nothing changed — tailnet/api.py's
+        # disconnect() never inspects this unit's exit code), not a unit
+        # failure.
         logger.warning("disconnect action: PAM verification FAILED for user '%s' — aborting", LOGIN_USER)
-        return 1
+        return 0
 
     logger.info("disconnect action: PAM verification passed")
     return 0 if _disconnect() else 1

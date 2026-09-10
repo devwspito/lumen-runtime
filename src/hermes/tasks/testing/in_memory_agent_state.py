@@ -22,12 +22,14 @@ class InMemoryAgentState:
     async def is_paused(self) -> bool:
         return self._paused
 
-    async def pause(self, *, by: UUID | None, reason: str) -> None:
+    async def pause(
+        self, *, by: UUID | None, reason: str, provenance: str = ""
+    ) -> None:
         self._paused = True
         self._reason = reason
         self._changed_by = by
         self._changed_at = datetime.now(tz=UTC).isoformat()
-        self.pause_calls.append({"by": by, "reason": reason})
+        self.pause_calls.append({"by": by, "reason": reason, "provenance": provenance})
 
     async def resume(self, *, by: UUID | None, reason: str = "") -> None:
         self._paused = False

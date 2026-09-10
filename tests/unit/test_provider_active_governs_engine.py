@@ -560,6 +560,83 @@ class TestAnthropicMessagesApiProbe:
 
         assert captured["url"] == "https://proxy.example.com/anthropic/v1/messages"
 
+    async def test_logs_one_structured_journal_line_per_probe(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """specs/025-safent-repaso matriz-final-39eeb8e re-verificación
+        d2eb8c6 (menor nuevo): this probe used aiohttp directly and left ZERO
+        trace in the journal, unlike gemini/openai-api (httpx/openai SDK, both
+        log their own request line) — the one provider whose bug WAS the
+        endpoint it hit had no observable evidence of what it actually
+        called. One structured line per probe, never the key or the body."""
+        from hermes.agents_os.infrastructure import dbus_runtime_service as m
+
+        _install_fake_anthropic_http(
+            monkeypatch,
+            status=401,
+            body=(
+                '{"type":"error","error":{"type":"authentication_error",'
+                '"message":"invalid x-api-key sk-ant-super-secret-leak"}}'
+            ),
+        )
+        with caplog.at_level("INFO", logger="hermes.agents_os.dbus_runtime_service"):
+            await m._probe_anthropic_messages_api(
+                bare_model="claude-sonnet-4-6",
+                api_key="sk-ant-super-secret-leak",
+                base_url=None,
+            )
+
+        probe_records = [
+            r for r in caplog.records if r.getMessage() == "hermes.providers.probe_completed"
+        ]
+        assert len(probe_records) == 1, "exactly one structured line per probe"
+        record = probe_records[0]
+        assert record.provider_id == "anthropic"
+        assert record.endpoint == "api.anthropic.com/v1/messages"
+        assert record.status == 401
+        assert record.code == "invalid_key"
+
+        for r in caplog.records:
+            assert "sk-ant-super-secret-leak" not in r.getMessage()
+            assert "authentication_error" not in r.getMessage()
+
+    async def test_logs_one_line_even_on_network_exception(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A probe that never got an HTTP response (DNS/timeout/connection
+        error) must still leave exactly one journal line, with status/code
+        both null rather than silently skipping the log."""
+        import aiohttp
+
+        from hermes.agents_os.infrastructure import dbus_runtime_service as m
+
+        class _RaisingSession:
+            async def __aenter__(self) -> "_RaisingSession":
+                return self
+
+            async def __aexit__(self, *_exc: object) -> bool:
+                return False
+
+            def post(self, *_a: object, **_k: object) -> None:
+                raise ConnectionError("Cannot connect to host api.anthropic.com:443")
+
+        monkeypatch.setattr(aiohttp, "ClientSession", lambda *_a, **_k: _RaisingSession())
+
+        with caplog.at_level("INFO", logger="hermes.agents_os.dbus_runtime_service"):
+            ok, err, code = await m._probe_anthropic_messages_api(
+                bare_model="claude-sonnet-4-6", api_key="sk-ant-x", base_url=None
+            )
+
+        assert ok is False
+        assert code is None
+        probe_records = [
+            r for r in caplog.records if r.getMessage() == "hermes.providers.probe_completed"
+        ]
+        assert len(probe_records) == 1
+        assert probe_records[0].status is None
+        assert probe_records[0].code is None
+        assert probe_records[0].endpoint == "api.anthropic.com/v1/messages"
+
 
 class TestOpenAiCompatibleProbeClassification:
     """gemini (OpenAI-compatible) keeps the EXISTING client path untouched —
