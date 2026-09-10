@@ -92,6 +92,16 @@ class InstallRequestStatus:
     expires_at: str
 
 
+@dataclass(frozen=True)
+class ClaimedRequest:
+    """What `claim_request` hands back to a successful claimant (T016) — the
+    fields a caller needs to actually DO the work, nothing else. `slug` is
+    None for the two verbs that carry no slug (update_system/uninstall_system)."""
+
+    verb: str
+    slug: str | None
+
+
 def _marker_path(verb: str) -> Path:
     return _INSTANCE_DIR / f"request-{verb}.json"
 
@@ -139,6 +149,22 @@ def _has_live_claim(verb: str) -> bool:
     except OSError:
         return False
     return age_s < _CLAIM_TTL_S
+
+
+def _claim_owned_by(verb: str, claimant: str) -> bool:
+    try:
+        return _claim_path(verb).read_text(encoding="utf-8") == claimant
+    except OSError:
+        return False
+
+
+def _write_claim(verb: str, claimant: str) -> None:
+    _INSTANCE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp_path = _claim_path(verb).with_suffix(".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as fh:
+        fh.write(claimant)
+    os.chmod(tmp_path, 0o600)
+    os.replace(tmp_path, _claim_path(verb))
 
 
 def _status_from_marker(verb: str, marker: dict[str, object]) -> InstallRequestStatus:
@@ -211,6 +237,53 @@ def create_request(
     _write_legacy_flag(verb)
     logger.info("hermes.install_requests.created verb=%s slug=%s", verb, slug)
     return True, InstallRequestStatus(verb=verb, state="pending", expires_at=_iso(expires_at))
+
+
+def claim_request(verb: str, *, claimant: str) -> ClaimedRequest | None:
+    """Claim a live, unclaimed request for *verb* (install-request.md §4:
+    mutually-exclusive claim between `safent agent` and the open app).
+
+    Returns None when there is nothing live to claim, OR when someone
+    else already holds a live claim (< _CLAIM_TTL_S old) — the caller must
+    back off, never barge in. Re-claiming with the SAME *claimant* while
+    already holding it just refreshes the timestamp (a long-running
+    install renews its own claim instead of losing it mid-flight).
+
+    Never consumes the marker itself — only `resolve_request` does that,
+    once the work is actually done (T016 test: "fallo -> vuelve a pending,
+    no bucle").
+    """
+    marker = _read_marker(verb)
+    if marker is None:
+        return None
+    if _is_expired(marker):
+        _delete_marker(verb)
+        logger.info("hermes.install_requests.expired verb=%s", verb)
+        return None
+    if _has_live_claim(verb) and not _claim_owned_by(verb, claimant):
+        return None
+    _write_claim(verb, claimant)
+    logger.info("hermes.install_requests.claimed verb=%s claimant=%s", verb, claimant)
+    slug = marker.get("slug")
+    return ClaimedRequest(verb=verb, slug=slug if isinstance(slug, str) else None)
+
+
+def resolve_request(verb: str, *, success: bool) -> None:
+    """Release *verb*'s claim. On success ALSO consumes the marker (deleted
+    before the caller acts is the contract's own invariant — this call
+    happens AFTER, so this is the "yes, it truly finished" confirmation).
+    On failure the marker survives: the request returns to `pending` for a
+    future attempt (install-request.md: claimed -> failed(cause) ->
+    pending), never re-executed in a tight loop because releasing the
+    claim does not create a new expiry — the SAME `expires_at` still bounds
+    how long it stays retryable."""
+    with contextlib.suppress(OSError):
+        os.remove(_claim_path(verb))
+    if success:
+        _delete_marker(verb)
+        logger.info("hermes.install_requests.applied verb=%s", verb)
+    else:
+        logger.info("hermes.install_requests.failed verb=%s", verb)
 
 
 def list_live_requests() -> list[InstallRequestStatus]:

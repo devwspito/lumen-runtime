@@ -770,20 +770,86 @@ cmd_logs() { "$RT" logs -f "$NAME"; }
 # the daemon). The backend's POST /api/v1/system/update touches this exact path.
 _UPDATE_FLAG="/var/lib/hermes/instance/.update-requested"
 _UNINSTALL_FLAG="/var/lib/hermes/instance/.uninstall-requested"
+
+# ---- install-request marker consumption (T016, contracts/install-request.md) ----
+# `install_companion`/`repair_companion` are the NEW closed-vocabulary markers
+# (install_requests.py, T006) — a separate mechanism from the legacy flat
+# _UPDATE_FLAG/_UNINSTALL_FLAG above (which this loop keeps watching
+# unchanged; both are dual-written by the daemon today, see that module's
+# own docstring). `install_request_agent_cli` is the ONE implementation of
+# the marker's claim/expiry/consume rules — this loop never re-parses the
+# marker file itself, exactly the "misma implementacion" install-request.md
+# §4 requires of its two readers (this agent, and the open app).
+_AGENT_CLAIMANT="safent-agent-$$"
+
+# Claims *verb*'s live request, if any. Prints the claimed slug (may be
+# empty) to stdout and returns 0; returns 1 with no output when there is
+# nothing to claim right now (no live request, or someone else — the open
+# app — already holds a live claim).
+_claim_install_request() {
+  "$RT" exec "$NAME" python3 -m hermes.shell_server.install_request_agent_cli \
+    claim "$1" --claimant "$_AGENT_CLAIMANT" 2>/dev/null
+}
+
+# Releases *verb*'s claim; on success also consumes the marker so it is
+# never re-run. Best-effort: a failure to reach the daemon here must never
+# crash the agent loop — the marker's own TTL is the backstop.
+_resolve_install_request() {
+  "$RT" exec "$NAME" python3 -m hermes.shell_server.install_request_agent_cli \
+    resolve "$1" "--$2" >/dev/null 2>&1 || true
+}
+
+# One verb, one action: claim -> run the action -> resolve success/failure.
+# Never loops on its own — the outer `cmd_agent` while-loop's `sleep 20`
+# already paces every retry, and a failure leaves the marker `pending`
+# (not re-claimed until the NEXT iteration), so a persistently-failing
+# install polls at the loop's own cadence, never in a tight retry storm.
+#
+# The action runs in a SUBSHELL `( "$2" )`, not a plain call: porcelain
+# failures (_die_porcelain, cmd_companion_install/repair's own failure
+# path) call `exit`, which is correct when that verb runs as its OWN
+# top-level `safent companion install` process, but would otherwise kill
+# THIS whole long-running agent loop too — a subshell scopes that `exit`
+# to just the one attempt.
+_handle_install_request() {  # $1=verb $2=action-function-name
+  _running || return 0
+  _claim_install_request "$1" >/dev/null || return 0
+  echo "[*] $1 requested from the UI — applying…"
+  if ( "$2" ); then
+    _resolve_install_request "$1" success
+  else
+    echo "[!] $1 failed; it stays pending and will be retried." >&2
+    _resolve_install_request "$1" failure
+  fi
+}
+
+# One pass over every marker this agent watches — extracted from cmd_agent's
+# loop so it is independently callable (SAFENT_AGENT_ONCE below, and tests).
+_agent_tick() {
+  # Uninstall wins over update — checked first; it removes everything (incl. this agent).
+  if _running && "$RT" exec "$NAME" test -f "$_UNINSTALL_FLAG" 2>/dev/null; then
+    echo "[*] Uninstall requested from the UI — removing Safent…"
+    cmd_uninstall
+    exit 0
+  fi
+  if _running && "$RT" exec "$NAME" test -f "$_UPDATE_FLAG" 2>/dev/null; then
+    "$RT" exec "$NAME" rm -f "$_UPDATE_FLAG" 2>/dev/null || true
+    echo "[*] Update requested from the UI — applying..."
+    cmd_update || echo "[!] Update failed; re-request it from the UI to retry."
+  fi
+  _handle_install_request install_companion cmd_companion_install
+  _handle_install_request repair_companion cmd_companion_repair
+}
+
 cmd_agent() {
-  echo "[*] Safent update agent running (watches for UI-triggered updates/uninstall)."
+  echo "[*] Safent update agent running (watches for UI-triggered updates/uninstall/companion installs)."
   while :; do
-    # Uninstall wins over update — checked first; it removes everything (incl. this agent).
-    if _running && "$RT" exec "$NAME" test -f "$_UNINSTALL_FLAG" 2>/dev/null; then
-      echo "[*] Uninstall requested from the UI — removing Safent…"
-      cmd_uninstall
-      exit 0
-    fi
-    if _running && "$RT" exec "$NAME" test -f "$_UPDATE_FLAG" 2>/dev/null; then
-      "$RT" exec "$NAME" rm -f "$_UPDATE_FLAG" 2>/dev/null || true
-      echo "[*] Update requested from the UI — applying..."
-      cmd_update || echo "[!] Update failed; re-request it from the UI to retry."
-    fi
+    _agent_tick
+    # Test-only escape hatch (same "env var flips a non-interactive mode"
+    # shape as SAFENT_NO_BROWSER/SAFENT_NO_SELF_UPDATE above): run exactly
+    # one pass instead of looping forever, so the marker-consumption logic
+    # is testable without waiting through a real sleep cycle.
+    [ "${SAFENT_AGENT_ONCE:-0}" = "1" ] && return 0
     sleep 20
   done
 }
@@ -917,6 +983,74 @@ _companion_health_code() {
     --cacert "$COMPANION_STATE/tls/ca.crt" \
     --resolve "$COMPANION_HOST:$COMPANION_PORT:$COMPANION_IP" \
     "https://$COMPANION_HOST:$COMPANION_PORT/mcp/health" 2>/dev/null || true
+}
+
+# ---- companion install|repair (T016) ---------------------------------------
+# Both converge to the SAME target state: provision.sh is already a full
+# reconciler (every one of its steps is "generate/start if absent, skip if
+# already done" — network, TLS, bearer, secrets, SSO keypair, migrations,
+# compose up are ALL idempotent by construction, see provision.sh's own
+# header). `install` (nothing provisioned yet) and `repair` (network/volumes/
+# DB/bearer/SSO half-provisioned, or the compose stack simply unhealthy)
+# therefore share ONE implementation — install-request.md's per-verb TTL
+# (30 min vs 15 min) is the real distinction between the two, not the work
+# itself. `--purge`-style destructive behaviour never lives here.
+#
+# Runs the (potentially minutes-long) image pull + compose up in the
+# background and emits a porcelain heartbeat at least every 5s while it is
+# alive — app-engine.md §3 NFR-001/002 requires progress at least that
+# often, and provision.sh itself is an opaque subprocess with no
+# finer-grained hook. Polls every 1s (not 5s): the loop condition is
+# checked BEFORE each sleep, so a 5s poll would force every call — even one
+# wrapping a sub-second operation — to pay a full 5s tax before ever
+# noticing the child already exited.
+_run_with_heartbeat() {
+  "$@" >&2 &
+  _hb_pid=$!
+  _hb_elapsed=0
+  while kill -0 "$_hb_pid" 2>/dev/null; do
+    sleep 1
+    _hb_elapsed=$((_hb_elapsed + 1))
+    [ $((_hb_elapsed % 5)) -eq 0 ] && _stage_progress "$_hb_elapsed" "" seconds
+  done
+  wait "$_hb_pid"
+}
+
+_companion_install_or_repair() {
+  mkdir -p "$COMPANION_BIN_DIR" 2>/dev/null || true
+  for _cf in provision.sh compose.yaml caps.template.yaml; do
+    _fetch_companion_file "$_cf" || _die_porcelain companion_network_conflict "No se pudo obtener $_cf" true
+  done
+
+  _stage companion_scaffold "Preparando el andamiaje del companion"
+  "$COMPANION_BIN_DIR/provision.sh" --scaffold >&2 \
+    || _die_porcelain companion_network_conflict "No se pudo preparar la red/estado del companion" true
+  _stage_done
+
+  _stage companion_up "Instalando el companion"
+  _run_with_heartbeat "$COMPANION_BIN_DIR/provision.sh" \
+    || _die_porcelain companion_migration_failed "El companion no arranco" true
+  _stage_done
+
+  _stage companion_reload "Registrando el companion en Safent"
+  if _running; then
+    "$RT" exec -u hermes "$NAME" python3 -m hermes.shell_server.companion_reload_cli \
+      reload safent-ads >&2 \
+      || echo "[!] No se pudo recargar el companion en caliente en Safent — 'safent restart' lo recoge igualmente (029 CL-002)." >&2
+  fi
+  _stage_done
+
+  [ "$PORCELAIN" -eq 1 ] || return 0
+}
+
+cmd_companion_install() {
+  _companion_install_or_repair
+  [ "$PORCELAIN" -eq 1 ] || echo "[ok] Companion instalado."
+}
+
+cmd_companion_repair() {
+  _companion_install_or_repair
+  [ "$PORCELAIN" -eq 1 ] || echo "[ok] Companion reparado."
 }
 
 cmd_companion_status() {
@@ -1121,12 +1255,14 @@ cmd_companion_remove() {
 
 cmd_companion() {
   case "${1:-}" in
+    install) cmd_companion_install ;;
+    repair) cmd_companion_repair ;;
     status) cmd_companion_status ;;
     update) cmd_companion_update ;;
     rotate) cmd_companion_rotate ;;
     remove) cmd_companion_remove "${2:-}" ;;
     *)
-      echo "Usage: safent companion status|update|rotate|remove [--purge]" >&2
+      echo "Usage: safent companion install|repair|status|update|rotate|remove [--purge]" >&2
       exit 1
       ;;
   esac
@@ -1499,10 +1635,12 @@ safent - control your local Safent
                                    `safent backup`, then restart. Refuses to overwrite
                                    an existing data volume unless --force is given
 
-  safent companion status            is the companion up? containers, /mcp/health
-  safent companion update            pull the latest companion image and recreate it
-  safent companion rotate            issue a new /mcp bearer on both sides, restart ads-api
-  safent companion remove [--purge]  stop + remove the companion (keeps its state unless --purge)
+  safent companion install            install the companion (idempotent — safe to re-run)
+  safent companion repair             reconcile a half-provisioned companion (same as install)
+  safent companion status             is the companion up? containers, /mcp/health
+  safent companion update             pull the latest companion image and recreate it
+  safent companion rotate             issue a new /mcp bearer on both sides, restart ads-api
+  safent companion remove [--purge]   stop + remove the companion (keeps its state unless --purge)
 
   safent brake release   release the emergency brake without MFA (host access == owner;
                           use only when MFA isn't enrolled yet and no device password
