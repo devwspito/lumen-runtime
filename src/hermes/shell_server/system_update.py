@@ -19,6 +19,11 @@ import urllib.request
 from fastapi import APIRouter, HTTPException, Request
 
 import hermes
+from hermes.shell_server.runtime_manifest import (
+    current_arch_key,
+    fetch_verified_manifest,
+    pieces_for_arch,
+)
 
 logger = logging.getLogger("hermes.shell_server.system_update")
 
@@ -91,12 +96,26 @@ def create_system_update_router() -> APIRouter:
         _auth(request)
         current = str(getattr(hermes, "__version__", "0"))
         latest = _fetch_latest()
-        available = bool(latest) and _parse(latest) > _parse(current)
+        manifest = fetch_verified_manifest()
+        # Fail-closed (Constitution Principle IV): a plain-text VERSION bump
+        # is no longer enough on its own — the signed manifest must ALSO
+        # verify, or no button is shown, regardless of what the unsigned
+        # VERSION file claims (contracts/update.md §2.3).
+        available = bool(latest) and _parse(latest) > _parse(current) and manifest is not None
+        arch_key = current_arch_key()
+        engine_digest = manifest.engine.get(arch_key) if manifest else None
+        companion_digest = None
+        if manifest:
+            companion_digest = manifest.companion.get("safent-ads", {}).get(arch_key)
+        pieces = pieces_for_arch(manifest, arch_key) if manifest else []
         return {
             "current_version": current,
             "latest_version": latest,
             "update_available": available,
             "updating": _updating(),
+            "engine_digest": engine_digest,
+            "companion_digest": companion_digest,
+            "pieces": pieces,
         }
 
     @router.post("/api/v1/system/update")

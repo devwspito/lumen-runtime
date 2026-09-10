@@ -29,9 +29,25 @@ añadirá cuando Windows entre.
 
 ## 2. Manifiesto del motor y del compañero — `runtime-manifest.json`
 
-Vive junto a `latest.json`, firmado con **la misma clave** y verificado con la
-misma clave pública embebida. Es lo que convierte «hay versión nueva» en un hecho
+Vive junto a `latest.json`. Es lo que convierte «hay versión nueva» en un hecho
 comprobable en lugar de una comparación de cadenas.
+
+> **Desviación de contrato registrada (T005, backend-engineer).** Este
+> documento decía originalmente «firmado con la misma clave [minisign]» que
+> `latest.json`. Implementado en su lugar con **Ed25519 crudo, hex**
+> (`hermes.config_sync.signature.verify_bundle`, el verificador que ya existe
+> en este repo para los bundles de política de config_sync) — **clave propia,
+> distinta** de la de Tauri. Motivo: minisign es un requisito externo *duro*
+> de Tauri para `latest.json` (T014/T023, fuera de este módulo); para
+> `runtime-manifest.json` — formato propio de Safent, sin ese requisito —
+> reutilizar el primitivo Ed25519 ya verificado evita introducir un segundo
+> formato criptográfico. Misma propiedad de seguridad (firma inválida ⇒ sin
+> botón, fail-closed). Herramienta de firma:
+> `ops/container/sign_runtime_manifest.py` (`keygen` una vez, `sign` por
+> release). Clave pública desplegada vía `SAFENT_RUNTIME_MANIFEST_PUBKEY`
+> (sin valor por defecto: ausente ⇒ todo manifiesto es no verificable, el
+> fail-closed correcto hasta que el dueño genere el par). Verificador:
+> `hermes.shell_server.runtime_manifest`.
 
 ```jsonc
 {
@@ -161,8 +177,10 @@ Por release, en el mismo destino:
 1. Instaladores firmados y **notarizados** por plataforma (DMG con el ticket
    grapado; .deb y .AppImage).
 2. `latest.json` firmado (`includeUpdaterJson: true`).
-3. `runtime-manifest.json` firmado con la misma clave, con los digests que **ya
-   se publicaron** de `ghcr.io/devwspito/safent` y `…/safent-ads`.
+3. `runtime-manifest.json` firmado con **su propia clave Ed25519** (§2 —
+   `ops/container/sign_runtime_manifest.py sign`, digests que **ya se
+   publicaron** de `ghcr.io/devwspito/safent` y `…/safent-ads`, resueltos por
+   la propia herramienta de registro del pipeline, no por este script).
 4. `VERSION` actualizado (compatibilidad con el chequeo de hoy).
 
 Si falta cualquiera de los cuatro, la release **no se publica**: una app que ve
