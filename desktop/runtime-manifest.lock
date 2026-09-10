@@ -161,7 +161,12 @@
           "mode": "0644"
         }
       ],
-      "staged_bytes_uncompressed": 75379554
+      "staged_bytes_uncompressed": 75379554,
+      "containers_conf_patch": {
+        "sha256": "f5a46fb6d03fc523891ccd27e5b16afe659853576bd3804a7afbbdc59355ffd0",
+        "size_bytes": 278,
+        "note": "Appended by stage-runtime.sh AFTER extracting+verifying the upstream original (see this target's entries[] for containers.conf's own pinned sha256): helper_binaries_dir = [\"$BINDIR/../libexec/podman\", \"$BINDIR\"] under [engine], plus a new [network] section with default_rootless_network_cmd = \"pasta\". Without helper_binaries_dir, a host with any podman already installed silently uses ITS netavark/aardvark-dns/rootlessport instead of the bundled ones (confirmed on the DGX: fell back to system netavark 1.4.0 instead of the bundled 2.1.0 until this was added). $BINDIR is containers-common's own token for \"directory of the currently running podman binary\", resolved fresh at runtime — correct both here and at the app's real ~/.safent/runtime/<version>/ deploy path. Verified live on this DGX (2026-09-10): the bundled podman 6.1.1 + netavark 2.1.0 + this patched containers.conf correctly resolve the bundled pasta (passt 2026_06_11.a9c61ff) and rootless-published a real port end to end, both for a plain alpine listener and for the actual ghcr.io/devwspito/safent:0.8.42 image on port 7517 (HTTP 307 received through the mapped port) — pasta's own --map-guest-addr support was NOT the problem this pair actually has; see research.md for the full investigation."
+      }
     },
     "aarch64-unknown-linux-gnu": {
       "has_machine": false,
@@ -275,7 +280,12 @@
           "mode": "0644"
         }
       ],
-      "staged_bytes_uncompressed": 71149122
+      "staged_bytes_uncompressed": 71149122,
+      "containers_conf_patch": {
+        "sha256": "f5a46fb6d03fc523891ccd27e5b16afe659853576bd3804a7afbbdc59355ffd0",
+        "size_bytes": 278,
+        "note": "Appended by stage-runtime.sh AFTER extracting+verifying the upstream original (see this target's entries[] for containers.conf's own pinned sha256): helper_binaries_dir = [\"$BINDIR/../libexec/podman\", \"$BINDIR\"] under [engine], plus a new [network] section with default_rootless_network_cmd = \"pasta\". Without helper_binaries_dir, a host with any podman already installed silently uses ITS netavark/aardvark-dns/rootlessport instead of the bundled ones (confirmed on the DGX: fell back to system netavark 1.4.0 instead of the bundled 2.1.0 until this was added). $BINDIR is containers-common's own token for \"directory of the currently running podman binary\", resolved fresh at runtime — correct both here and at the app's real ~/.safent/runtime/<version>/ deploy path. Verified live on this DGX (2026-09-10): the bundled podman 6.1.1 + netavark 2.1.0 + this patched containers.conf correctly resolve the bundled pasta (passt 2026_06_11.a9c61ff) and rootless-published a real port end to end, both for a plain alpine listener and for the actual ghcr.io/devwspito/safent:0.8.42 image on port 7517 (HTTP 307 received through the mapped port) — pasta's own --map-guest-addr support was NOT the problem this pair actually has; see research.md for the full investigation."
+      }
     }
   },
   "excluded_targets": {

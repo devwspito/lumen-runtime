@@ -5,6 +5,20 @@ stage-runtime.sh` es el único programa que lo lee y el único que escribe bajo
 `desktop/src-tauri/resources/runtime/` (gitignorado — nunca se commitea el
 runtime en sí, sólo sus pines).
 
+**`desktop/src-tauri/resources/runtime/<triple>/` sólo puede contener ficheros
+YA EXTRAÍDOS** (binarios, `.dylib`, configs, la imagen de máquina `.raw.zst` —
+esa sí es el artefacto final). **Nunca** un `.tgz`/`.zip`/`.pkg`/`.part` de
+descarga, ni siquiera dentro de un subdirectorio oculto gitignorado: el glob de
+`bundle.resources` (`resources/runtime/*/**/*`) barre TODO lo que hay debajo,
+`.dotdirs` incluidos, y Apple notarytool rechazó de verdad la app la primera
+vez que un `.tgz` viajó ahí dentro (inspecciona el contenido no firmado del
+propio archivo). La caché de descargas de `stage-runtime.sh` vive en
+`desktop/.cache/runtime-downloads/<triple>/` — **fuera** de `src-tauri/
+resources/` por completo. Si el pipeline cachea esa carpeta (`actions/cache`),
+la clave/ruta a cachear es esa, no la antigua `resources/runtime/.cache/`.
+`desktop/scripts/tests/test-packaged-layout.sh` falla si algo de esto se
+rompe otra vez.
+
 ## Entrada del script: TRIPLE de Rust, no un nombre corto
 
 ```
@@ -118,6 +132,29 @@ posible del binario empaquetado). El ayudante privilegiado no se ejecuta
 incondicionalmente — sólo cuando una sonda barata (`<podman empaquetado>
 unshare true`) confirma que el kernel lo exige. Detalle completo, con los
 comandos exactos, en `research.md`.
+
+## Publicación de puertos rootless (pasta) — verificado, no era el pasta
+
+Se investigó una sospecha de que el `pasta` empaquetado por `podman-static`
+v6.1.1 (`passt 2026_06_11.a9c61ff`) fuera demasiado antiguo para el
+`--map-guest-addr` que podman 6.1.1 invoca — **no se reprodujo**: el propio
+binario `--help` ya lista esa opción, y se probó en vivo, dos veces, con el
+podman/netavark/pasta EMPAQUETADOS reales (no el del sistema): un contenedor
+alpine con `-p 127.0.0.1:PORT:80` y la imagen real
+`ghcr.io/devwspito/safent:0.8.42` con `-p 127.0.0.1:PORT:7517` — ambos
+respondieron por curl (HTTP 307 en el segundo caso). El hallazgo real, sí
+confirmado y corregido: sin `helper_binaries_dir` en `containers.conf`, el
+podman empaquetado usaba en silencio el netavark **del sistema** (1.4.0) en
+vez del empaquetado (2.1.0) en esta misma DGX. `stage-runtime.sh` ahora
+parchea el `containers.conf` extraído (`lib/patch-containers-conf.sh`) con
+`helper_binaries_dir = ["$BINDIR/../libexec/podman", "$BINDIR"]` (`$BINDIR` es
+el token de containers-common para "directorio del podman que se está
+ejecutando ahora", resuelto en tiempo real — válido tanto aquí como en el
+destino final `~/.safent/runtime/<versión>/`) + `default_rootless_network_cmd
+= "pasta"`. `conmon_path`/el runtime OCI (crun) usan un mecanismo DISTINTO que
+no entiende `$BINDIR` — pendiente para quien cablee la invocación real
+(T009/T011): pasarle rutas absolutas explícitas en tiempo de ejecución, no
+algo fijado en este fichero en tiempo de stage.
 
 ## Actualizador de Tauri: clave y manifiestos
 
