@@ -5,6 +5,52 @@ stage-runtime.sh` es el único programa que lo lee y el único que escribe bajo
 `desktop/src-tauri/resources/runtime/` (gitignorado — nunca se commitea el
 runtime en sí, sólo sus pines).
 
+## El CLI `safent` + sus vecinos también viven aquí (decisión, revisión de
+## empaquetado Linux, `specs/028-safent-app-nativa/verificacion-paquete-linux.md`)
+
+Hallazgo bloqueante: el paquete firmado (.deb/.rpm/AppImage) no llevaba el CLI
+`safent` en ningún sitio — `boot.rs::resolve_config` lo resuelve como
+`runtime_dir.join("safent")`, así que la app empaquetada no podía invocar
+ningún verbo del contrato. **Decisión: se quedan en `stage-runtime.sh`/
+`runtime-manifest.lock`, no en `bundle.resources` aparte.** Alternativa
+descartada — un SEGUNDO patrón de `tauri.bundle.conf.json` apuntando
+directamente a `./safent`/`ops/container/...`: habría introducido una SEGUNDA
+fuente de verdad para qué vive bajo `resources/runtime/`, exactamente lo que
+este documento existe para evitar (una única fuente, un único escritor).
+
+`stage-runtime.sh` copia, **planos** (mismo nombre de fichero, sin
+subcarpetas — igual que el resto del árbol una vez lo aplana el glob de
+Tauri), estos cinco ficheros del propio checkout (nunca se descargan — no son
+un tercero fijado, son código de este repo):
+
+| Origen (relativo a la raíz del repo) | Nombre plano en el paquete |
+|---|---|
+| `safent` | `safent` |
+| `ops/container/run-safent.sh` | `run-safent.sh` |
+| `ops/container/companions/ads/provision.sh` | `provision.sh` |
+| `ops/container/companions/ads/compose.yaml` | `compose.yaml` |
+| `ops/container/companions/ads/caps.template.yaml` | `caps.template.yaml` |
+
+Dos escrituras distintas, con semántica distinta:
+
+1. **`runtime-manifest.lock` → `.app_files`** — igual de comprometido que
+   `.targets[]`, pero **recalculado en cada ejecución** desde el checkout
+   actual, no fijado a mano contra una fuente externa: es código nuestro, no
+   un tercero. Sirve de provenance/auditoría (qué hash tenía `safent` en el
+   momento de este build), no de verificación en tiempo de ejecución.
+2. **`resources/runtime/<triple>/runtime-bundle.json`** — generado también en
+   cada ejecución, **dentro del árbol staged** (gitignorado, viaja con el
+   paquete). Es lo que `cmd_stage_runtime` (`safent`) lee de verdad en el
+   equipo del dueño — `bundle_dir/runtime-bundle.json`, sentado junto al
+   propio script una vez aplanado — para copiar y verificar por sha256 cada
+   fichero (podman **y** estos cinco) hacia `$SAFENT_STATE_HOME/runtime/
+   <versión>/` antes del primer uso real (data-model.md, invariante
+   `RuntimeBundle`: «un binario que no verifica no se ejecuta jamás»).
+
+`normalize-staged-tree.sh`'s `_EXECUTABLE_BASENAMES` incluye `safent`,
+`run-safent.sh` y `provision.sh` (0755); `compose.yaml`/`caps.template.yaml`
+quedan en el 0644 por defecto.
+
 ## Entrada del script: TRIPLE de Rust, no un nombre corto
 
 ```

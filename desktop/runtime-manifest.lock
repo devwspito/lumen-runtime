@@ -281,5 +281,45 @@
   "excluded_targets": {
     "x86_64-apple-darwin": "containers/podman v6.1.1 no publica podman-installer-macos-amd64.pkg (solo arm64 + darwin_arm64 remote-only). Consistente con contracts/update.md: 'darwin-x86_64 ausente a proposito: Mac Intel no esta servido'. No hay nada barato que empaquetar; no se intenta."
   },
-  "target_key_format": "Rust target triple (matches agents-autonomy/safent-desktop.yml's build matrix): aarch64-apple-darwin, x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu. x86_64-apple-darwin is a recognized-but-excluded triple (see excluded_targets)."
+  "target_key_format": "Rust target triple (matches agents-autonomy/safent-desktop.yml's build matrix): aarch64-apple-darwin, x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu. x86_64-apple-darwin is a recognized-but-excluded triple (see excluded_targets).",
+  "app_files": {
+    "note": "safent CLI + host launcher + companion provisioning assets — REPO content, recomputed by stage-runtime.sh from the current checkout on every run, never hand-pinned like targets[].entries.",
+    "entries": [
+      {
+        "repo_path": "safent",
+        "flat_name": "safent",
+        "sha256": "3d47444d94fae247819c8cee16abcdc9276c60a8dd613289240d45498e89ac5e",
+        "size_bytes": 87127,
+        "mode": "0755"
+      },
+      {
+        "repo_path": "ops/container/run-safent.sh",
+        "flat_name": "run-safent.sh",
+        "sha256": "b2a2b45624ac671428efcc68195f8528e4dbeaab1aad58a8ae2278c0c6afcb58",
+        "size_bytes": 13923,
+        "mode": "0755"
+      },
+      {
+        "repo_path": "ops/container/companions/ads/provision.sh",
+        "flat_name": "provision.sh",
+        "sha256": "eeef14235363daa6dca2f1ff5fa77745f15d162d6451fdc99de8636d0b39974d",
+        "size_bytes": 24031,
+        "mode": "0755"
+      },
+      {
+        "repo_path": "ops/container/companions/ads/compose.yaml",
+        "flat_name": "compose.yaml",
+        "sha256": "502fd5789a8786c21ef758180ff11eb2070fb392c3833334c1021e321197d08d",
+        "size_bytes": 8453,
+        "mode": "0644"
+      },
+      {
+        "repo_path": "ops/container/companions/ads/caps.template.yaml",
+        "flat_name": "caps.template.yaml",
+        "sha256": "1de55a12095a22abc94b4b5a32594f55d73060b46016163a2cbe7aa8373cc94a",
+        "size_bytes": 1331,
+        "mode": "0644"
+      }
+    ]
+  }
 }
