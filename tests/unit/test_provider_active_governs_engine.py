@@ -39,7 +39,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID
 
 import pytest
@@ -184,6 +184,33 @@ class TestConfigureNativeProviderSetActiveGating:
 
 
 # ---------------------------------------------------------------------------
+# A2. list_native_providers — curated default_model suggestion (PROV-02)
+# ---------------------------------------------------------------------------
+
+
+class TestListNativeProvidersDefaultModel:
+    def test_curated_ids_carry_a_default_model(self, tmp_path: Path, _hermes_home: Path) -> None:
+        wiring = _make_wiring(tmp_path)
+        # NOTE: MagicMock(name=...) reserves `name` for the mock's own repr —
+        # it does NOT set a `.name` attribute. Assign it after construction so
+        # list_native_providers' `getattr(cfg, "name", pid)` sees a real string.
+        anthropic_cfg = MagicMock()
+        anthropic_cfg.name = "Anthropic"
+        made_up_cfg = MagicMock()
+        made_up_cfg.name = "Made Up"
+        registry = {"anthropic": anthropic_cfg, "made-up-id": made_up_cfg}
+        with patch.dict("sys.modules", {"hermes_cli.auth": MagicMock(PROVIDER_REGISTRY=registry)}):
+            out = wiring.list_native_providers()
+
+        by_id = {row["provider_id"]: row for row in out}
+        # Curated id: the UI's "Add/Connect" form can pre-fill this.
+        assert by_id["anthropic"]["default_model"] == "claude-sonnet-4-6"
+        # Non-curated id: "" (not missing) — the field still starts empty and
+        # editable rather than absent, so the frontend never has to special-case it.
+        assert by_id["made-up-id"]["default_model"] == ""
+
+
+# ---------------------------------------------------------------------------
 # B. set_active_provider — native (non-UUID) ids
 # ---------------------------------------------------------------------------
 
@@ -246,6 +273,33 @@ class TestSetActiveProviderNativeIds:
         assert result["ok"] is False
         assert "anthropic" in result["error"]
 
+    def test_native_id_with_key_but_no_model_refuses_to_activate(
+        self, tmp_path: Path, _hermes_home: Path
+    ) -> None:
+        """specs/025-safent-repaso PROV-02 — the UI's Add/Connect body is
+        configureNativeProvider({provider_id, api_key}), with NO `model`.
+        Activating that provider must raise loudly (-> 422 in REST, see
+        SetActiveProvider in the adapter) instead of writing config.yaml
+        with model.provider set and no model.default, which used to crash
+        the FIRST chat turn with HermesModelNotConfiguredError instead of
+        failing here, clearly."""
+        wiring = _make_wiring(tmp_path)
+        with (
+            patch(f"{_DBUS_MODULE}._write_hermes_model_config") as mock_write_model,
+            patch.dict("sys.modules", {"hermes_cli.auth": MagicMock(PROVIDER_REGISTRY=_FAKE_REGISTRY)}),
+        ):
+            # Exactly the UI's current body: no `model` at all.
+            wiring.configure_native_provider(
+                provider_id="anthropic", api_key="sk-ant", model="",
+                base_url="", sender_uid=1000, set_active=False,
+            )
+
+            with pytest.raises(ValueError, match="anthropic.*modelo"):
+                wiring.set_active_provider(provider_id="anthropic", sender_uid=1000)
+
+        # The broken config (provider set, no default) must NEVER be written.
+        mock_write_model.assert_not_called()
+
     def test_sql_uuid_path_is_unaffected(self, tmp_path: Path, _hermes_home: Path) -> None:
         """Regression guard: the pre-existing SQL-repo UUID path (custom
         providers added via POST /providers) must keep working exactly as
@@ -275,6 +329,98 @@ class TestSetActiveProviderNativeIds:
             wiring.set_active_provider(provider_id=saved["provider_id"], sender_uid=1000)
 
         mock_write_model.assert_called_once_with("openai-api", "gpt-5.4-nano", "")
+
+
+# ---------------------------------------------------------------------------
+# B2. test_provider — native (non-UUID) ids (specs/025-safent-repaso PROV-03)
+# ---------------------------------------------------------------------------
+#
+# Before the fix, test_provider did `pid = _UUID(provider_id)` unconditionally.
+# A native catalogue id ("anthropic", "gemini"...) is not a UUID, so this
+# raised ValueError — uncaught, it crosses the D-Bus boundary as a generic
+# error that dbus_proxy._translate_dbus_error can't match to any
+# org.hermes.Error.* name, so it falls through to AgentUnavailable. The REST
+# route then reports 200 {"ok": false, "error": "daemon_unavailable"} for
+# EVERY native "Test" click, valid key or not, and the card never activates.
+
+
+class TestTestProviderNativeIds:
+    async def test_native_id_reaches_the_real_validator_instead_of_crashing(
+        self, tmp_path: Path, _hermes_home: Path
+    ) -> None:
+        wiring = _make_wiring(tmp_path)
+        with patch.dict("sys.modules", {"hermes_cli.auth": MagicMock(PROVIDER_REGISTRY=_FAKE_REGISTRY)}):
+            # Save a key + model WITHOUT activating (mirrors the UI's
+            # "Add/Connect" step before the "Test" click).
+            wiring.configure_native_provider(
+                provider_id="anthropic", api_key="sk-ant-real", model="claude-x",
+                base_url="", sender_uid=1000, set_active=False,
+            )
+
+            with patch(
+                f"{_DBUS_MODULE}._nous_validate_model_string",
+                new=AsyncMock(return_value=(True, None)),
+            ) as mock_validate:
+                result = await wiring.test_provider(provider_id="anthropic", sender_uid=1000)
+
+        assert result == {"ok": True, "error": None}
+        mock_validate.assert_awaited_once_with("anthropic/claude-x", "sk-ant-real", "")
+
+    async def test_unknown_native_id_fails_soft_not_valueerror(
+        self, tmp_path: Path, _hermes_home: Path
+    ) -> None:
+        wiring = _make_wiring(tmp_path)
+        with patch.dict("sys.modules", {"hermes_cli.auth": MagicMock(PROVIDER_REGISTRY=_FAKE_REGISTRY)}):
+            result = await wiring.test_provider(provider_id="not-a-real-provider", sender_uid=1000)
+        assert result == {"ok": False, "error": "provider desconocido: not-a-real-provider"}
+
+    async def test_native_id_without_saved_key_fails_soft(
+        self, tmp_path: Path, _hermes_home: Path
+    ) -> None:
+        """A native provider never configured (no key in .env) must report a
+        clear reason, not crash and not silently probe with an empty key."""
+        wiring = _make_wiring(tmp_path)
+        with patch.dict("sys.modules", {"hermes_cli.auth": MagicMock(PROVIDER_REGISTRY=_FAKE_REGISTRY)}):
+            result = await wiring.test_provider(provider_id="anthropic", sender_uid=1000)
+        assert result["ok"] is False
+        assert "anthropic" in result["error"]
+
+    async def test_native_id_without_model_fails_soft(
+        self, tmp_path: Path, _hermes_home: Path
+    ) -> None:
+        """specs/025-safent-repaso PROV-02 companion case: a key saved with NO
+        model (the UI's configureNativeProvider({provider_id, api_key}) body,
+        no `model`) must not crash test_provider either."""
+        wiring = _make_wiring(tmp_path)
+        with patch.dict("sys.modules", {"hermes_cli.auth": MagicMock(PROVIDER_REGISTRY=_FAKE_REGISTRY)}):
+            wiring.configure_native_provider(
+                provider_id="anthropic", api_key="sk-ant-real", model="",
+                base_url="", sender_uid=1000, set_active=False,
+            )
+            result = await wiring.test_provider(provider_id="anthropic", sender_uid=1000)
+        assert result == {"ok": False, "error": "anthropic no tiene modelo configurado"}
+
+    async def test_sql_uuid_path_is_unaffected(self, tmp_path: Path, _hermes_home: Path) -> None:
+        """Regression guard: a real SQL-repo provider (custom, UUID id) must
+        keep going through _nous_validate_provider — only non-UUID ids take
+        the new native branch."""
+        wiring = _make_wiring(tmp_path)
+        draft = json.dumps({
+            "kind": "openai", "alias": "t", "default_model": "gpt-5.4-nano",
+            "api_key": "sk-test", "set_active": False,
+        })
+        saved = wiring.add_provider(draft_json=draft, sender_uid=1000)
+        UUID(saved["provider_id"])  # sanity: really a UUID
+
+        with (
+            patch(f"{_DBUS_MODULE}._nous_validate_provider", new=AsyncMock(return_value=(True, None))) as mock_sql,
+            patch.object(wiring, "_test_native_provider", new=AsyncMock()) as mock_native,
+        ):
+            result = await wiring.test_provider(provider_id=saved["provider_id"], sender_uid=1000)
+
+        assert result == {"ok": True, "error": None}
+        mock_sql.assert_awaited_once()
+        mock_native.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +461,45 @@ class TestClearRuntimeProviderCache:
 
         assert first[0]["provider"] == "gemini"
         assert second[0]["provider"] == "anthropic"
+        assert calls == ["gemini", "anthropic"]
+
+    def test_slow_resolve_does_not_poison_cache_after_concurrent_clear(self) -> None:
+        """PROV-05 — the ~30-70s "switch takes a while" symptom is a write-
+        after-clear race, not a missing invalidation call: _resolve_hermes_
+        runtime() runs OUTSIDE the lock (it's a blocking disk/SDK read), so a
+        resolve that started BEFORE a switch can still be mid-flight when
+        clear_runtime_provider_cache() runs, and then write its STALE result
+        back into the cache AFTER the clear — re-poisoning it with the OLD
+        provider for a full new 30s TTL window even though the switch (and
+        config.yaml) already moved on. Reproduces the exact matrix pattern:
+        turn #1 (in flight before the switch) correctly returns the OLD
+        provider; turn #2 (issued AFTER the switch) must NOT inherit turn
+        #1's stale write."""
+        from hermes.runtime import nous_engine
+
+        engine_id = 888
+        calls: list[str] = []
+
+        def _fake_resolve(model_config):
+            calls.append(model_config)
+            if len(calls) == 1:
+                # The owner switches providers (and the daemon clears the
+                # cache) WHILE this first resolve is still running.
+                nous_engine.clear_runtime_provider_cache()
+            return ({"provider": model_config}, "bare-model")
+
+        with patch.object(nous_engine, "_resolve_hermes_runtime", side_effect=_fake_resolve):
+            first = nous_engine._cached_resolve_hermes_runtime(engine_id, "gemini")
+            second = nous_engine._cached_resolve_hermes_runtime(engine_id, "anthropic")
+
+        assert first[0]["provider"] == "gemini"
+        assert second[0]["provider"] == "anthropic"
+        # The critical assertion: turn #2 must have MISSED the cache and
+        # recomputed. Without the epoch guard, turn #1's write-back (which
+        # runs AFTER the clear but is unconditional) wins the race and turn
+        # #2 reads it straight from cache — same failure mode as before the
+        # fix, just moved one layer down: "invalidated but immediately
+        # re-poisoned" instead of "never invalidated".
         assert calls == ["gemini", "anthropic"]
 
 

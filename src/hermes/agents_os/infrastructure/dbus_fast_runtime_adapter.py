@@ -749,9 +749,16 @@ class Runtime1ServiceInterface(ServiceInterface):
     @method()
     async def SetActiveProvider(self, provider_id: "s") -> "s":  # noqa: N802,F821,UP037
         sender_uid = await self._resolve_current_sender_uid()
-        result = self._wiring.set_active_provider(
-            provider_id=provider_id, sender_uid=sender_uid
-        )
+        try:
+            result = self._wiring.set_active_provider(
+                provider_id=provider_id, sender_uid=sender_uid
+            )
+        except ValueError as exc:
+            # specs/025-safent-repaso PROV-02: activating a native provider
+            # with no model recorded (e.g. never configured with one) must
+            # reach the caller as a clear 422, not silently write a
+            # model.provider-without-model.default config.yaml.
+            raise DBusError("org.hermes.Error.InvalidInput", str(exc)) from exc
         self._schedule_byok_mcp_rewire()
         return json.dumps(result)
 
@@ -1558,7 +1565,8 @@ class Runtime1ServiceInterface(ServiceInterface):
     async def ForgetMemoryEntry(self, entry_id: "s") -> "s":  # noqa: N802,F821,UP037
         """Olvida (borra) una entrada de memoria por su id '{target}:{index}'.
 
-        Idempotente: devuelve {ok:true} aunque la entrada ya haya sido borrada.
+        {ok:false, code:"not_found"} si la entrada no existe (nunca existió o
+        ya se borró) — la capa REST lo traduce a 404.
         authZ: operador (sender_uid del bus, CWE-862).
         PII: el contenido NUNCA cruza el bus ni se loguea.
         """

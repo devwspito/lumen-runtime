@@ -73,6 +73,28 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("hermes.agents_os.dbus_runtime_service")
 
+# Suggested default model per NATIVE catalogue provider_id (hermes_cli.auth.
+# PROVIDER_REGISTRY key) — surfaced by list_native_providers() so the UI's
+# "Add/Connect" card can pre-fill (and let the owner edit) a model instead of
+# configuring a provider with none at all (specs/025-safent-repaso PROV-02:
+# configureNativeProvider({provider_id, api_key}) never sent `model`, so
+# config.yaml ended up with model.provider set and NO model.default, and the
+# first chat died with HermesModelNotConfiguredError). Mirrors the same
+# per-id table the Lumen desktop compositor already uses for this exact
+# purpose (lumen/compositor/qml/desktop/ProviderGate.qml `defaultModels`).
+# Deliberately NOT exhaustive over the 37+ registry entries: an id missing
+# here just means the UI field starts empty and the owner types one — never
+# a hard requirement to keep this table in lockstep with the registry.
+_NATIVE_DEFAULT_MODEL: dict[str, str] = {
+    "anthropic": "claude-sonnet-4-6",
+    "openai-api": "gpt-5.4-nano",
+    "gemini": "gemini-2.5-flash",
+    "deepseek": "deepseek-chat",
+    "kimi-coding": "kimi-k2",
+    "xai": "grok-4",
+    "ollama-cloud": "llama3.1",
+}
+
 
 def _parse_redacted_params(raw: object) -> dict:
     """Parse the JSON-text parameters_redacted column back to a dict.
@@ -1028,6 +1050,14 @@ class DbusRuntimeServiceWiring:
         (configure_native_provider guardó su clave en .env y su último
         modelo en native_providers.json) — sin pedir de nuevo la api key.
         {ok:false, error} si el provider no existe o no tiene clave guardada.
+
+        Levanta ValueError (→ 422 en REST, ver SetActiveProvider en el
+        adapter) si nunca se recordó un modelo para este provider — activar
+        sin uno dejaría config.yaml con `model.provider` pero SIN
+        `model.default`, y el primer chat moriría con
+        HermesModelNotConfiguredError en vez de fallar aquí, claro (PROV-02:
+        la UI llamaba a configureNativeProvider({provider_id, api_key}), sin
+        `model`, y esta función lo activaba igual).
         """
         try:
             from hermes_cli.auth import PROVIDER_REGISTRY  # noqa: PLC0415
@@ -1045,6 +1075,11 @@ class DbusRuntimeServiceWiring:
                 "error": f"{provider_id} no está configurado todavía (sin api key guardada)",
             }
         model, base_url = _recall_native_provider_model(provider_id)
+        if not model:
+            raise ValueError(
+                f"{provider_id} no tiene un modelo configurado — indica uno "
+                "(configureNativeProvider con `model`) antes de activarlo"
+            )
         try:
             _write_hermes_model_config(provider_id, model, base_url)
         except Exception as exc:  # noqa: BLE001
@@ -1062,14 +1097,59 @@ class DbusRuntimeServiceWiring:
         logger.info("hermes.dbus.native_provider_reactivated id=%s", provider_id)
         return _read_native_active() or {"ok": True, "provider_id": provider_id}
 
+    async def _test_native_provider(self, *, provider_id: str) -> dict:
+        """Prueba un provider del catálogo NATIVO (sin fila en el repo SQL)
+        contra el runtime real — misma clave/modelo que _set_active_native_provider
+        recuerda de configure_native_provider. {ok, error}; {ok:false, error}
+        si el provider es desconocido o aún no tiene clave/modelo guardados
+        (mismo patrón fail-soft que _set_active_native_provider).
+        """
+        try:
+            from hermes_cli.auth import PROVIDER_REGISTRY  # noqa: PLC0415
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.native_test_unavailable: %s", exc)
+            return {"ok": False, "error": "hermes_cli no disponible"}
+        cfg = PROVIDER_REGISTRY.get(provider_id)
+        if cfg is None:
+            return {"ok": False, "error": f"provider desconocido: {provider_id}"}
+        env_vars = getattr(cfg, "api_key_env_vars", ()) or ()
+        key = next((v for v in (_read_hermes_env(ev) for ev in env_vars) if v), None) if env_vars else None
+        if env_vars and not key:
+            return {
+                "ok": False,
+                "error": f"{provider_id} no está configurado todavía (sin api key guardada)",
+            }
+        model, base_url = _recall_native_provider_model(provider_id)
+        if not model:
+            return {"ok": False, "error": f"{provider_id} no tiene modelo configurado"}
+        try:
+            ok, err = await _nous_validate_model_string(f"{provider_id}/{model}", key, base_url)
+        except Exception as exc:  # noqa: BLE001
+            ok, err = False, f"{type(exc).__name__}: {str(exc)[:300]}"
+        return {"ok": ok, "error": err}
+
     async def test_provider(self, *, provider_id: str, sender_uid: int) -> dict:
         """Valida el provider a través del runtime REAL (Nous), no de un dialecto
         paralelo: resuelve el ModelConfig como el daemon + una completion mínima
-        por hermes-agent. {ok, error}. Mantiene 'idioma de Hermes'."""
+        por hermes-agent. {ok, error}. Mantiene 'idioma de Hermes'.
+
+        provider_id UUID → fila del repo SQL (comportamiento original).
+        provider_id no-UUID → id del catálogo nativo (p.ej. "anthropic",
+        "gemini"): antes esto reventaba _UUID() con ValueError, que dbus-fast
+        entrega como un error genérico — el proxy REST lo traducía a
+        AgentUnavailable y la tarjeta SIEMPRE veía 200 {"ok":false,
+        "error":"daemon_unavailable"}, aunque la clave fuese válida (nunca
+        activaba). Mismo bug/mismo arreglo que set_active_provider — ver
+        specs/025-safent-repaso PROV-03.
+        """
         self._authorize_and_resolve(sender_uid, operation="test_provider")
         from uuid import UUID as _UUID  # noqa: PLC0415
 
-        pid = _UUID(provider_id)
+        try:
+            pid = _UUID(provider_id)
+        except ValueError:
+            return await self._test_native_provider(provider_id=provider_id)
+
         provider = self._provider_repo.get(provider_id=pid)
         api_key = self._provider_repo.reveal_api_key(provider_id=pid)
         try:
@@ -2710,6 +2790,10 @@ class DbusRuntimeServiceWiring:
                 "auth_type": getattr(cfg, "auth_type", "api_key"),
                 "base_url": getattr(cfg, "inference_base_url", "") or "",
                 "env_vars": list(getattr(cfg, "api_key_env_vars", ()) or ()),
+                # Suggested model to pre-fill the "Add/Connect" form with — the
+                # owner can still overwrite it. "" when this id has no curated
+                # suggestion (_NATIVE_DEFAULT_MODEL is not exhaustive).
+                "default_model": _NATIVE_DEFAULT_MODEL.get(pid, ""),
             })
         return out
 
@@ -4765,8 +4849,10 @@ class DbusRuntimeServiceWiring:
     def delete_memory_entry(self, *, entry_id: str, sender_uid: int) -> dict:
         """Olvida (borra) una entrada de memoria por su id compuesto '{target}:{index}'.
 
-        Operación idempotente: si la entrada ya no existe devuelve {ok: true}
-        (sin lanzar) para que el frontend pueda hacer DELETE seguro.
+        Si la entrada no existe (nunca existió o ya se borró — no hay
+        tombstone, es el mismo estado) devuelve {ok:false, code:"not_found"}
+        para que la capa REST responda 404, igual que GET/PUT sobre el mismo
+        id (specs/025-safent-repaso MEM-06).
         PII: el contenido NUNCA se loguea, sólo el target e índice (metadatos).
         authZ: operador (sender_uid).
         """
@@ -4806,8 +4892,14 @@ class DbusRuntimeServiceWiring:
             return {"ok": False, "error": f"cannot read target {target!r}: {exc}"}
 
         if entry_index >= len(entries):
-            # Idempotent: already gone.
-            return {"ok": True, "deleted": False, "reason": "entry not found (already removed)"}
+            # specs/025-safent-repaso MEM-06: this used to be treated as
+            # idempotent-success ({ok:true, deleted:false}) — but there is no
+            # tombstone here (removal just shrinks the list), so "never
+            # existed" and "already removed" are the SAME state and both must
+            # read as not-found, matching GET (404) and PUT (400) for the
+            # same id instead of silently reporting a delete that never
+            # happened as a success.
+            return {"ok": False, "code": "not_found", "error": "memory entry not found"}
 
         old_text = entries[entry_index]
         result = store.remove(target, old_text)
@@ -5601,31 +5693,47 @@ class DbusRuntimeServiceWiring:
 
 
 async def _nous_validate_provider(provider: Any, api_key: str | None) -> "tuple[bool, str | None]":
-    """Valida un provider EJECUTANDO el runtime real (hermes-agent) en el daemon.
+    """Valida un provider SQL (shell_server.providers.domain.Provider) EJECUTANDO
+    el runtime real (hermes-agent) en el daemon. Ver _nous_validate_model_string
+    para el camino compartido con el catálogo NATIVO (test_provider, id no-UUID).
+    """
+    from hermes.shell_server.providers.domain import litellm_model_string  # noqa: PLC0415
 
-    Mismo camino que el chat: resolve_runtime_provider (idioma de Hermes) + una
-    completion mínima sin tools. NO litellm, NO shell-server. Corre en el daemon
-    (6G, sin OOM). Devuelve (ok, error_real_del_proveedor).
+    model = litellm_model_string(provider, provider.default_model)
+    return await _nous_validate_model_string(model, api_key, provider.base_url)
+
+
+async def _nous_validate_model_string(
+    model: str, api_key: str | None, base_url: str | None
+) -> "tuple[bool, str | None]":
+    """Valida un `<provider_id>/<model>' EJECUTANDO el runtime real (hermes-agent)
+    en el daemon — mismo camino que el chat: resolve_runtime_provider (idioma de
+    Hermes) + una completion mínima sin tools. NO litellm, NO shell-server. Corre
+    en el daemon (6G, sin OOM). Devuelve (ok, error_real_del_proveedor).
 
     Migrado (spec 016): usa el catálogo unificado vía nous_request_from_model_config
     en lugar del antiguo _HERMES_SLUG_BY_PREFIX (que tenía 'openai'→'openai-api',
     slug inválido que causaba AuthError).
+
+    Extraído de _nous_validate_provider (specs/025-safent-repaso PROV-03) para que
+    el catálogo NATIVO (ids que no son UUID: "anthropic", "gemini"…) pueda probarse
+    sin construir un Provider SQL falso — ambos caminos ya producían el MISMO
+    '<provider_id>/<model>' vía litellm_model_string, así que el string es la
+    única entrada real que este helper necesita.
     """
     import asyncio  # noqa: PLC0415
 
-    from hermes.shell_server.providers.domain import litellm_model_string  # noqa: PLC0415
     from hermes.runtime.model_config import ModelConfig  # noqa: PLC0415
     from hermes.providers.infrastructure.nous_provider_adapter import (  # noqa: PLC0415
         nous_request_from_model_config,
     )
 
-    model = litellm_model_string(provider, provider.default_model)
     # Build a temporary ModelConfig to reuse nous_request_from_model_config.
-    # api_key comes from the caller (already decrypted by the D-Bus handler).
+    # api_key comes from the caller (already decrypted/looked-up by the D-Bus handler).
     temp_config = ModelConfig.from_provider(
         model=model,
         api_key=api_key,
-        base_url=provider.base_url or None,
+        base_url=base_url or None,
     )
     req, bare = nous_request_from_model_config(temp_config)
 
