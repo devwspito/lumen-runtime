@@ -75,6 +75,66 @@ class TestRuntimeCapabilityGrantsRefer:
         rule = next(r for r in spec.rules if r.path == "/var")
         assert AccessRight.WRITE_FILE not in rule.accesses
 
+    def test_refer_does_not_reach_paths_that_never_needed_it(self) -> None:
+        """Least privilege (security review 2026-09-10 MEDIUM follow-up):
+        REFER is granted ONLY on /var/lib/hermes — the one live-verified
+        need (MCP-04) — not by blanket symmetry across every RW path."""
+        spec = LandlockRulesetBuilder().build(Capability.RUNTIME)
+        for rule in spec.rules:
+            if rule.path == "/var/lib/hermes":
+                continue
+            assert AccessRight.REFER not in rule.accesses, rule.path
+
+
+class TestRefIsRuntimeOnlyNotBrowserController:
+    """Security review 2026-09-10 (MEDIUM finding, CWE-732): REFER used to
+    live IN the shared `_RUNTIME_RW` frozenset, so `Capability.
+    BROWSER_CONTROLLER` — a deliberately tighter profile that reuses that
+    same set on /run, /tmp, /dev, browser-sessions, and /var/lib/hermes/tmp
+    specifically to deny master.key (see that capability's own comment) —
+    silently gained it too. Before this fix every cross-directory rename in
+    that ruleset was unconditionally denied; this pins that RUNTIME keeps
+    REFER (the MCP-04 fix) while BROWSER_CONTROLLER does not regain it."""
+
+    def test_runtime_handled_mask_has_refer(self) -> None:
+        spec = LandlockRulesetBuilder().build(Capability.RUNTIME)
+        assert AccessRight.REFER in spec.handled_access_fs
+
+    def test_browser_controller_handled_mask_does_not_have_refer(self) -> None:
+        spec = LandlockRulesetBuilder().build(Capability.BROWSER_CONTROLLER)
+        assert AccessRight.REFER not in spec.handled_access_fs
+
+    def test_no_browser_controller_rule_grants_refer(self) -> None:
+        spec = LandlockRulesetBuilder().build(Capability.BROWSER_CONTROLLER)
+        for rule in spec.rules:
+            assert AccessRight.REFER not in rule.accesses, rule.path
+
+    def test_browser_controller_keeps_every_other_right_unchanged(self) -> None:
+        """The fix must not narrow anything the controller already had —
+        only stop it from gaining REFER. Every rule keeps the exact same
+        non-REFER rights it had before this fix (WRITE_FILE/MAKE_REG/
+        REMOVE_FILE/etc — see _RUNTIME_RW)."""
+        from hermes.agents_os.infrastructure.landlock_ruleset_builder import _RUNTIME_RW
+
+        spec = LandlockRulesetBuilder().build(Capability.BROWSER_CONTROLLER)
+        rw_paths = {"/run", "/tmp", "/dev", "/var/lib/hermes/browser-sessions", "/var/lib/hermes/tmp"}
+        for rule in spec.rules:
+            if rule.path in rw_paths:
+                assert rule.accesses == _RUNTIME_RW, rule.path
+
+    @pytest.mark.parametrize(
+        "capability",
+        [c for c in Capability if c not in (Capability.RUNTIME, Capability.BROWSER_CONTROLLER)],
+    )
+    def test_no_other_capability_was_touched_by_this_fix(self, capability: Capability) -> None:
+        """Audits every OTHER capability too (matching the review's own
+        diligence) — REFER must appear nowhere outside RUNTIME."""
+        try:
+            spec = LandlockRulesetBuilder().build(capability)
+        except ValueError:
+            pytest.skip(f"{capability} needs template params (e.g. BROWSER session)")
+        assert AccessRight.REFER not in spec.handled_access_fs, capability
+
 
 class TestAggregated:
     def test_multiple_caps_sorted(self) -> None:
