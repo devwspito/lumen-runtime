@@ -168,9 +168,10 @@ class TestVerifyMinisign:
 
 
 class TestIsPlaceholderPubkey:
-    def test_the_committed_placeholder_is_detected(self) -> None:
+    def test_the_committed_key_is_real_not_the_placeholder(self) -> None:
         text = (Path(rm._REPO_PUBKEY_PATH)).read_text()
-        assert rm.is_placeholder_pubkey(text) is True
+        assert rm.is_placeholder_pubkey(text) is False, "the committed key must be the real Safent updater key, not the placeholder"
+        assert "minisign public key: 242808B9F2E191FD" in text.splitlines()[0]
 
     def test_a_real_looking_key_is_not_flagged(self) -> None:
         _private_key, pubkey_text = _generate_keypair()
