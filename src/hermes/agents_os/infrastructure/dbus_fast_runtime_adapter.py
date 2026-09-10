@@ -248,6 +248,15 @@ class Runtime1ServiceInterface(ServiceInterface):
         return json.dumps(result)
 
     @method()
+    async def GetKillSwitchStatus(self) -> "s":  # noqa: N802,F821,UP037
+        """Estado del freno de emergencia (read-only, sin authZ).
+
+        Devuelve JSON: {engaged, reason, changed_by, changed_at}.
+        """
+        status = await self._wiring.get_kill_switch_status()
+        return json.dumps(status)
+
+    @method()
     async def Approve(self, proposal_id: "s", totp: "s") -> "s":  # noqa: N802,F821,UP037
         """HITL approve. approved_by = UID del bus. NO dispara run_cycle.
 

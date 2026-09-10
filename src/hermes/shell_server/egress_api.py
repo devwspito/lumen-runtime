@@ -68,7 +68,11 @@ _DOMAIN_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[
 
 _ALLOW_MODE = "allow"
 _DENY_MODE = "deny"
-_DEFAULT_NETWORK_MODE = _ALLOW_MODE
+# 025 Top-3: fresh installs must be egress deny-by-default per SECURITY.md — an
+# UNSET mode file resolves to DENY. An existing install with an explicit "allow"
+# or "deny" already on disk (`_MODE_PATH`) keeps that value verbatim; only the
+# absence of the file changes behavior here.
+_DEFAULT_NETWORK_MODE = _DENY_MODE
 
 
 # ---------------------------------------------------------------------------

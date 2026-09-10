@@ -397,10 +397,18 @@ class DbusRuntimeServiceWiring:
         sender_uid: int,
         operator_token: str | None = None,
     ) -> None:
-        """Pausa el agente. sender_uid resuelto por el bus (CWE-862).
+        """Pausa el agente (freno de emergencia). sender_uid resuelto por el
+        bus (CWE-862). Engaging requires nothing else — es un freno, un solo
+        clic (la liberación sí exige TOTP, gateada en la capa REST).
 
         operator_token required when sender_uid == proxy_uid (confused-deputy
         remediation). operator_id derived from token, not from proxy uid.
+
+        Best-effort: también solicita cancelar cada turno con actividad EN
+        VIVO (live_activity — tool dispatch en curso) via el mismo registro
+        cooperativo que CancelTask usa por task_id. Un turno esperando
+        generación del LLM sin tool en curso se detiene en su próximo
+        checkpoint (broker Paso 0 / claim del worker), no aquí.
 
         Raises:
             DbusAuthorizationError: UID del sender no está autorizado o token inválido.
@@ -413,6 +421,33 @@ class DbusRuntimeServiceWiring:
             "hermes.dbus.agent_paused",
             extra={"by_uid": sender_uid, "reason": reason},
         )
+        self._cancel_live_turns(reason="freno de emergencia activado")
+
+    @staticmethod
+    def _cancel_live_turns(*, reason: str) -> None:
+        """Solicita cancelación cooperativa de cada task_id con actividad EN
+        VIVO. Best-effort: nunca levanta — un fallo aquí no debe impedir que
+        el freno quede puesto (el estado ya persistió arriba)."""
+        try:
+            from hermes.runtime import live_activity  # noqa: PLC0415
+            from hermes.tasks.domain.task_cancel_registry import (  # noqa: PLC0415
+                get_cancel_registry,
+            )
+            from uuid import UUID as _UUID  # noqa: PLC0415
+
+            registry = get_cancel_registry()
+            for entry in live_activity.snapshot():
+                try:
+                    registry.request_cancel(_UUID(entry["task_id"]), reason=reason)
+                except (ValueError, KeyError):
+                    continue
+        except Exception:  # noqa: BLE001 — best-effort, never blocks the pause itself
+            logger.warning("hermes.dbus.kill_switch_cancel_live_turns_failed", exc_info=True)
+
+    async def get_kill_switch_status(self) -> dict:
+        """Snapshot read-only del freno: {engaged, reason, changed_by,
+        changed_at}. Sin authZ (lectura, igual que get_security_policy)."""
+        return await self._state.status()
 
     async def cancel_task(
         self,
@@ -1983,11 +2018,16 @@ class DbusRuntimeServiceWiring:
 
         Security: runs a ScanService scan BEFORE do_install. If the scan
         verdict is FAIL and policy.auto_block_fail is True, the install is
-        blocked. When force=True (operator-gated path only) the block dict is
-        returned to the caller with scan_id so the owner can review real score
-        and risks. On force=True we record decision=ALLOWED via
-        ScanService.allow_target(), then re-run the scan — the cache now
-        returns decision=ALLOWED so scan_service no longer raises → proceed.
+        blocked. When force=True the block dict is returned to the caller with
+        scan_id so the owner can review real score and risks. The REST route
+        (skills_api.py) requires the owner's TOTP before it ever calls this
+        verb with force=True — same require_owner_mfa gate as
+        POST /security/decisions (025 Top-4). On force=True we route the
+        override through record_install_decision (decision=allow_once) — same
+        mutator /security/decisions calls, so the sovereign override lands in
+        install_reviews AND flips scan_records.decision=ALLOWED — then re-run
+        the scan — the cache now returns decision=ALLOWED so scan_service no
+        longer raises → proceed.
         """
         self._authorize_and_resolve(sender_uid, operation="install_hub_skill")
         ident = (identifier or "").strip()
@@ -1998,7 +2038,7 @@ class DbusRuntimeServiceWiring:
         if scan_result is not None and scan_result.get("blocked"):
             if not force:
                 return scan_result
-            return self._apply_owner_override_and_rescan(ident, scan_result)
+            return self._apply_owner_override_and_rescan(ident, scan_result, sender_uid=sender_uid)
 
         return _start_hub_op(
             "install", ident,
@@ -2006,11 +2046,21 @@ class DbusRuntimeServiceWiring:
             signal_emitter=self._scan_signal_emitter,
         )
 
-    def _apply_owner_override_and_rescan(self, identifier: str, block: dict) -> dict:
+    def _apply_owner_override_and_rescan(
+        self, identifier: str, block: dict, *, sender_uid: int
+    ) -> dict:
         """Record owner-sovereign ALLOWED decision then re-scan so the gate passes.
 
         Invariant: the scan ALREADY ran (block was produced by _scan_hub_target).
         This only sets decision=ALLOWED on the existing record, never skips the scan.
+
+        025 Top-4: the hub installer's force=True path used to mark the scan
+        ALLOWED inline (scan_svc.allow_target) without ever touching
+        install_reviews — a sovereign override left NO row in the same audit
+        table /security/decisions writes to. Now it calls record_install_decision
+        (the SAME mutator, not a copy): one code path persists the decision AND
+        flips scan_records.decision=ALLOWED, whether the override came from the
+        Security Center modal or the hub installer's force flag.
         """
         from uuid import UUID as _UUID  # noqa: PLC0415
 
@@ -2021,12 +2071,24 @@ class DbusRuntimeServiceWiring:
 
         scan_id_str = block.get("scan_id") or ""
         try:
-            scan_id = _UUID(scan_id_str)
+            _UUID(scan_id_str)
         except (ValueError, AttributeError):
             return {"ok": False, "blocked": True,
                     "error": f"scan_id inválido en el bloqueo: {scan_id_str!r}"}
 
-        scan_svc.allow_target(scan_id)
+        decision = self.record_install_decision(
+            scan_id=scan_id_str,
+            decision="allow_once",
+            identifier=identifier,
+            kind="skill",
+            score=int(block.get("score", -1)),
+            verdict=str(block.get("verdict", "")),
+            risks_json=json.dumps(block.get("risks", [])),
+            sender_uid=sender_uid,
+        )
+        if not decision.get("ok"):
+            return {"ok": False, "blocked": True,
+                    "error": decision.get("error") or "no se pudo registrar la decisión soberana"}
         logger.warning(
             "hermes.dbus.install_owner_override identifier=%s scan_id=%s "
             "— instalación permitida por decisión SOBERANA del dueño",

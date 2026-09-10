@@ -31,8 +31,11 @@ import {
   getTailnetStatus,
   connectTailnet,
   disconnectTailnet,
+  getKillSwitch,
+  engageKillSwitch,
+  releaseKillSwitch,
 } from '../api/client'
-import type { EgressMode, EgressModeResponse } from '../api/types'
+import type { EgressMode, EgressModeResponse, KillSwitchStatus } from '../api/types'
 import type {
   PendingApproval,
   InboundDelegation,
@@ -1675,6 +1678,111 @@ function SecurityCenterSection() {
   )
 }
 
+// ── Kill-switch (freno de emergencia) ───────────────────────────────────────
+
+/**
+ * Emergency brake card (025 Top-KILL). Engaging needs only the operator
+ * bearer (one click, it's a brake); releasing is a sovereign action gated by
+ * MfaModal/TOTP, same pattern as EgressSection's mode toggle above.
+ */
+function KillSwitchSection() {
+  const t = useT()
+  const [status, setStatus] = useState<KillSwitchStatus | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [confirmRelease, setConfirmRelease] = useState(false)
+
+  const load = useCallback(async () => {
+    const res = await getKillSwitch()
+    setStatus(res)
+    setLoading(false)
+  }, [])
+
+  useEffect(() => { void load() }, [load])
+
+  async function handleEngage() {
+    setBusy(true)
+    try {
+      await engageKillSwitch(tNew(t, 'seg.killswitch.default_reason', 'Freno activado por el dueño'))
+      sileo.success({ title: tNew(t, 'seg.killswitch.engaged.ok', 'Freno de emergencia activado') })
+      await load()
+    } catch (err) {
+      sileo.error({ title: t('seg.save.err').replace('{err}', err instanceof Error ? err.message : String(err)) })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function handleReleaseSign(factors: MfaFactors) {
+    setConfirmRelease(false)
+    setBusy(true)
+    try {
+      await releaseKillSwitch(factors.totp)
+      sileo.success({ title: tNew(t, 'seg.killswitch.released.ok', 'Freno de emergencia liberado') })
+      await load()
+    } catch (err) {
+      sileo.error({ title: t('seg.save.err').replace('{err}', err instanceof Error ? err.message : String(err)) })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const engaged = !!status?.engaged
+
+  return (
+    <section className="cv-section" aria-label={tNew(t, 'seg.killswitch.label', 'Freno de emergencia')}>
+      <div className={s.sectionLabel}>{tNew(t, 'seg.killswitch.label', 'Freno de emergencia')}</div>
+
+      {confirmRelease && (
+        <MfaModal
+          title={tNew(t, 'seg.killswitch.release.title', 'Liberar el freno de emergencia')}
+          onSign={handleReleaseSign}
+          onCancel={() => setConfirmRelease(false)}
+        />
+      )}
+
+      <div
+        className={s.sectionCard}
+        role={engaged ? 'alert' : undefined}
+        style={engaged ? {
+          borderColor: 'var(--color-danger)',
+          background: 'var(--color-danger-surface)',
+        } : undefined}
+      >
+        {loading ? (
+          <div aria-busy="true" aria-label="Cargando…" className="skeleton skeleton--block" />
+        ) : engaged ? (
+          <div className={s.settingsRow}>
+            <div className={s.settingsRowInfo}>
+              <span className={s.settingsRowLabel} style={{ color: 'var(--color-danger)' }}>
+                {tNew(t, 'seg.killswitch.engaged.label', 'ACTIVADO — el agente no ejecuta nada')}
+              </span>
+              <span className={s.settingsRowHint}>
+                {status?.reason || tNew(t, 'seg.killswitch.no_reason', 'Sin motivo indicado')}
+              </span>
+            </div>
+            <Button variant="secondary" size="sm" loading={busy} onClick={() => setConfirmRelease(true)}>
+              {tNew(t, 'seg.killswitch.release', 'Liberar (requiere TOTP)')}
+            </Button>
+          </div>
+        ) : (
+          <div className={s.settingsRow}>
+            <div className={s.settingsRowInfo}>
+              <span className={s.settingsRowLabel}>{tNew(t, 'seg.killswitch.idle.label', 'Todo en marcha')}</span>
+              <span className={s.settingsRowHint}>
+                {tNew(t, 'seg.killswitch.hint', 'Detiene toda ejecución de herramientas y bloquea turnos nuevos al instante.')}
+              </span>
+            </div>
+            <Button variant="danger-solid" size="sm" loading={busy} onClick={handleEngage}>
+              {tNew(t, 'seg.killswitch.engage', 'Frenar ahora')}
+            </Button>
+          </div>
+        )}
+      </div>
+    </section>
+  )
+}
+
 // ── SeguridadView ─────────────────────────────────────────────────────────────
 
 export default function SeguridadView() {
@@ -1693,6 +1801,7 @@ export default function SeguridadView() {
       />
 
       <div className="view-body cv-view-body">
+        <KillSwitchSection />
         <ApprovalsSection mfaDisabled={mfaDisabled} />
         <InboundDelegationsSection />
         <GovernanceSection />

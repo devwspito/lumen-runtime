@@ -16,6 +16,7 @@ import { usePendingInboundDelegations } from '../hooks/usePendingInboundDelegati
 import { useAdsPanelOrigin } from '../hooks/useAdsPanel'
 import type { ConversationSummary } from '../api/types'
 import NotificationsPanel from './NotificationsPanel'
+import KillSwitchBanner from './KillSwitchBanner'
 import { useConfirmDialog } from './ConfirmDialog'
 import { useT, useLocale } from '../lib/i18n'
 import { CAPACIDADES_VIEW_IDS, SISTEMA_VIEW_IDS } from '../views/SectionHubs'
@@ -624,6 +625,8 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
       </nav>
 
       <main className="main-content page-enter" id="main-content" tabIndex={-1}>
+        {/* Freno de emergencia (025 Top-KILL) — visible on EVERY view, not just Seguridad. */}
+        <KillSwitchBanner />
         {/* Pass the shared chat state down to ChatView via outlet context */}
         <Outlet context={{
           convId: chat.convId,

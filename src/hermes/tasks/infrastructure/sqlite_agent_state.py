@@ -98,6 +98,22 @@ class SqliteAgentState:
             )
         await self._emit_audit_resumed(by=by)
 
+    async def status(self) -> dict:
+        """Snapshot del freno: {engaged, reason, changed_by, changed_at}."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT loop_state, reason, changed_by, updated_at"
+                " FROM agent_runtime_state WHERE id = 'singleton'"
+            ).fetchone()
+        if row is None:
+            return {"engaged": False, "reason": None, "changed_by": None, "changed_at": None}
+        return {
+            "engaged": row["loop_state"] == "paused",
+            "reason": row["reason"],
+            "changed_by": row["changed_by"],
+            "changed_at": row["updated_at"],
+        }
+
     # ------------------------------------------------------------------
     # Private
     # ------------------------------------------------------------------
