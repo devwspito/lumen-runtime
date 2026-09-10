@@ -451,6 +451,17 @@ case "$1" in
     verb="$6"
     case "$verb" in
       ps)
+        # CLI-08: the REAL compose.yaml interpolates
+        # ${ADS_POSTGRES_PASSWORD:?required} — a caller that forgot to
+        # export it gets an interpolation error and an EMPTY `ps -q -a`,
+        # not the container list. Model that exact failure instead of
+        # ignoring the env entirely (a fake that always answers regardless
+        # of env would never catch _companion_container_counts calling
+        # compose WITHOUT `_companion_env` first).
+        if [ -z "${ADS_POSTGRES_PASSWORD:-}" ]; then
+          echo "required variable ADS_POSTGRES_PASSWORD is missing a value" >&2
+          exit 0  # `|| true` in the CLI swallows this; ids stays empty either way
+        fi
         for id in ${FAKE_COMPOSE_IDS:-c1 c2}; do echo "$id"; done
         exit 0
         ;;
@@ -587,6 +598,36 @@ class TestCompanionStatus:
         assert "network:      up" in result.stdout
         assert "containers:   2/3 running" in result.stdout
         assert "/mcp/health:  reachable (HTTP 401)" in result.stdout
+
+    def test_container_counts_are_not_zero_even_without_a_preexported_password(
+        self, tmp_path: Path, fake_cli_bin_dir: Path
+    ) -> None:
+        """CLI-08 root cause, reproduced exactly: `_run_companion` (this
+        file's own harness, like a real shell) never exports
+        ADS_POSTGRES_PASSWORD — `_companion_container_counts` MUST call
+        `_companion_env` itself before invoking compose, or the fake's `ps`
+        branch (modelling compose.yaml's real `${ADS_POSTGRES_PASSWORD:?...}`
+        interpolation failure) returns no container IDs at all, exactly the
+        `0/0 running` the matrix row reported against a companion whose 5
+        containers were actually Up/healthy."""
+        state_dir = _companion_state(tmp_path, provisioned=True)
+        home_dir = tmp_path / "home"
+        _companion_bin_dir(home_dir, provisioned=True)
+        result = _run_companion(
+            "status",
+            fake_bin_dir=fake_cli_bin_dir,
+            state_dir=state_dir,
+            home_dir=home_dir,
+            podman_log=tmp_path / "podman.log",
+            extra_env={
+                "FAKE_NETWORK_PRESENT": "1",
+                "FAKE_COMPOSE_IDS": "c1 c2 c3 c4 c5",
+                "FAKE_RUNNING_IDS": "c1 c2 c3 c4 c5",
+            },
+        )
+        assert result.returncode == 0, result.stderr
+        assert "containers:   0/0 running" not in result.stdout, result.stdout
+        assert "containers:   5/5 running" in result.stdout
 
     def test_reports_network_absent(self, tmp_path: Path, fake_cli_bin_dir: Path) -> None:
         state_dir = _companion_state(tmp_path, provisioned=True)

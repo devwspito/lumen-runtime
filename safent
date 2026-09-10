@@ -767,9 +767,18 @@ _uninstall_companion() {
 # `podman/docker compose ps -q [-a]` prints one container ID per line — the
 # same ID format `$RT inspect` accepts, so counting running vs total reuses
 # the exact primitive `_running()` already uses for the main container.
+#
+# CLI-08 root cause: this used to call compose WITHOUT `_companion_env`, so
+# compose.yaml's `${ADS_POSTGRES_PASSWORD:?...}` interpolation failed
+# ("required variable ... is missing a value"), `ps -q -a` printed nothing,
+# and `safent companion status` reported `0/0 running` against a companion
+# whose 5 containers were actually Up/healthy. `_companion_env` here (not
+# just at the call site) means every current AND future caller gets it
+# right by construction.
 _companion_container_counts() {
   total=0
   running=0
+  _companion_env
   ids="$("$RT" compose -p safent-ads -f "$COMPANION_COMPOSE" ps -q -a 2>/dev/null || true)"
   for id in $ids; do
     total=$((total + 1))
