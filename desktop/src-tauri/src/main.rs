@@ -16,20 +16,13 @@ use std::process::{Command, Stdio};
 use tauri::Manager;
 
 // Bootstrap engine (specs/028-safent-app-nativa, T007/T008/T009/T011): pure
-// domain + reconciler + ports/adapter + the observe-plan-apply loop that will
-// replace the ad hoc install flow below. Wiring into `main()` lands with the
-// boot service (T011); until then this module is compiled and tested but not
-// yet driving the window. `allow(dead_code)` is temporary — it comes off
-// once boot.rs (T011) calls into the full API surface.
-#[allow(dead_code)]
+// domain + reconciler + ports/adapter + the observe-plan-apply loop, wired
+// into main() below behind SAFENT_NEW_BOOT=1 until T012/T013 consume its
+// events (see the setup() comment). Independently compiled and tested either way.
 mod boot;
-#[allow(dead_code)]
 mod domain;
-#[allow(dead_code)]
 mod engine_adapter;
-#[allow(dead_code)]
 mod ports;
-#[allow(dead_code)]
 mod reconcile;
 
 const BOOTSTRAP_URL: &str =
@@ -479,9 +472,23 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             install_podman,
             read_host_clipboard,
-            write_host_clipboard
+            write_host_clipboard,
+            boot::cancel_bootstrap,
+            boot::retry_bootstrap
         ])
         .setup(|app| {
+            // T011's observe/plan/apply/reobserve loop (boot::start) is wired here,
+            // opt-in via SAFENT_NEW_BOOT=1: it emits safent://engine-event /
+            // safent://reconnecting and expects the T012 preparation screen +
+            // T013 window policy to consume them, neither of which has landed in
+            // this worktree yet. Flipping the default is that integration's call,
+            // not this commit's — until then the flow below (unchanged) still owns
+            // the window.
+            if std::env::var("SAFENT_NEW_BOOT").is_ok() {
+                boot::start(app.handle().clone());
+                return Ok(());
+            }
+
             // NOTE: do NOT replace the default macOS menu. A custom menu that drops the
             // standard Edit submenu breaks keyboard routing to WKWebView entirely (no
             // typing anywhere). The Cmd+V-into-Live/Teaching paste must be solved in the

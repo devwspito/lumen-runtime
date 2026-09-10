@@ -194,6 +194,11 @@ pub enum DaemonHealth {
 /// this field — every fact it needs is re-observed live — but it exists so a
 /// missing/corrupt cache is an explicit, testable `HostFacts` snapshot
 /// instead of an implicit assumption. See `reconcile::local_state_is_irrelevant`.
+// `Missing`/`Corrupt` are constructed only by reconcile.rs's own tests, on
+// purpose — production `EngineProbe` always reports `Trusted` (the CLI has
+// no notion of this cache; see engine_adapter::map_host_facts). Their whole
+// job is proving reconcile() is provably indifferent to them.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalStateFact {
     Trusted,
@@ -266,6 +271,11 @@ pub enum RepairAction {
     StartContainer,
     EnsureCompanionScaffold,
     ComposeCompanionUp(ImageRef),
+    /// Constructed by the daemon dbus verb consumer (T017, `RT` repo) — a
+    /// different bounded context from this crate's reconcile/boot, which
+    /// never emits it (engine_adapter's `cli_invocation_for` matches it
+    /// exhaustively and fails closed, proven by a test).
+    #[allow(dead_code)]
     ReloadCompanionPresence,
     RecreateEngine,
     FocusExistingWindow,
@@ -416,13 +426,6 @@ impl ProgressUnit {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StageProgress {
-    pub done: u64,
-    pub total: Option<u64>,
-    pub unit: ProgressUnit,
-}
-
 // ---------------------------------------------------------------------------
 // EngineLifecycle — the aggregate root ("AppState machine")
 // ---------------------------------------------------------------------------
@@ -437,7 +440,16 @@ pub enum EnginePhase {
     EngineStarting,
     EngineReady,
     CompanionProvisioning,
+    /// Reached once boot.rs actually drives companion convergence (currently
+    /// `desired_state_from_env` never sets a companion digest — that lands
+    /// with 029's onboarding). Exercised today only by this module's own
+    /// transition-table tests.
+    #[allow(dead_code)]
     CompanionReady,
+    /// Owned entirely by the update orchestrator (`src-tauri/src/update/`,
+    /// not this crate's — see contract update.md). This lifecycle only
+    /// PERMITS the transition; it never triggers it.
+    #[allow(dead_code)]
     Updating,
     Reconnecting,
     Repairing,
@@ -518,7 +530,7 @@ pub enum FailOutcome {
 /// `degraded` is reachable ONLY through `fail()` detecting no progress —
 /// never by a direct `enter(Degraded)` from a stage phase.
 ///
-/// Deliberately does NOT track the current `Stage`/`StageProgress`: those are
+/// Deliberately does NOT track the current stage or its progress: those are
 /// ephemeral, high-frequency event data that flow straight from the adapter
 /// to the `Notifier` (contract app-engine.md §3, "progress llega al menos
 /// cada 5 s") — polling them back off a mutable aggregate would be a second,
@@ -555,6 +567,12 @@ impl EngineLifecycle {
         self.attempt
     }
 
+    /// Public diagnostic getter — no consumer in this crate yet (the
+    /// `EngineDegraded` DomainEvent already carries the cause to the UI via
+    /// `safent://engine-event`); kept for a future status-query command
+    /// (contract app-engine.md §7's `safentAppStatus()`) or exported
+    /// diagnostics (FR-029).
+    #[allow(dead_code)]
     pub fn last_failure(&self) -> Option<&FailureCause> {
         self.last_failure.as_ref()
     }
@@ -607,7 +625,15 @@ impl EngineLifecycle {
         Ok(FailOutcome::Repairing)
     }
 
-    /// The owner's one "Reintentar". Only legal from `Degraded`.
+    /// The owner's one "Reintentar", for a design that keeps ONE
+    /// `EngineLifecycle` alive across a pause-at-Degraded. `boot.rs`'s
+    /// current loop does not do that — `retry_bootstrap` just re-runs the
+    /// whole loop from `EngineLifecycle::fresh()`, which reconcile's live
+    /// re-observation makes just as correct (nothing already done is
+    /// repeated) — so this is exercised by this module's own tests only
+    /// today. Kept as the documented, tested contract for whichever caller
+    /// ends up wanting resume-in-place instead.
+    #[allow(dead_code)]
     pub fn retry(&mut self) -> Result<(), IllegalTransition> {
         self.enter(EnginePhase::Repairing)
     }
@@ -657,6 +683,10 @@ pub enum DomainEvent {
         action: Option<RepairAction>,
         code: FailureCode,
     },
+    /// Emitted by window_policy.rs (T013, not this crate) when it performs
+    /// the ONE navigation a valid ticket authorizes — this module only
+    /// defines the shape.
+    #[allow(dead_code)]
     WindowNavigated,
     /// FR-012's safety net: a load without a valid ticket resolves to ONE
     /// honest state, never a burst of failed requests. Carried on its own

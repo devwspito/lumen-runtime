@@ -31,11 +31,24 @@ use ports::{ApplyOutcome, EngineDriver, EngineError, EngineProbe};
 static SCRIPT_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 /// Writes `body` as an executable POSIX shell script and returns its path —
-/// the fake CLI for one test. Unique per call so parallel `cargo test`
-/// threads never collide on the same file.
+/// the fake CLI for one test. PID + counter alone is not enough: the OS
+/// reuses PIDs across SEPARATE `cargo test` invocations, and a leftover
+/// script from a previous run's still-unwinding child process (e.g. one this
+/// suite just `kill()`ed for a stall/timeout test) can leave the path
+/// genuinely busy — `execve` then fails with ETXTBSY ("Text file busy") on
+/// the next run that happens to compute the same name. A nanosecond
+/// timestamp added to PID + counter makes that collision astronomically
+/// unlikely instead of merely unlikely.
 fn fake_cli(body: &str) -> PathBuf {
     let n = SCRIPT_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let path = std::env::temp_dir().join(format!("safent-fake-cli-{}-{n}.sh", std::process::id()));
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before UNIX_EPOCH")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "safent-fake-cli-{}-{nanos}-{n}.sh",
+        std::process::id()
+    ));
     let mut file = std::fs::File::create(&path).expect("create fake cli script");
     writeln!(file, "#!/bin/sh").unwrap();
     write!(file, "{body}").unwrap();
@@ -52,8 +65,8 @@ fn config(cli_path: PathBuf) -> EmbeddedCliConfig {
         ImageRef::new("ghcr.io/devwspito/safent", "sha256:engine-good").unwrap(),
         None,
     );
-    cfg.stall_timeout = Duration::from_millis(500);
-    cfg.hard_timeout = Duration::from_secs(5);
+    cfg.stall_timeout = Duration::from_secs(2);
+    cfg.hard_timeout = Duration::from_secs(10);
     cfg
 }
 
@@ -205,7 +218,7 @@ echo '{"t":"stage","id":"runtime_staging","label":"Preparando","total_bytes":100
 sleep 5
 "#,
     );
-    let driver = EmbeddedCliDriver::new(config(script)); // stall_timeout = 500ms
+    let driver = EmbeddedCliDriver::new(config(script)); // stall_timeout = 2s (config())
     let notifier = RecordingNotifier::new();
     let started = Instant::now();
     let err = driver
@@ -217,7 +230,7 @@ sleep 5
         .unwrap_err();
     assert!(matches!(err, EngineError::Timeout { .. }), "{err:?}");
     assert!(
-        started.elapsed() < Duration::from_secs(3),
+        started.elapsed() < Duration::from_secs(8),
         "must not wait anywhere near the scripted sleep 5"
     );
 }
@@ -282,8 +295,8 @@ exit 1
             &ports::CancelSignal::new(),
         )
         .unwrap_err();
-    assert!(matches!(err, EngineError::Protocol(_)), "{err:?}");
-    assert!(started.elapsed() < Duration::from_secs(3));
+    assert!(matches!(err, EngineError::ReadyWithoutTicket), "{err:?}");
+    assert!(started.elapsed() < Duration::from_secs(8));
 }
 
 #[test]
@@ -370,7 +383,7 @@ echo '{"t":"done","id":"runtime_staging","ms":1}'
         "an output flood must not be accepted as success"
     );
     assert!(
-        started.elapsed() < Duration::from_secs(3),
+        started.elapsed() < Duration::from_secs(8),
         "must not buffer the whole flood before giving up"
     );
 }

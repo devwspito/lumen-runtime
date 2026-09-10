@@ -20,18 +20,30 @@ use crate::reconcile;
 #[derive(Debug)]
 pub enum LoopOutcome {
     /// The product is reachable — `ticket` authenticates the window's ONE
-    /// navigation to it (contract app-engine.md §5).
+    /// navigation to it (contract app-engine.md §5). `lifecycle` is read
+    /// back out by tests asserting the final phase; `run_once` only needs
+    /// `ticket`.
     Ready {
         ticket: BootstrapTicket,
+        #[allow(dead_code)]
         lifecycle: EngineLifecycle,
     },
     /// `HostFacts::another_instance_running` — nothing here was touched.
     FocusExisting,
     /// The owner cancelled before the point of no return.
-    Cancelled { lifecycle: EngineLifecycle },
+    Cancelled {
+        #[allow(dead_code)]
+        lifecycle: EngineLifecycle,
+    },
     /// No progress twice in a row (data-model.md `EngineLifecycle` invariant
     /// 5) — one screen, one "Reintentar"; `lifecycle.last_failure()` has why.
-    Degraded { lifecycle: EngineLifecycle },
+    /// `run_once` does not read `lifecycle` back out today — the UI already
+    /// got the cause via the `EngineDegraded` event on `safent://engine-event`
+    /// — but a future diagnostics/status command will want it.
+    Degraded {
+        #[allow(dead_code)]
+        lifecycle: EngineLifecycle,
+    },
 }
 
 /// Bootstrap-scoped: true from the `container` CLI stage onward, matching
@@ -188,6 +200,7 @@ impl BootService {
                 }
                 Err(EngineError::Cancelled) => return LoopOutcome::Cancelled { lifecycle },
                 Err(error) => {
+                    self.notify_if_reconnecting(&mut lifecycle, &error, notifier);
                     if let Some(outcome) = self.handle_failure(
                         &mut lifecycle,
                         Some(&action),
@@ -261,6 +274,7 @@ impl BootService {
                 lifecycle: lifecycle.clone(),
             },
             Err(error) => {
+                self.notify_if_reconnecting(lifecycle, &error, notifier);
                 notifier.notify(&DomainEvent::EngineDegraded {
                     cause: error.to_failure_cause(),
                 });
@@ -268,6 +282,26 @@ impl BootService {
                     lifecycle: lifecycle.clone(),
                 }
             }
+        }
+    }
+
+    /// FR-012's safety net: `up` succeeding without ever delivering a ticket
+    /// gets its OWN UI signal (`safent://reconnecting`, reason
+    /// `token_missing`) instead of looking like an ordinary repair failure —
+    /// still counted toward the no-progress rule by the caller right after
+    /// this, so a PERSISTENT case still degrades rather than reconnecting
+    /// forever.
+    fn notify_if_reconnecting(
+        &self,
+        lifecycle: &mut EngineLifecycle,
+        error: &EngineError,
+        notifier: &dyn Notifier,
+    ) {
+        if matches!(error, EngineError::ReadyWithoutTicket) {
+            let _ = lifecycle.enter(EnginePhase::Reconnecting);
+            notifier.notify(&DomainEvent::Reconnecting {
+                reason: crate::domain::ReconnectReason::TokenMissing,
+            });
         }
     }
 
@@ -322,6 +356,394 @@ impl BootService {
             engine: self.desired.engine_image.clone(),
             companion: self.desired.companion_image.clone(),
         }
+    }
+}
+
+// ===========================================================================
+// Tauri glue — the ONLY part of this module that imports `tauri`.
+// `main.rs`'s one `boot::start(app.handle().clone())` call is the only
+// caller of `start`; nothing above this line needs Tauri to compile or test.
+// ===========================================================================
+
+use std::path::PathBuf;
+
+use tauri::{AppHandle, Emitter, Listener, Manager};
+
+use crate::domain::{Bytes, ImageRef, MachineSpec};
+use crate::engine_adapter::{EmbeddedCliConfig, EmbeddedCliDriver};
+
+/// The UI lane already codes against these exact channel names.
+pub const ENGINE_EVENT_CHANNEL: &str = "safent://engine-event";
+pub const RECONNECTING_CHANNEL: &str = "safent://reconnecting";
+const RESTART_REQUESTED_EVENT: &str = "safent://restart-engine-requested";
+const QUIT_REQUESTED_EVENT: &str = "safent://quit-requested";
+
+/// Mirrors contract app-engine.md §3's `EngineEvent` union — `kind` is the
+/// wire tag the UI switches on, matching the CLI's own vocabulary rather
+/// than this module's internal `DomainEvent` names.
+#[derive(Clone, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum EngineEventPayload {
+    Stage {
+        stage: &'static str,
+        label: String,
+        total_bytes: Option<u64>,
+        point_of_no_return: bool,
+    },
+    Progress {
+        stage: &'static str,
+        done: u64,
+        total: Option<u64>,
+        unit: &'static str,
+    },
+    Done {
+        stage: &'static str,
+        ms: u64,
+    },
+    Failed {
+        code: &'static str,
+        detail: String,
+        retryable: bool,
+    },
+    Ready {
+        app_version: String,
+        engine_digest: String,
+        companion_digest: Option<String>,
+    },
+}
+
+#[derive(Clone, serde::Serialize)]
+struct ReconnectingPayload {
+    reason: &'static str,
+}
+
+/// Emits `DomainEvent`s to the window. `RepairApplied`/`NoProgressDetected`/
+/// `WindowNavigated` are internal bookkeeping, not part of the UI's 6-kind
+/// `engine-event` contract, and are not forwarded — best-effort emit (a
+/// closed/gone window is not this loop's problem to recover from).
+struct TauriNotifier {
+    app: AppHandle,
+}
+
+impl Notifier for TauriNotifier {
+    fn notify(&self, event: &DomainEvent) {
+        match event {
+            DomainEvent::StageEntered {
+                stage,
+                label,
+                total_bytes,
+            } => {
+                let _ = self.app.emit(
+                    ENGINE_EVENT_CHANNEL,
+                    EngineEventPayload::Stage {
+                        stage: stage.wire_name(),
+                        label: label.clone(),
+                        total_bytes: *total_bytes,
+                        point_of_no_return: bootstrap_point_of_no_return(*stage),
+                    },
+                );
+            }
+            DomainEvent::StageProgressed {
+                stage,
+                done,
+                total,
+                unit,
+            } => {
+                let _ = self.app.emit(
+                    ENGINE_EVENT_CHANNEL,
+                    EngineEventPayload::Progress {
+                        stage: stage.wire_name(),
+                        done: *done,
+                        total: *total,
+                        unit: unit.wire_name(),
+                    },
+                );
+            }
+            DomainEvent::StageCompleted { stage, duration_ms } => {
+                let _ = self.app.emit(
+                    ENGINE_EVENT_CHANNEL,
+                    EngineEventPayload::Done {
+                        stage: stage.wire_name(),
+                        ms: *duration_ms,
+                    },
+                );
+            }
+            DomainEvent::EngineDegraded { cause } => {
+                let _ = self.app.emit(
+                    ENGINE_EVENT_CHANNEL,
+                    EngineEventPayload::Failed {
+                        code: cause.code.wire_name(),
+                        detail: cause.message.clone(),
+                        retryable: cause.retryable,
+                    },
+                );
+            }
+            DomainEvent::EngineReady { version_set } => {
+                let _ = self.app.emit(
+                    ENGINE_EVENT_CHANNEL,
+                    EngineEventPayload::Ready {
+                        app_version: version_set.app.as_str().to_string(),
+                        engine_digest: version_set.engine.digest.clone(),
+                        companion_digest: version_set.companion.as_ref().map(|c| c.digest.clone()),
+                    },
+                );
+            }
+            DomainEvent::Reconnecting { reason } => {
+                let _ = self.app.emit(
+                    RECONNECTING_CHANNEL,
+                    ReconnectingPayload {
+                        reason: reason.wire_name(),
+                    },
+                );
+            }
+            DomainEvent::RepairApplied { .. }
+            | DomainEvent::NoProgressDetected { .. }
+            | DomainEvent::WindowNavigated => {}
+        }
+    }
+}
+
+struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> std::time::Instant {
+        std::time::Instant::now()
+    }
+    fn sleep(&self, duration: Duration) {
+        std::thread::sleep(duration);
+    }
+}
+
+/// The owner's "Cancelar" button, wired the same way `install_podman`
+/// already is: a plain Tauri command the LOCAL loader page invokes
+/// (capabilities/default.json). Exact name is this module's choice — if the
+/// already-finished UI lane invokes a different one, it is a one-line rename
+/// here, not a design change.
+#[tauri::command]
+pub fn cancel_bootstrap(cancel: tauri::State<'_, CancelSignal>) {
+    cancel.set();
+}
+
+/// FR-033's single "Reintentar": re-runs the whole loop from a fresh
+/// observation. No separate "resume from where it degraded" state — reconcile
+/// re-derives the plan from what is ACTUALLY true on the host each time, so a
+/// full re-run correctly skips everything already done and repeats only what
+/// still needs it.
+#[tauri::command]
+pub fn retry_bootstrap(app: AppHandle) {
+    std::thread::spawn(move || run_once(app, CancelSignal::new()));
+}
+
+/// Starts the bootstrap loop off the main thread (so the window never
+/// freezes) and wires the tray/UI commands the coordinator specified:
+/// `safent://restart-engine-requested` (stop -> observe -> plan -> apply
+/// again) and `safent://quit-requested` (explicit engine stop, then exit —
+/// research.md FR-030: closing the WINDOW alone never stops the engine).
+pub fn start(app: AppHandle) {
+    let cancel = CancelSignal::new();
+    app.manage(cancel.clone());
+
+    let restart_handle = app.clone();
+    app.listen(RESTART_REQUESTED_EVENT, move |_event| {
+        let handle = restart_handle.clone();
+        std::thread::spawn(move || {
+            stop_engine_best_effort(&handle);
+            TauriNotifier {
+                app: handle.clone(),
+            }
+            .notify(&DomainEvent::Reconnecting {
+                reason: crate::domain::ReconnectReason::EngineRestarted,
+            });
+            run_once(handle, CancelSignal::new());
+        });
+    });
+
+    let quit_handle = app.clone();
+    app.listen(QUIT_REQUESTED_EVENT, move |_event| {
+        let handle = quit_handle.clone();
+        std::thread::spawn(move || {
+            stop_engine_best_effort(&handle);
+            handle.exit(0);
+        });
+    });
+
+    std::thread::spawn(move || run_once(app, cancel));
+}
+
+/// `safent://quit-requested` (FR-030: "Salir" explicitly stops the engine,
+/// unlike closing the window) and the restart command both need this — best
+/// effort, since a stop that cannot be confirmed still must not block the
+/// window from closing or the restart from proceeding.
+fn stop_engine_best_effort(app: &AppHandle) {
+    if let Ok(desired) = desired_state_from_env() {
+        let config = resolve_config(app, desired.engine_image, desired.companion_image);
+        let _ = EmbeddedCliDriver::new(config).stop();
+    }
+}
+
+fn run_once(app: AppHandle, cancel: CancelSignal) {
+    let notifier = TauriNotifier { app: app.clone() };
+    let desired = match desired_state_from_env() {
+        Ok(desired) => desired,
+        Err(message) => {
+            notifier.notify(&DomainEvent::EngineDegraded {
+                cause: FailureCause {
+                    code: FailureCode::CliPorcelainUnsupported,
+                    message,
+                    retryable: false,
+                },
+            });
+            return;
+        }
+    };
+    let config = resolve_config(
+        &app,
+        desired.engine_image.clone(),
+        desired.companion_image.clone(),
+    );
+    let driver = Arc::new(EmbeddedCliDriver::new(config));
+    let probe: Arc<dyn EngineProbe> = driver.clone();
+    let engine_driver: Arc<dyn EngineDriver> = driver;
+    let service = BootService::new(
+        probe,
+        engine_driver,
+        Arc::new(SystemClock),
+        desired,
+        app_version(),
+    );
+
+    match service.run(&notifier, &cancel) {
+        LoopOutcome::Ready { ticket, .. } => navigate_to_ticket(&app, &ticket),
+        LoopOutcome::FocusExisting
+        | LoopOutcome::Cancelled { .. }
+        | LoopOutcome::Degraded { .. } => {}
+    }
+}
+
+fn navigate_to_ticket(app: &AppHandle, ticket: &BootstrapTicket) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    if let Ok(url) = ticket.expose().parse::<tauri::Url>() {
+        let _ = window.navigate(url);
+    }
+    // A malformed ticket URL leaves the loader screen up rather than
+    // navigating anywhere unsafe — reconcile/EngineLifecycle already treat
+    // "ready without a usable ticket" as reconnecting, not as this path.
+}
+
+fn app_version() -> SemVer {
+    SemVer::parse(env!("CARGO_PKG_VERSION")).unwrap_or_else(|_| SemVer::parse("0.0.0").unwrap())
+}
+
+/// The runtime manifest (`desktop/runtime-manifest.lock`, T010) is not in
+/// this worktree yet — `SAFENT_ENGINE_DIGEST`/`SAFENT_COMPANION_DIGEST` are
+/// the seam until it lands. Missing/malformed fails closed into `Degraded`
+/// with a message that says exactly what is missing, never a panic.
+fn desired_state_from_env() -> Result<DesiredState, String> {
+    let engine_digest = std::env::var("SAFENT_ENGINE_DIGEST").map_err(|_| {
+        "SAFENT_ENGINE_DIGEST no está definido (falta el manifiesto del runtime)".to_string()
+    })?;
+    let engine_image = ImageRef::new("ghcr.io/devwspito/safent", engine_digest)
+        .map_err(|_| "SAFENT_ENGINE_DIGEST no tiene forma de digest sha256:...".to_string())?;
+    let companion_image = std::env::var("SAFENT_COMPANION_DIGEST")
+        .ok()
+        .and_then(|digest| ImageRef::new("ghcr.io/devwspito/safent-ads", digest).ok());
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+    Ok(DesiredState {
+        engine_image,
+        companion_image,
+        machine: desired_machine_spec(),
+        min_free_disk_bytes: Bytes(4 * GIB),
+        min_total_memory_bytes: Bytes(4 * GIB),
+    })
+}
+
+fn desired_machine_spec() -> Option<MachineSpec> {
+    #[cfg(target_os = "macos")]
+    {
+        use crate::domain::MachineProvider;
+        const GIB: u64 = 1024 * 1024 * 1024;
+        Some(MachineSpec {
+            provider: MachineProvider::AppleHv,
+            cpus: 4,
+            memory_bytes: Bytes(6 * GIB),
+            os_version: "6.1".to_string(),
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+/// Resolves the bundled runtime's paths. `resources/runtime/<target-triple>/`
+/// is the declared bundle layout (T010, `desktop/RUNTIME-BUNDLE.md` — not yet
+/// in this worktree); `SAFENT_CLI_PATH`/`SAFENT_PODMAN_PATH`/
+/// `SAFENT_STATE_HOME` override it, the same pattern main.rs's legacy flow
+/// already uses for `SAFENT_BIN` — needed for dev and for `--selftest` on a
+/// machine with no installed Tauri resource bundle at all.
+pub fn resolve_config(
+    app: &AppHandle,
+    engine_image: ImageRef,
+    companion_image: Option<ImageRef>,
+) -> EmbeddedCliConfig {
+    let runtime_dir = std::env::var_os("SAFENT_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            app.path()
+                .resource_dir()
+                .map(|dir| dir.join("runtime").join(target_triple()))
+                .unwrap_or_else(|_| PathBuf::from("runtime").join(target_triple()))
+        });
+    let cli_path = std::env::var_os("SAFENT_CLI_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| runtime_dir.join("safent"));
+    let podman_path = std::env::var_os("SAFENT_PODMAN_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| runtime_dir.join("podman"));
+    let state_home = std::env::var_os("SAFENT_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home_dir().join(".safent"));
+    EmbeddedCliConfig::with_defaults(
+        cli_path,
+        podman_path,
+        state_home,
+        engine_image,
+        companion_image,
+    )
+}
+
+fn home_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn target_triple() -> &'static str {
+    // Rust's own target-triple naming (T010's declared bundle convention),
+    // for the platforms spec 028 serves (research.md "Decisión: Windows" —
+    // not yet; Mac Intel is Out of Scope).
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        "aarch64-apple-darwin"
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        "x86_64-unknown-linux-gnu"
+    }
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    {
+        "aarch64-unknown-linux-gnu"
+    }
+    #[cfg(not(any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
+    )))]
+    {
+        "unsupported"
     }
 }
 

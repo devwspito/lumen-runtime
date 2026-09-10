@@ -73,6 +73,10 @@ pub enum ApplyOutcome {
 /// Time abstraction so the boot loop's backoff/stall detection is
 /// deterministic in tests — no real sleeping, no wall-clock flakiness.
 pub trait Clock: Send + Sync {
+    /// Not read by `boot.rs`'s loop today (only `sleep` drives backoff) —
+    /// kept as the natural pairing for a future elapsed-time diagnostic
+    /// (e.g. "still degraded after N minutes") without widening this trait.
+    #[allow(dead_code)]
     fn now(&self) -> Instant;
     fn sleep(&self, duration: Duration);
 }
@@ -119,6 +123,11 @@ pub enum EngineError {
     /// return (contract app-engine.md §6). Distinct from every other
     /// variant: this is not a fault, it is the owner's own decision.
     Cancelled,
+    /// `up` emitted `ready` but the secret fd closed without a line
+    /// (contract app-engine.md §5). Distinct from `Protocol` on purpose:
+    /// `boot.rs` reacts to THIS one specific shape with FR-012's
+    /// `Reconnecting{TokenMissing}`, not with the generic degrade path.
+    ReadyWithoutTicket,
 }
 
 impl EngineError {
@@ -155,6 +164,11 @@ impl EngineError {
                 message: "cancelado por el dueño".to_string(),
                 retryable: false,
             },
+            EngineError::ReadyWithoutTicket => FailureCause {
+                code: FailureCode::DaemonUnhealthy,
+                message: "el motor no entregó un vale de arranque".to_string(),
+                retryable: true,
+            },
         }
     }
 }
@@ -174,16 +188,28 @@ impl std::fmt::Display for EngineError {
             EngineError::Protocol(message) => write!(f, "protocol error: {message}"),
             EngineError::Reported(cause) => write!(f, "reported by CLI: {cause:?}"),
             EngineError::Cancelled => write!(f, "cancelled by owner"),
+            EngineError::ReadyWithoutTicket => write!(f, "ready without a line on the secret fd"),
         }
     }
 }
 
 impl std::error::Error for EngineError {}
 
-/// Test doubles for `EngineProbe`/`EngineDriver`/`Clock`/`Notifier`. Public
-/// (not `#[cfg(test)]`) so both this crate's unit tests and the black-box
-/// tests under `tests/` can drive `boot.rs` without a real process or a real
-/// clock (Constitution Principle V: base tests never touch containers/network).
+/// Test doubles for `EngineProbe`/`EngineDriver`/`Clock`/`Notifier`.
+/// `#[cfg(test)]`, not feature-gated: `cargo test` sets it crate-wide for
+/// BOTH this bin's own unit tests AND every `tests/*.rs` integration binary
+/// (each pulls this file in via `#[path]` and is itself a `--test` target),
+/// so no production build ever carries these doubles, and nothing outside
+/// tests needs to opt in. Constitution Principle V: base tests never touch
+/// containers/network.
+///
+/// `allow(dead_code)` at the module level, deliberately: this is shared test
+/// infrastructure offering a full API (every `EngineErrorKind`, every
+/// assertion helper) for WHICHEVER test needs it — no single test file in
+/// this crate is expected to exercise all of it, the same way a test-support
+/// crate is not judged by whether every one of its helpers has a caller yet.
+#[cfg(test)]
+#[allow(dead_code)]
 pub mod fakes {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;

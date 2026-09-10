@@ -105,8 +105,31 @@ impl EmbeddedCliDriver {
         if let Some(secret) = secret {
             secret.install(&mut cmd);
         }
-        cmd.spawn()
+        spawn_with_etxtbsy_retry(&mut cmd)
             .map_err(|e| EngineError::Io(format!("no pude ejecutar '{verb}': {e}")))
+    }
+}
+
+/// `ETXTBSY` ("text file busy") is a well-documented, ordinarily transient
+/// condition: the kernel refuses to `execve()` a file that some OTHER
+/// process still has open for writing at that exact instant (e.g. another
+/// process mid-write to the same path, or — during a real update — the
+/// installer replacing this very binary). A short, bounded retry clears it
+/// without the caller ever seeing a spurious failure for something that
+/// resolves itself a few milliseconds later.
+fn spawn_with_etxtbsy_retry(cmd: &mut Command) -> std::io::Result<Child> {
+    const ETXTBSY: i32 = 26;
+    const MAX_ATTEMPTS: u32 = 5;
+    let mut attempt = 0;
+    loop {
+        match cmd.spawn() {
+            Ok(child) => return Ok(child),
+            Err(e) if e.raw_os_error() == Some(ETXTBSY) && attempt < MAX_ATTEMPTS => {
+                attempt += 1;
+                std::thread::sleep(Duration::from_millis(20 * attempt as u64));
+            }
+            Err(e) => return Err(e),
+        }
     }
 }
 
@@ -194,7 +217,6 @@ impl EngineDriver for EmbeddedCliDriver {
                     });
                 }
                 WireEvent::Failed {
-                    id: _,
                     code,
                     detail,
                     retryable,
@@ -223,9 +245,7 @@ impl EngineDriver for EmbeddedCliDriver {
             return Err(EngineError::Reported(cause));
         }
         if ready {
-            let line = outcome.secret_line.ok_or_else(|| {
-                EngineError::Protocol("`ready` without a line on the secret fd".to_string())
-            })?;
+            let line = outcome.secret_line.ok_or(EngineError::ReadyWithoutTicket)?;
             return Ok(ApplyOutcome::Ready(BootstrapTicket::new(line)));
         }
         if !outcome.exit_ok {
@@ -250,8 +270,7 @@ impl EngineDriver for EmbeddedCliDriver {
         cmd.stdin(Stdio::null());
         cmd.stdout(Stdio::null());
         cmd.stderr(Stdio::piped());
-        let mut child = cmd
-            .spawn()
+        let mut child = spawn_with_etxtbsy_retry(&mut cmd)
             .map_err(|e| EngineError::Io(format!("no pude ejecutar 'stop': {e}")))?;
         let stderr = child.stderr.take();
         wait_bounded(&mut child, self.config.hard_timeout, stderr)
@@ -371,6 +390,12 @@ enum ReaderMsg {
     StderrLine(String),
     SecretLine(String),
     ReaderClosed,
+    /// Distinct from `ReaderClosed` on purpose: a pipe's kernel buffer (64
+    /// KiB+ on Linux) means a flooding child can write far more than
+    /// `max_output_bytes` and still exit 0 without ever blocking on a
+    /// reader that stopped early — silently treating "stopped reading" as
+    /// "the stream ended cleanly" would let that flood report success.
+    OutputCapExceeded,
 }
 
 impl EmbeddedCliDriver {
@@ -453,6 +478,14 @@ impl EmbeddedCliDriver {
                     secret_line = Some(line);
                 }
                 Ok(ReaderMsg::ReaderClosed) => open_readers -= 1,
+                Ok(ReaderMsg::OutputCapExceeded) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(EngineError::Protocol(format!(
+                        "salida superó el límite de {} bytes",
+                        self.config.max_output_bytes
+                    )));
+                }
                 Err(RecvTimeoutError::Timeout) => {
                     if last_activity.elapsed() >= self.config.stall_timeout {
                         return Err(kill_and_timeout(&mut child, self.config.stall_timeout));
@@ -540,8 +573,12 @@ fn spawn_stream_reader<R: Read + Send + 'static>(
                 Ok(0) => break,
                 Ok(n) => {
                     total += n;
+                    if total > max_bytes {
+                        let _ = tx.send(ReaderMsg::OutputCapExceeded);
+                        return; // terminal — the main loop kills the child; no ReaderClosed follows
+                    }
                     let line = raw.trim_end_matches(['\n', '\r']).to_string();
-                    if tx.send(wrap(line)).is_err() || total > max_bytes {
+                    if tx.send(wrap(line)).is_err() {
                         break;
                     }
                 }
@@ -579,7 +616,11 @@ enum WireEvent {
     Done { id: String, ms: u64 },
     #[serde(rename = "failed")]
     Failed {
-        id: String,
+        // `id` (which stage failed) is part of the wire contract but this
+        // adapter's own classification never needs it — `EngineDegraded`'s
+        // payload carries `code`/`detail`/`retryable` only (data-model.md).
+        // Deliberately not a struct field: serde ignores unknown JSON keys
+        // by default, so there is nothing to silence here.
         code: String,
         detail: String,
         retryable: bool,
@@ -587,7 +628,9 @@ enum WireEvent {
     #[serde(rename = "facts")]
     Facts { facts: WireHostFacts },
     #[serde(rename = "ready")]
-    Ready { endpoint_ref: String },
+    // `endpoint_ref` is always the literal "stdout-secret" (contract
+    // app-engine.md §5) — nothing to branch on, so not a field either.
+    Ready {},
 }
 
 #[derive(Debug, Deserialize)]
@@ -852,15 +895,40 @@ mod secret_pipe {
             let write_fd = self.write_fd;
             let read_fd = self.read_fd.as_raw_fd();
             // SAFETY: runs in the child after fork(), before exec, single
-            // threaded — only async-signal-safe calls (dup2/close), exactly
-            // what `pre_exec`'s contract requires.
+            // threaded — only async-signal-safe calls (dup2/close/fcntl),
+            // exactly what `pre_exec`'s contract requires.
             unsafe {
                 cmd.pre_exec(move || {
                     if libc::dup2(write_fd, 3) < 0 {
                         return Err(std::io::Error::last_os_error());
                     }
-                    libc::close(write_fd);
-                    libc::close(read_fd);
+                    // POSIX: if write_fd ALREADY happened to be 3 (a real,
+                    // observed allocation under concurrent test load — fd
+                    // numbers are a process-wide resource), dup2(3, 3) is a
+                    // documented no-op that does NOT clear FD_CLOEXEC. Since
+                    // this pipe was created with O_CLOEXEC (deliberately, to
+                    // keep it from leaking into any OTHER child), fd 3 would
+                    // then be silently closed by the kernel at THIS child's
+                    // own execve() — the ticket would never reach the CLI,
+                    // intermittently and only when that specific fd number
+                    // was allocated. Clearing FD_CLOEXEC explicitly makes
+                    // this correct whether dup2 just did a real copy or
+                    // this no-op.
+                    if libc::fcntl(3, libc::F_SETFD, 0) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    // Same reasoning for read_fd: if IT happened to be 3, the
+                    // dup2 above already closed/replaced that slot as a side
+                    // effect (POSIX: dup2 closes newfd before reusing the
+                    // number, unless oldfd==newfd) — closing "read_fd" again
+                    // here would then hit the FRESH write_fd copy that now
+                    // lives at 3, not the original read end.
+                    if write_fd != 3 {
+                        libc::close(write_fd);
+                    }
+                    if read_fd != 3 {
+                        libc::close(read_fd);
+                    }
                     Ok(())
                 });
             }
