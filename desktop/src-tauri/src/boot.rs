@@ -660,11 +660,22 @@ pub fn desired_state_from_env() -> Result<DesiredState, String> {
     let engine_digest = std::env::var("SAFENT_ENGINE_DIGEST").map_err(|_| {
         "SAFENT_ENGINE_DIGEST no está definido (falta el manifiesto del runtime)".to_string()
     })?;
-    let engine_image = ImageRef::new("ghcr.io/devwspito/safent", engine_digest)
+    // Same seam as the digest itself (doc comment below): the published repo
+    // is the production default, overridable for local dev/testing against
+    // an already-built image (e.g. `localhost/safent-runtime`) without
+    // touching a real registry — `cmd_ensure_images`/`podman pull` always
+    // contact the registry named in the reference, even for content already
+    // present locally under a DIFFERENT repo name, so pointing this at a
+    // `localhost/...` image is what lets reconcile converge without network.
+    let engine_repo = std::env::var("SAFENT_ENGINE_IMAGE_REPO")
+        .unwrap_or_else(|_| "ghcr.io/devwspito/safent".to_string());
+    let engine_image = ImageRef::new(engine_repo, engine_digest)
         .map_err(|_| "SAFENT_ENGINE_DIGEST no tiene forma de digest sha256:...".to_string())?;
+    let companion_repo = std::env::var("SAFENT_COMPANION_IMAGE_REPO")
+        .unwrap_or_else(|_| "ghcr.io/devwspito/safent-ads".to_string());
     let companion_image = std::env::var("SAFENT_COMPANION_DIGEST")
         .ok()
-        .and_then(|digest| ImageRef::new("ghcr.io/devwspito/safent-ads", digest).ok());
+        .and_then(|digest| ImageRef::new(companion_repo, digest).ok());
 
     const GIB: u64 = 1024 * 1024 * 1024;
     Ok(DesiredState {
