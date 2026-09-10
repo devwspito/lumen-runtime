@@ -540,7 +540,10 @@ export function openRuntimeStream(
   }
 
   function connect() {
-    const source = new EventSource('/api/v1/runtime/agent-stream')
+    // EventSource cannot set a custom Authorization header (browser API
+    // constraint), so the session bearer travels as a query param instead —
+    // the server accepts it as an equivalent credential for this one route.
+    const source = new EventSource(`/api/v1/runtime/agent-stream?token=${encodeURIComponent(token())}`)
     es = source
 
     source.onopen = () => {
@@ -971,8 +974,9 @@ interface StreamHandle {
  * per-task `seq` we put in each event's `id:`); the server replays only the missed
  * frames from the broker log. Resume is the PROTOCOL's job — no bespoke reconnect/
  * backoff/replay here (that fragility was the recurring "chat dies on refresh" bug).
- * Same-origin GET, no auth header (loopback + unguessable UUID; GET isn't token-gated;
- * EventSource cannot set headers anyway).
+ * Same-origin GET, session-token-gated like every other /api/v1/* route. EventSource
+ * cannot set an Authorization header, so the bearer travels as `?token=` instead —
+ * same credential, alternate transport (see main.py's `_require_operator_token`).
  *
  * Frame kinds: delta | thinking_delta | tool_call | status | done | error
  */
@@ -981,7 +985,7 @@ export function openTaskStream(
   callbacks: StreamCallbacks,
   _opts: { maxRetries?: number } = {},
 ): StreamHandle {
-  const path = `/api/v1/chat/stream/${encodeURIComponent(taskId)}`
+  const path = `/api/v1/chat/stream/${encodeURIComponent(taskId)}?token=${encodeURIComponent(token())}`
   let es: EventSource | null = new EventSource(path)
   let closed = false
   // Defensive dedup; the server already filters by Last-Event-ID so this rarely fires.
