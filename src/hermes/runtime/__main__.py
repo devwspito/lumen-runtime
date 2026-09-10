@@ -936,6 +936,49 @@ def _build_memory_surface_adapter():
     return adapter
 
 
+def _build_tailnet_ssh_surface_adapter(*, signer, audit_repo):
+    """Construye TailnetSshSurfaceAdapter para SurfaceKind.TAILNET_SSH (spec 022 v2).
+
+    No external dependencies at construction time — always succeeds (mirrors
+    `_build_memory_surface_adapter`). The three use cases share one executor,
+    one tailnet directory reader, and one WORM audit port. `ssh` binary
+    absence / tailnet not configured are RUNTIME failures surfaced per-call
+    as ReplayOutcome.failed (fail-closed), never a boot-time failure — see
+    specs/022-tailnet-connectivity/ssh-v2.md §Cableado for why this adapter
+    is registered unconditionally rather than gated on tailnet status.
+    """
+    from hermes.tailnet_ssh.application.tailnet_file_use_case import (  # noqa: PLC0415
+        TailnetFileGetUseCase,
+        TailnetFilePutUseCase,
+    )
+    from hermes.tailnet_ssh.application.tailnet_ssh_use_case import TailnetSshUseCase  # noqa: PLC0415
+    from hermes.tailnet_ssh.infrastructure.hash_chain_audit_port import HashChainAuditPort  # noqa: PLC0415
+    from hermes.tailnet_ssh.infrastructure.ssh_subprocess_executor import (  # noqa: PLC0415
+        SubprocessSshExecutor,
+    )
+    from hermes.tailnet_ssh.infrastructure.status_json_directory import (  # noqa: PLC0415
+        StatusJsonTailnetDirectory,
+    )
+    from hermes.tailnet_ssh.infrastructure.tailnet_ssh_surface_adapter import (  # noqa: PLC0415
+        TailnetSshSurfaceAdapter,
+    )
+
+    directory = StatusJsonTailnetDirectory()
+    executor = SubprocessSshExecutor()
+    audit = HashChainAuditPort(signer=signer, audit_repo=audit_repo)
+    adapter = TailnetSshSurfaceAdapter(
+        ssh_use_case=TailnetSshUseCase(directory=directory, executor=executor, audit=audit),
+        file_get_use_case=TailnetFileGetUseCase(
+            directory=directory, executor=executor, audit=audit
+        ),
+        file_put_use_case=TailnetFilePutUseCase(
+            directory=directory, executor=executor, audit=audit
+        ),
+    )
+    logger.info("hermes.runtime.tailnet_ssh_surface_adapter.ready")
+    return adapter
+
+
 def _build_delegation_surface_adapter(db_path: Path):
     """Construye DelegationSurfaceAdapter para SurfaceKind.PEER_DELEGATION
     (FASE 3 A2A cross-human). Fail-soft: None si el association_store no es
@@ -1091,6 +1134,16 @@ def _build_real_broker(
     # LOW + auto_executable in CapabilityRegistry: no HITL required.
     # Registered unconditionally — no external dependencies.
     adapters[SurfaceKind.MEMORY] = _build_memory_surface_adapter()
+
+    # spec 022 v2 — TailnetSshSurfaceAdapter: governed SSH on the owner's
+    # tailnet. LOW + auto_executable in CapabilityRegistry (the real gate is
+    # Step 1.6-tailnet_ssh in security_hook.py, BEFORE this is dispatched).
+    # Registered unconditionally — no external dependencies at construction
+    # time; a missing `ssh` binary or unconfigured tailnet fails per-call,
+    # not at boot (see _build_tailnet_ssh_surface_adapter docstring).
+    adapters[SurfaceKind.TAILNET_SSH] = _build_tailnet_ssh_surface_adapter(
+        signer=firmer, audit_repo=audit_repo
+    )
 
     # FASE 3 (A2A cross-human) — DelegationSurfaceAdapter: delegate_to_colleague's
     # execution (POST /v1/outbox). Registered unconditionally — a non-paired
