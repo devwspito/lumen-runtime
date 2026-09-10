@@ -46,14 +46,35 @@ _FAKE_PODMAN = """#!/usr/bin/env bash
 set -e
 echo "$@" >> "$FAKE_PODMAN_LOG"
 
+# Stateful container existence/running flags (BKP-01 regression tests need
+# `start`/`run`/`stop` to actually flip what a later `inspect` reports —
+# a purely static double can't tell "cmd_start's own dispatch was wrong"
+# apart from "cmd_start dispatched correctly but the postcondition check
+# is missing", which is exactly the bug this CLI had). Seeded from the
+# FAKE_CONTAINER_* env vars, then mutated on disk by start/run/stop.
+_exists_file="$FAKE_STATE_DIR/exists"
+_running_file="$FAKE_STATE_DIR/running"
+[ -f "$_exists_file" ] || echo "$FAKE_CONTAINER_EXISTS" > "$_exists_file"
+[ -f "$_running_file" ] || echo "$FAKE_CONTAINER_RUNNING" > "$_running_file"
+
 case "$1" in
   inspect)
-    if [ "$2" = "-f" ]; then
-      [ "$FAKE_CONTAINER_EXISTS" = "true" ] || exit 1
-      echo "$FAKE_CONTAINER_RUNNING"
-      exit 0
-    fi
-    [ "$FAKE_CONTAINER_EXISTS" = "true" ] && exit 0 || exit 1
+    exists="$(cat "$_exists_file")"
+    [ "$exists" = "true" ] || exit 1
+    template=""
+    shift
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -f) template="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    case "$template" in
+      *State.Running*) cat "$_running_file" ;;
+      "") : ;;
+      *) echo "" ;;
+    esac
+    exit 0
     ;;
   volume)
     case "$2" in
@@ -80,7 +101,22 @@ case "$1" in
         ;;
     esac
     ;;
-  stop|start|pull|run)
+  stop)
+    echo false > "$_running_file"
+    exit 0
+    ;;
+  start)
+    [ "$(cat "$_exists_file")" = "true" ] || exit 1
+    echo true > "$_running_file"
+    exit 0
+    ;;
+  run)
+    if [ "${FAKE_RUN_FAILS:-}" = "true" ]; then exit 1; fi
+    echo true > "$_exists_file"
+    echo true > "$_running_file"
+    exit 0
+    ;;
+  pull)
     exit 0
     ;;
   *)
@@ -111,12 +147,15 @@ def _run_safent(
     extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     home_dir.mkdir(parents=True, exist_ok=True)
+    state_dir = podman_log.parent / f"{podman_log.stem}-state"
+    state_dir.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env["PATH"] = f"{fake_bin_dir}:{env.get('PATH', '')}"
     env["HOME"] = str(home_dir)
     env["SAFENT_NAME"] = "safent-test"
     env["SAFENT_DATA_VOLUME"] = "safent-test-data"
     env["FAKE_PODMAN_LOG"] = str(podman_log)
+    env["FAKE_STATE_DIR"] = str(state_dir)
     env["FAKE_CONTAINER_EXISTS"] = "true" if container_exists else "false"
     env["FAKE_CONTAINER_RUNNING"] = "true" if container_running else "false"
     env["FAKE_VOLUME_EXISTS"] = "true" if volume_exists else "false"
@@ -315,6 +354,65 @@ class TestRestoreRefusesToOverwriteWithoutForce:
             volume_exists=True,
         )
         assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+
+
+class TestRestoreVerifiesTheContainerActuallyCameUp:
+    """BKP-01: `restore` used to print "[ok] Restored" unconditionally —
+    `cmd_start`'s result was discarded (`cmd_start >/dev/null 2>&1 || true`)
+    and nothing checked afterwards. Reproduced live: on a name with ONLY a
+    volume (no container), `_exists()` (a bare `podman inspect $NAME`, no
+    `--type`) matched the VOLUME's own record, `cmd_start` took the "already
+    exists, just start it" branch, `podman start` failed against a
+    nonexistent container (silenced), and the CLI declared success with NO
+    container ever running. This class pins the postcondition check that
+    now catches that class of failure regardless of which step upstream
+    caused the container to never come up (modeled here via a `podman run`
+    failure — the exact "no container, cmd_start must create one, creation
+    fails" shape)."""
+
+    def test_container_never_starting_is_a_clear_failure_not_a_false_ok(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        archive = _make_backup(tmp_path, fake_bin_dir, tmp_path / "backups")
+        podman_log = tmp_path / "podman-restore.log"
+
+        result = _run_safent(
+            "restore", str(archive), "--force",
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home-for-restore",
+            podman_log=podman_log,
+            container_exists=False,  # only the volume survives the restore
+            container_running=False,
+            volume_exists=False,     # refusal-without-force path not exercised here
+            extra_env={"FAKE_RUN_FAILS": "true"},  # cmd_start's `_run` never comes up
+        )
+
+        assert result.returncode != 0
+        combined = (result.stdout + result.stderr).lower()
+        assert "no safent container is running" in combined
+        assert "[ok] restored" not in combined
+
+    def test_container_that_comes_up_is_still_a_clean_success(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """The happy path (the OTHER nine tests in this file) already covers
+        this, but pinned explicitly here right next to the failure case so
+        the two can never silently diverge again."""
+        archive = _make_backup(tmp_path, fake_bin_dir, tmp_path / "backups")
+        podman_log = tmp_path / "podman-restore.log"
+
+        result = _run_safent(
+            "restore", str(archive), "--force",
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home-for-restore",
+            podman_log=podman_log,
+            container_exists=False,
+            container_running=False,
+            volume_exists=False,
+        )
+
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        assert "[ok] restored" in result.stdout.lower()
 
 
 class TestRestoreRefusesATamperedArchive:

@@ -91,8 +91,18 @@ OS="$(uname -s 2>/dev/null || echo unknown)"
 
 # ---- helpers ----------------------------------------------------------------
 
-_exists()  { "$RT" inspect "$NAME" >/dev/null 2>&1; }
-_running() { [ "$("$RT" inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null || echo false)" = true ]; }
+# --type container (BKP-01): a bare `podman/docker inspect $NAME`, with no
+# type pinned, can match a DIFFERENT resource that happens to share (part of)
+# the name — reproduced live: after `restore` imports ONLY a volume named
+# "$NAME-data" (no container), `podman inspect $NAME` still returned an
+# object (the volume's own record), so `_exists` reported true, `cmd_start`
+# took the "already exists, just start it" branch, `podman start $NAME`
+# failed against a nonexistent container (silenced by `|| true`), and the
+# CLI printed "[ok] Restored"/"[ok] Safent started" with NO container ever
+# created. Pinning the type makes the volume unmatchable here, so `_exists`
+# means exactly "a container by this name exists" everywhere it's used.
+_exists()  { "$RT" inspect --type container "$NAME" >/dev/null 2>&1; }
+_running() { [ "$("$RT" inspect --type container -f '{{.State.Running}}' "$NAME" 2>/dev/null || echo false)" = true ]; }
 
 # Pairing marker — written to the persistent volume on pair, removed on unpair.
 # Stored inside the volume so it survives container recreates. config-sync's
@@ -619,6 +629,17 @@ cmd_restore() {
 
   echo "[*] Starting Safent..."
   cmd_start >/dev/null 2>&1 || true
+
+  # BKP-01: cmd_start's own result was never checked — a silent `podman
+  # start` failure against a nonexistent container (see _exists's own note)
+  # still printed "[ok] Restored" with no container running anywhere. Verify
+  # the postcondition explicitly instead of trusting cmd_start's exit code
+  # (which is itself `|| true`d by callers throughout this CLI).
+  if ! _exists || ! _running; then
+    echo "[x] The archive's data was imported, but no Safent container is running." >&2
+    echo "    Check:  $RT ps -a --filter name=$NAME   /   safent logs" >&2
+    exit 1
+  fi
   echo "[ok] Restored from $_archive"
 }
 
