@@ -3723,30 +3723,71 @@ class DbusRuntimeServiceWiring:
         Read-only supervision — no authZ required (CTRL-P1-5).
         instruction_truncated capped at 120 chars; no full payload exposed.
 
-        Merges two sources, same split as list_configured_tasks (BUG-7):
-        Safent's own agent_tasks queue (chat/manual/self_enqueue work) AND
-        Neus cron's own last-run bookkeeping (jobs.json last_run_at/
-        last_status) — cron jobs fire through Neus's OWN scheduler loop,
-        which never enqueues into agent_tasks, so the SQL-only read always
-        answered [] for every cron-fired run even when the journal showed
-        triggers.timer.fired (spec 025 hallazgo #6: "/tasks/recent siempre
-        []"). Sorted newest-first so the two sources interleave sanely.
+        Merges THREE sources, dedup'd by task_id, sorted newest-first
+        (spec 025 hallazgo B — "/tasks/recent siempre [] con 12 filas en
+        agent_tasks"):
+
+          1. self._cp_service.list_recent_tasks() — works ONLY when cp_service
+             was constructed with a trigger_repo (tests do; __main__.py's
+             production wiring does NOT — a separate
+             SqliteAuthorizedTriggerRepository connection is built later,
+             only for SchedulerTimerSource/SystemEventTriggerSource, and
+             never plumbed into ControlPlaneService). In production this
+             branch always contributed zero rows.
+          2. self._require_trigger_repo().list_recent_tasks() — this wiring's
+             OWN lazily-built repo, the SAME shell-state.db, the SAME path
+             every other trigger verb here already uses
+             (get_scheduled_task, delete_scheduled_task, …). THIS is what
+             actually surfaces chat_message rows and Safent-authorized
+             timer-fired rows (agent_tasks) in production — added
+             additively (not a replacement for #1) so an explicitly-wired
+             cp_service (tests) keeps working unchanged.
+          3. _neus_cron_recent_runs() — Neus cron/jobs.json's own
+             last_run_at/last_status, now kept in sync by
+             SchedulerTimerSource._sync_neus_bookkeeping on every poll
+             (timer_trigger_source.py) instead of staying null forever.
         """
         rows: list[dict] = []
+        seen_task_ids: set[str] = set()
+
+        def _add(row: dict) -> None:
+            task_id = row.get("task_id")
+            if task_id:
+                if task_id in seen_task_ids:
+                    return
+                seen_task_ids.add(task_id)
+            rows.append(row)
+
         if self._cp_service is not None:
             cp_rows = await self._cp_service.list_recent_tasks(limit=limit)
-            rows.extend(
-                {
+            for r in cp_rows:
+                _add({
                     "task_id": r.task_id,
                     "label": r.label,
                     "status": r.status,
                     "trigger_kind": r.trigger_kind,
                     "enqueued_at": r.enqueued_at,
                     "claimed_at": r.claimed_at,
-                }
-                for r in cp_rows
-            )
-        rows.extend(_neus_cron_recent_runs(limit=limit))
+                })
+
+        try:
+            repo_rows = self._require_trigger_repo().list_recent_tasks(limit=limit)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.list_recent_tasks_repo_unavailable: %s", exc)
+            repo_rows = []
+        for r in repo_rows:
+            _add({
+                "task_id": r["task_id"],
+                "label": r["instruction_truncated"] or f"[{r['trigger_kind']}]",
+                "status": r["status"],
+                "trigger_kind": r["trigger_kind"],
+                "enqueued_at": r["enqueued_at"] or "",
+                "claimed_at": r.get("claimed_at"),
+            })
+
+        for r in _neus_cron_recent_runs(limit=limit):
+            _add(r)
+
         rows.sort(key=lambda r: r["enqueued_at"] or "", reverse=True)
         return rows[:limit]
 
