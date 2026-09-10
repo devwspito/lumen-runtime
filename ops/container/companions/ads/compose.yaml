@@ -26,12 +26,15 @@
 name: safent-ads-companion
 
 networks:
+  # La crea provision.sh (`podman network create --subnet 10.201.0.0/24`),
+  # NUNCA compose: con la red declarada aqui como propia, el plugin
+  # docker-compose v2 que usa `podman compose` rechaza la red ya existente
+  # ("incorrect label com.docker.compose.network") y no levanta ningun
+  # servicio (verificacion fresca T214). `external: true` = misma forma que
+  # el compose.companion.yaml del propio servicio ads.
   safent-companions:
     name: safent-companions
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 10.201.0.0/24
+    external: true
 
 services:
   ads-db:
