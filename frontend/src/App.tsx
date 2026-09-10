@@ -93,11 +93,12 @@ export default function App() {
           <Route path="capacidades" element={<CapacidadesView />} />
           <Route path="sistema" element={<SistemaView />} />
           {/* Anuncios: the one exception to "everything else is a hub tab" — the
-              ads vertical is its own connected product surface (a full external
-              panel, not a settings tab), and the sidebar entry only appears once
-              the owner has connected safent-ads (Layout / useAdsPanelOrigin). No
-              ViewGuard: visibility isn't a license feature, it's a connection
-              state, and the view itself handles the "not connected yet" case. */}
+              ads vertical is its own connected product surface (026, contracts/
+              sso.md), same-origin at /ads/* through the session bridge. The
+              sidebar entry is ALWAYS visible (FR-001/Assumption 7, Layout /
+              useAdsAvailability drives only its disabled presentation). No
+              ViewGuard: visibility isn't a license feature, and the view itself
+              renders every FR-003 availability state honestly. */}
           <Route path="anuncios" element={<AdsView />} />
           {/* Back-compat: old standalone paths (deep-links, the agent app-map)
               → the owning hub tab. */}

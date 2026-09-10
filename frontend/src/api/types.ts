@@ -655,6 +655,21 @@ export interface MemoryEntryDetail {
   entry_index: number
 }
 
+// ── Ads bridge (026, contracts/sso.md) ──────────────────────────────────────
+
+// Mirrors the coarse states `CompanionHealthChecker` (T004) derives from the
+// companion's real /mcp/health payload — never a fabricated "ready" (FR-009).
+export type AdsAvailabilityReason =
+  | 'not_installed'
+  | 'unreachable'
+  | 'unauthorized'
+  | 'no_accounts'
+
+export interface AdsBridgeSessionResponse {
+  status: 'ready' | 'unavailable'
+  reason: AdsAvailabilityReason | null
+}
+
 // Frames emitted by the WebSocket stream — discriminated by `kind`.
 // `seq` is a monotonically increasing integer per task_id, added to every frame
 // so the client can deduplicate replay on reconnect (discard seq <= lastSeq).

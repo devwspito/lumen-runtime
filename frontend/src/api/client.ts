@@ -56,6 +56,7 @@ import type {
   UsagePeriod,
   UsageDimension,
   AgentStatsResponse,
+  AdsBridgeSessionResponse,
 } from './types'
 
 // Mirrors the timeout strategy in vanilla api.js: snappy GETs fail fast;
@@ -438,6 +439,18 @@ export function connectManagedRemote(slug: string, url: string, force = false): 
     body: JSON.stringify({ url, force }),
     timeoutMs: 300_000,
   })
+}
+
+// ── Ads bridge (026, contracts/sso.md) ──────────────────────────────────────
+// Mints/refreshes the `ads_bridge` cookie (same-origin, HttpOnly — invisible
+// to this client) AND reports companion readiness in one round trip, so the
+// sidebar's poll both keeps the bridge warm (SC-002: zero-second logins)
+// and drives the disabled/enabled state. Fail-soft: a transient network
+// error degrades to "unavailable/unreachable", never a thrown exception —
+// useAdsAvailability keeps the last known state instead.
+export function mintAdsBridgeSession(): Promise<AdsBridgeSessionResponse> {
+  return request<AdsBridgeSessionResponse>('/ads/bridge/session', { method: 'POST' })
+    .catch(() => ({ status: 'unavailable', reason: 'unreachable' }))
 }
 
 // ── Tasks ─────────────────────────────────────────────────────────────────────
