@@ -552,3 +552,63 @@ class TestSafentPodmanOverridesPath:
         assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
         facts = json.loads(result.stdout.strip())
         assert facts["engineContainer"]["running"] is True
+
+
+class TestBundledPodmanGetsItsOwnStorage:
+    """Regression test (packaging review item 3,
+    specs/028-safent-app-nativa/verificacion-paquete-linux.md §"Pasada 1"):
+    a bundled STATIC (musl) podman and the host's own (glibc) podman/docker
+    collide on ONE shared per-uid /dev/shm lock segment ("failed to open
+    2048 locks ... numerical result out of range"). safent must give the
+    PINNED podman (SAFENT_PODMAN set — never a bare terminal `podman`) its
+    own storage tree under SAFENT_STATE_HOME and its own containers.conf,
+    without ever touching the host's default ~/.local/share/containers."""
+
+    def test_pinned_podman_gets_a_private_storage_conf_and_containers_conf(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        pinned_dir = tmp_path / "bundle"
+        pinned_dir.mkdir()
+        pinned = pinned_dir / "podman"
+        pinned.write_text(_FAKE_PODMAN)
+        pinned.chmod(0o755)
+        # The file stage-runtime.sh's _patch_bundled_containers_conf produces,
+        # sitting beside the pinned podman exactly as it would once flattened.
+        (pinned_dir / "containers.conf").write_text(
+            '[engine]\ncgroup_manager = "cgroupfs"\nlock_type = "file"\n'
+        )
+
+        home_dir = tmp_path / "home"
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=home_dir, podman_log=podman_log)
+        env["SAFENT_PODMAN"] = str(pinned)
+        state_home = home_dir / ".safent"
+        env["SAFENT_STATE_HOME"] = str(state_home)
+
+        result = _run_safent("facts", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+
+        storage_conf = state_home / "podman" / "storage.conf"
+        assert storage_conf.is_file(), "safent must generate its own storage.conf"
+        content = storage_conf.read_text()
+        assert str(state_home / "podman" / "storage") in content
+        assert str(state_home / "podman" / "runroot") in content
+        # Never the host's own default rootless storage path.
+        assert ".local/share/containers" not in content
+
+    def test_a_bare_terminal_podman_on_path_is_left_completely_alone(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """SAFENT_PODMAN unset (a dev/owner's own podman/docker on PATH) must
+        NEVER be redirected to a private storage tree — that would silently
+        orphan whatever they already have there."""
+        home_dir = tmp_path / "home"
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=home_dir, podman_log=podman_log)
+        state_home = home_dir / ".safent"
+        env["SAFENT_STATE_HOME"] = str(state_home)
+        env.pop("SAFENT_PODMAN", None)
+
+        result = _run_safent("facts", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        assert not (state_home / "podman" / "storage.conf").exists()

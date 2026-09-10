@@ -150,6 +150,15 @@ _already_staged() {
     path="$(jq -r ".targets[\$t].entries[$i].path" --arg t "$TARGET" "$LOCKFILE")"
     want_sha="$(jq -r ".targets[\$t].entries[$i].sha256" --arg t "$TARGET" "$LOCKFILE")"
     [ -f "$DEST/$path" ] || return 1
+    if [ "$path" = "etc/containers/containers.conf" ]; then
+      # This ONE entry is deliberately patched post-verification
+      # (_patch_bundled_containers_conf) — its lock hash pins the
+      # PRISTINE upstream download (needed to verify the fresh tarball
+      # extraction), which the STAGED, patched file will never match
+      # again. "Already staged" for this file means "already patched".
+      grep -q '^lock_type = "file"' "$DEST/$path" || return 1
+      continue
+    fi
     got_sha="$(SHA256 "$DEST/$path")"
     [ "$got_sha" = "$want_sha" ] || return 1
   done
@@ -226,6 +235,31 @@ _stage_linux() {
   # 'pasta' (containers/common default); upstream ships it as passt+symlink.
   ln -sf passt "$DEST/bin/pasta"
   echo "    linked bin/pasta -> bin/passt"
+
+  _patch_bundled_containers_conf
+}
+
+# A bundled STATIC (musl) podman and the host's own (glibc) podman/docker,
+# run as the same uid, collide on ONE shared /dev/shm lock segment sized
+# differently by each libc's pthread_mutex_t layout — reproduced live:
+# "failed to open 2048 locks in /libpod_rootless_lock_1000: numerical
+# result out of range" (specs/028-safent-app-nativa/
+# verificacion-paquete-linux.md §"Pasada 1"). The upstream tarball's own
+# containers.conf verified-and-staged just above is patched here (its
+# hash re-pinned right after, below) to add `lock_type = "file"` — file
+# locks per storage tree, no shared-by-uid segment at all. `safent` points
+# CONTAINERS_CONF at this bundled file (never the host's own
+# ~/.config/containers/) whenever SAFENT_PODMAN is set, and generates a
+# private graphroot/runroot under $SAFENT_STATE_HOME at runtime (the OTHER
+# half of this fix — storage.conf can't be patched here: those paths are
+# only known once the app actually runs).
+_patch_bundled_containers_conf() {
+  local conf="$DEST/etc/containers/containers.conf"
+  [ -f "$conf" ] || { echo "[x] expected $conf to already be staged" >&2; exit "$EXIT_STAGE"; }
+  grep -q '^lock_type' "$conf" && return 0
+  printf '\n# Added by stage-runtime.sh — see its own comment for why.\nlock_type = "file"\n' >> "$conf"
+  chmod 0644 "$conf"
+  echo "    patched etc/containers/containers.conf (lock_type = \"file\")"
 }
 
 # ---- aarch64-apple-darwin: expand the official .pkg (never install it) + VM ---

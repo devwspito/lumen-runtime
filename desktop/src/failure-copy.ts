@@ -109,6 +109,10 @@ const COPY: Record<FailureCode, FailureCopy> = {
     headline: 'Safent no consiguió avanzar en este equipo.',
     hint: 'Vuelve a intentarlo. Si sigue fallando, exporta el diagnóstico.',
   },
+  local_storage_conflict: {
+    headline: 'Algo en este equipo ya está usando el almacén local de Safent.',
+    hint: 'Cierra otras copias de Safent que puedan estar abiertas y vuelve a intentarlo.',
+  },
 }
 
 const FALLBACK: FailureCopy = {

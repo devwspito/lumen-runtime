@@ -58,6 +58,7 @@ export type FailureCode =
   | 'cancelled_by_owner'
   | 'cli_porcelain_unsupported'
   | 'repair_ineffective'
+  | 'local_storage_conflict'
 
 /** One line from `safent://engine-event`, exactly `boot.rs`'s `EngineEventPayload`. */
 export type EngineEvent =
