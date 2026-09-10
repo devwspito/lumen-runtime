@@ -85,9 +85,23 @@ ensure_network() {
   log "red '$COMPANION_NETWORK' creada ($COMPANION_SUBNET)"
 }
 
+# ads-api corre como uid 10001 dentro del contenedor y monta tls/ de solo
+# lectura: con leaf.key a 0600 del usuario del host el proceso no puede leer
+# la clave y entra en bucle de arranque (verificacion fresca T214). Un
+# chown al uid del contenedor no es portable (rootless remapea a subuid), asi
+# que la clave HOJA queda legible por modo y la protege el directorio de
+# estado (0700): ningun otro usuario del host lo atraviesa. La clave de la
+# CA (ca.key) no se monta nunca y sigue a 0600.
+_open_leaf_key_to_container() {
+  chmod 0644 "$STATE/tls/leaf.key"
+}
+
 # ── 2. CA + leaf (ECDSA P-256, SAN=ads.safent.internal) ─────────────────────
 ensure_tls() {
-  [ -f "$STATE/tls/ca.crt" ] && [ -f "$STATE/tls/leaf.crt" ] && [ -f "$STATE/tls/leaf.key" ] && return 0
+  if [ -f "$STATE/tls/ca.crt" ] && [ -f "$STATE/tls/leaf.crt" ] && [ -f "$STATE/tls/leaf.key" ]; then
+    _open_leaf_key_to_container
+    return 0
+  fi
   log "generando CA privada + hoja TLS para $COMPANION_HOST…"
   local ca_key="$STATE/tls/ca.key" ca_crt="$STATE/tls/ca.crt"
   local leaf_key="$STATE/tls/leaf.key" leaf_crt="$STATE/tls/leaf.crt"
@@ -99,8 +113,9 @@ ensure_tls() {
   openssl x509 -req -in "$STATE/tls/leaf.csr" -CA "$ca_crt" -CAkey "$ca_key" -CAcreateserial \
     -days 825 -sha256 -extfile <(printf 'subjectAltName=DNS:%s' "$COMPANION_HOST") -out "$leaf_crt"
   rm -f "$STATE/tls/leaf.csr"
-  chmod 0600 "$ca_key" "$leaf_key"
+  chmod 0600 "$ca_key"
   chmod 0644 "$ca_crt" "$leaf_crt"
+  _open_leaf_key_to_container
 }
 
 # ── 3. Bearer ────────────────────────────────────────────────────────────────
