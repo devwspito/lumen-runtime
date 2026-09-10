@@ -288,7 +288,10 @@ def create_egress_router(mfa: MfaStore | None = None) -> APIRouter:
     async def deny_add(body: _DomainBody) -> dict:
         d = _normalize(body.domain)
         if not _DOMAIN_RE.match(d):
-            return {"ok": False, "error": f"dominio inválido: {body.domain!r}"}
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "invalid_domain", "message": f"dominio inválido: {body.domain!r}"},
+            )
         domains = sorted(set(_load_denylist()) | {d})
         _save_denylist(domains)
         ok = _apply_network_mode()
@@ -320,7 +323,10 @@ def create_egress_router(mfa: MfaStore | None = None) -> APIRouter:
     async def grant(body: _DomainBody) -> dict:
         d = _normalize(body.domain)
         if not _DOMAIN_RE.match(d):
-            return {"ok": False, "error": f"dominio inválido: {body.domain!r}"}
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "invalid_domain", "message": f"dominio inválido: {body.domain!r}"},
+            )
         domains = sorted(set(_load()) | {d})
         _save(domains)
         ok = _apply_network_mode()
@@ -347,7 +353,10 @@ def create_egress_router(mfa: MfaStore | None = None) -> APIRouter:
     async def grant_mcp(body: _DomainBody) -> dict:
         d = _normalize(body.domain)
         if not _DOMAIN_RE.match(d):
-            return {"ok": False, "error": f"dominio inválido: {body.domain!r}"}
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "invalid_domain", "message": f"dominio inválido: {body.domain!r}"},
+            )
         domains = sorted(set(_load_from(_MCP_GRANTS_PATH)) | {d})
         _save_to(_MCP_GRANTS_PATH, domains)
         ok = _push_session(_MCP_GRANT_SESSION, domains)
