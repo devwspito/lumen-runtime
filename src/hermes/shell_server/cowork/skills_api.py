@@ -21,6 +21,10 @@ Security:
     (scan→score→user-decide) BEFORE anything is written to disk or the skills
     view. A CRITICAL trojan pattern (dropper / reverse shell / obfuscated exec)
     is BLOCKED 422 — no SKILL.md, no row, nothing the agent can discover.
+  - install force=True (025 Top-4): a bearer-authenticated operator is NOT
+    the same as the OWNER — force overrides a FAIL antivirus verdict, so it
+    requires the owner's TOTP via the SAME require_owner_mfa gate
+    POST /security/decisions uses (401/403 typed on missing/bad code).
 """
 
 from __future__ import annotations
@@ -31,6 +35,8 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+from hermes.shell_server.security.mfa import MfaStore
+from hermes.shell_server.security.owner_mfa_gate import require_owner_mfa
 from hermes.tasks.control_plane.domain.ports import AgentUnavailable
 
 logger = logging.getLogger("hermes.shell_server.cowork.skills_api")
@@ -44,6 +50,9 @@ logger = logging.getLogger("hermes.shell_server.cowork.skills_api")
 class InstallSkillRequest(BaseModel):
     identifier: str = Field(min_length=1, description="Hub skill identifier (e.g. 'pdf-tools')")
     force: bool = Field(default=False, description="Owner-sovereign override: install despite FAIL verdict")
+    totp: str | None = Field(
+        default=None, description="Owner TOTP code — required when force=True"
+    )
 
 
 class SynthesizeSkillRequest(BaseModel):
@@ -268,10 +277,20 @@ def create_skills_hub_router(db_path: Path) -> APIRouter:
     async def install_hub_skill(request: Request, body: InstallSkillRequest) -> dict:
         """Install a skill from the hub. Returns {op_id, status}.
 
-        When body.force=True the owner-sovereign override is forwarded to the
-        daemon.  The operator-token middleware already fronts this route so only
-        authenticated operators can set force.
+        When body.force=True the caller is overriding a FAIL antivirus verdict
+        — a bearer-authenticated operator is not necessarily the owner, so this
+        requires the owner's TOTP (025 Top-4), same require_owner_mfa gate as
+        POST /security/decisions. Only after that passes is force forwarded to
+        the daemon, which records the override via record_install_decision
+        (same mutator /security/decisions calls — WORM install_reviews row +
+        scan_records.decision=ALLOWED).
         """
+        if body.force:
+            require_owner_mfa(
+                MfaStore(),
+                body.totp or "",
+                action="instalar una skill que el antivirus bloqueó (queda auditado)",
+            )
         proxy = request.app.state.dbus_proxy
         try:
             return await proxy.call_mutator("install_hub_skill", body.identifier, body.force)
