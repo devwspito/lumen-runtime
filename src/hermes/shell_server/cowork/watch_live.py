@@ -4,15 +4,14 @@ Route: WS /api/v1/watch/agent/live
 
 Purpose ("Verificar")
 ---------------------
-After teaching a skill, the operator asks the agent (via chat) to USE the skill
-and WATCHES it execute in real time. Unlike the teaching live-view
-(`training_live.py`), which drives its OWN isolated context and injects operator
-input, this view is **read-only**: it screencasts the page the AGENT is actively
-using in the shared jailed Chromium so the human can corroborate the run.
+The operator asks the agent (via chat) to run a task and WATCHES it execute in
+real time. This view is **read-only**: it screencasts the page the AGENT is
+actively using in the shared jailed Chromium so the human can corroborate the
+run — it does NOT inject input and does NOT create a context, it attaches to
+the agent's existing page.
 
-Reuses the teaching plumbing: same jailed CDP endpoint, `CdpScreencastSource`,
-JPEG-over-WS frame loop, and token auth. It does NOT inject input and does NOT
-create a context — it attaches to the agent's existing page.
+Shares its CDP endpoint, `CdpScreencastSource`, JPEG-over-WS frame loop, and
+token auth with the other live-view bridges via `live_view_support.py`.
 
 Page selection (best-effort)
 ----------------------------
@@ -32,12 +31,12 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from hermes.browser.infrastructure.cdp_screencast_source import CdpScreencastSource
-from hermes.shell_server.cowork.training_live import (
-    _cdp_url,
-    _send_frames,
-    _stop_playwright_safe,
-    _try_ensure_browser_running,
-    _verify_token,
+from hermes.shell_server.cowork.live_view_support import (
+    cdp_url,
+    send_frames,
+    stop_playwright_safe,
+    try_ensure_browser_running,
+    verify_token,
 )
 
 logger = logging.getLogger("hermes.shell_server.cowork.watch_live")
@@ -98,11 +97,11 @@ def create_watch_live_router() -> APIRouter:
 
     @router.websocket("/api/v1/watch/agent/live")
     async def watch_agent_live(websocket: WebSocket) -> None:
-        # Auth: same stable webui bearer as training_live (WS upgrades bypass the
-        # POST-only HTTP middleware), passed as ?token=.
+        # Auth: same stable webui bearer as the other live-view bridges (WS upgrades
+        # bypass the POST-only HTTP middleware), passed as ?token=.
         webui_token: str = getattr(websocket.app.state, "shell_webui_token", "")
         candidate: str = websocket.query_params.get("token", "")
-        if not _verify_token(candidate, webui_token):
+        if not verify_token(candidate, webui_token):
             await websocket.close(code=1008, reason="unauthorized")
             return
 
@@ -116,9 +115,9 @@ def create_watch_live_router() -> APIRouter:
         try:
             from playwright.async_api import async_playwright  # noqa: PLC0415
 
-            await _try_ensure_browser_running()
+            await try_ensure_browser_running()
             pw = await async_playwright().start()
-            browser = await pw.chromium.connect_over_cdp(_cdp_url())
+            browser = await pw.chromium.connect_over_cdp(cdp_url())
 
             page = await _wait_for_agent_page(browser)
             if page is None:

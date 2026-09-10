@@ -5,8 +5,8 @@ from uuid import uuid4
 
 import pytest
 
-from hermes.training.domain.skill_package import SkillPackage
-from hermes.training.domain.skill_state import SkillState
+from hermes.capabilities.domain.skill_package import SkillPackage
+from hermes.capabilities.domain.skill_state import SkillState
 
 pytestmark = pytest.mark.unit
 

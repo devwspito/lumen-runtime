@@ -58,9 +58,9 @@ def _resolve_session_name(raw: str | None) -> str | None:
 
 
 def create_vnc_proxy_router() -> APIRouter:
-    from hermes.shell_server.cowork.training_live import (  # noqa: PLC0415
-        _try_ensure_browser_running,
-        _verify_token,
+    from hermes.shell_server.cowork.live_view_support import (  # noqa: PLC0415
+        try_ensure_browser_running,
+        verify_token,
     )
 
     router = APIRouter()
@@ -68,7 +68,7 @@ def create_vnc_proxy_router() -> APIRouter:
     @router.websocket("/api/v1/vnc")
     async def vnc(websocket: WebSocket) -> None:
         webui_token: str = getattr(websocket.app.state, "shell_webui_token", "")
-        if not _verify_token(websocket.query_params.get("token", ""), webui_token):
+        if not verify_token(websocket.query_params.get("token", ""), webui_token):
             await websocket.close(code=1008, reason="unauthorized")
             return
 
@@ -82,7 +82,7 @@ def create_vnc_proxy_router() -> APIRouter:
         sub = "binary" if "binary" in subs else None
         await websocket.accept(subprotocol=sub)
 
-        await _try_ensure_browser_running(session_name)  # bring this session's headful browser up
+        await try_ensure_browser_running(session_name)  # bring this session's headful browser up
 
         rfb_port = session_ports(session_name).rfb_port
         try:

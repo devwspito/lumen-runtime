@@ -888,7 +888,7 @@ def _build_skill_store_adapter(db_path: Path):
     try:
         from hermes.capabilities.infrastructure.skill_store_adapter import SkillStoreAdapter  # noqa: PLC0415
         from hermes.shell_server.skills.native_keystore_adapter import NativeKeyStoreAdapter  # noqa: PLC0415
-        from hermes.training.application.skill_signer import SigningKeyError  # noqa: PLC0415
+        from hermes.capabilities.application.skill_signer import SigningKeyError  # noqa: PLC0415
 
         kms = NativeKeyStoreAdapter()
         # Canonical store = $HERMES_HOME/skills (the read/exec path). Only an

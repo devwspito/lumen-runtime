@@ -60,9 +60,6 @@ from hermes.agents_os.application.telemetry_opt_in import (
 from hermes.agents_os.application.tenant_binding_service import (
     TenantBindingService,
 )
-from hermes.agents_os.application.training_session_orchestrator import (
-    TrainingSessionOrchestrator,
-)
 from hermes.agents_os.domain.always_on_policy import (
     InstallProfile,
     default_policy_for,
@@ -282,42 +279,25 @@ class TestE2EPersonalDesktopBootstrap:
 
         assert attempt.state == OtaAttemptState.QUEUED
 
-        # --- TrainingSession ---
-        trainer = TrainingSessionOrchestrator()
-        sess = trainer.start(
+        # --- SkillCompiler + persistence — 3 steps cross-domain ---
+        pkg = compiler.compile_from_steps(
             tenant_id=tenant_id,
-            human_user_id=uuid4(),
             skill_id="invoice-upload",
-            surface_kinds_allowed=frozenset(
-                {SurfaceKind.BROWSER, SurfaceKind.DESKTOP_APP}
-            ),
+            steps=[
+                (
+                    SurfaceKind.BROWSER,
+                    {"click": "#upload"},
+                    "abro el upload del portal",
+                ),
+                (
+                    SurfaceKind.DESKTOP_APP,
+                    {"app": "nautilus", "select": "/tmp/inv.pdf"},
+                    "elijo el PDF de la factura",
+                ),
+                (SurfaceKind.BROWSER, {"click": "#submit"}, "envío"),
+            ],
+            version=1,
         )
-        # 3 steps cross-domain
-        trainer.capture_step(
-            session_id=sess.session_id,
-            surface_kind=SurfaceKind.BROWSER,
-            action_payload={"click": "#upload"},
-            voice_caption="abro el upload del portal",
-        )
-        trainer.capture_step(
-            session_id=sess.session_id,
-            surface_kind=SurfaceKind.DESKTOP_APP,
-            action_payload={"app": "nautilus", "select": "/tmp/inv.pdf"},
-            voice_caption="elijo el PDF de la factura",
-        )
-        trainer.capture_step(
-            session_id=sess.session_id,
-            surface_kind=SurfaceKind.BROWSER,
-            action_payload={"click": "#submit"},
-            voice_caption="envío",
-        )
-        trainer.request_review(session_id=sess.session_id)
-        signed = trainer.sign(
-            session_id=sess.session_id, human_confirmed=True
-        )
-
-        # --- SkillCompiler + persistence ---
-        pkg = compiler.compile(session=signed, version=1)
         skill_repo.add(pkg)
         signer.append(
             audit_kind=AuditKind.SKILL_PROMOTED,

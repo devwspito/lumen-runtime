@@ -356,8 +356,8 @@ class TestFailClosedSigningWithoutMasterKey:
     def test_resolve_signing_key_raises_when_native_unavailable(
         self, tmp_path: Path
     ) -> None:
-        from hermes.shell_server.training.persist import resolve_signing_key  # noqa: PLC0415
-        from hermes.training.application.skill_signer import SigningKeyError  # noqa: PLC0415
+        from hermes.shell_server.skills.skill_signing_key import resolve_signing_key  # noqa: PLC0415
+        from hermes.capabilities.application.skill_signer import SigningKeyError  # noqa: PLC0415
         import hermes.shell_server.skills.native_keystore_adapter as _mod  # noqa: PLC0415
 
         with patch.object(_mod, "SecretsVault", side_effect=RuntimeError("no master.key")):
@@ -366,8 +366,8 @@ class TestFailClosedSigningWithoutMasterKey:
 
     def test_no_v1_tuple_returned_when_native_unavailable(self, tmp_path: Path) -> None:
         """Regression: the old code returned ('v1', key) — must now raise."""
-        from hermes.shell_server.training.persist import resolve_signing_key  # noqa: PLC0415
-        from hermes.training.application.skill_signer import SigningKeyError  # noqa: PLC0415
+        from hermes.shell_server.skills.skill_signing_key import resolve_signing_key  # noqa: PLC0415
+        from hermes.capabilities.application.skill_signer import SigningKeyError  # noqa: PLC0415
         import hermes.shell_server.skills.native_keystore_adapter as _mod  # noqa: PLC0415
 
         with patch.object(_mod, "SecretsVault", side_effect=RuntimeError("no key")):
@@ -386,7 +386,7 @@ class TestFailClosedSigningWithoutMasterKey:
     ) -> None:
         """persist_composio_skill must propagate the SigningKeyError — no v1 skill written."""
         from hermes.shell_server.skills.composio_skill_service import persist_composio_skill  # noqa: PLC0415
-        from hermes.training.application.skill_signer import SigningKeyError  # noqa: PLC0415
+        from hermes.capabilities.application.skill_signer import SigningKeyError  # noqa: PLC0415
         import hermes.shell_server.skills.native_keystore_adapter as _mod  # noqa: PLC0415
 
         db = tmp_path / "test.db"

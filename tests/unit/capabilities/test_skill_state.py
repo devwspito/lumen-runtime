@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from hermes.training.domain.skill_state import (
+from hermes.capabilities.domain.skill_state import (
     SkillState,
     SkillStateTransitionError,
     assert_transition,

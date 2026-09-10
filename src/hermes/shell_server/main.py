@@ -890,35 +890,6 @@ def create_app() -> FastAPI:
     # import time in non-OS environments.
     app.state.control_plane = _build_dbus_control_plane_client()
 
-    from hermes.shell_server.training.api import (
-        _get_orchestrator,
-        create_training_router,
-    )
-
-    # Wire the teaching (spec 004/US3) isolation layer. open_teaching_session
-    # opens an isolated context (agent-browser --session) and claims OPERATOR
-    # input-ownership in the ledger; the recording lifecycle (start/stop/sign) is
-    # driven by the training router itself. We pass the same orchestrator the
-    # router uses for consistency.
-    from hermes.agents_os.application.teaching.input_ownership_ledger import (
-        InputOwnershipLedger,
-    )
-    from hermes.agents_os.application.teaching.teaching_session_orchestrator import (
-        TeachingSessionOrchestrator,
-    )
-    from hermes.agents_os.infrastructure.agent_browser_teaching_context import (
-        AgentBrowserTeachingContext,
-    )
-
-    _teaching_orchestrator = TeachingSessionOrchestrator(
-        training_orchestrator=_get_orchestrator(_DB_PATH),
-        context_factory=AgentBrowserTeachingContext(),
-        ledger=InputOwnershipLedger(),
-    )
-    app.include_router(
-        create_training_router(_DB_PATH, teaching_orchestrator=_teaching_orchestrator)
-    )
-
     from hermes.shell_server.agent_browser import create_browser_router
 
     app.include_router(create_browser_router())
@@ -1327,12 +1298,6 @@ def create_app() -> FastAPI:
     from hermes.shell_server.cowork.chat_stream import (  # noqa: PLC0415
         create_chat_stream_router,
     )
-    from hermes.shell_server.cowork.training_live import (  # noqa: PLC0415
-        create_training_live_router,
-    )
-    from hermes.shell_server.training.api import (  # noqa: PLC0415
-        _get_orchestrator as _get_training_orchestrator,
-    )
     from hermes.shell_server.cowork.workspace_api import (  # noqa: PLC0415
         create_workspace_router,
     )
@@ -1346,32 +1311,17 @@ def create_app() -> FastAPI:
     from hermes.shell_server.egress_api import create_egress_router  # noqa: PLC0415
 
     app.include_router(create_chat_stream_router())
-    # Pass the SAME orchestrator the training router uses so the live-view captures
-    # the operator's demonstrated actions as steps (compile_and_persist reads them).
-    app.include_router(
-        create_training_live_router(orchestrator=_get_training_orchestrator(_DB_PATH))
-    )
     # Read-only live-watch of the agent's internal browser (Verificar).
     from hermes.shell_server.cowork.watch_live import (  # noqa: PLC0415
         create_watch_live_router,
     )
     app.include_router(create_watch_live_router())
     # VNC-over-WebSocket bridge → x11vnc on the jailed browser's Xvfb display. The
-    # UI's noVNC connects here for a sharp+fluid live view (En vivo → Enseñar/Actividad).
+    # UI's noVNC connects here for a sharp+fluid live view (En vivo → Actividad).
     from hermes.shell_server.cowork.vnc_proxy import (  # noqa: PLC0415
         create_vnc_proxy_router,
     )
     app.include_router(create_vnc_proxy_router())
-    # UI-driven teaching over the noVNC browser: POST /teach/start + /save record the
-    # demonstration via a CDP observer and compile the SKILL.md (same orchestrator).
-    from hermes.shell_server.cowork.teach_vnc import (  # noqa: PLC0415
-        create_teach_vnc_router,
-    )
-    app.include_router(
-        create_teach_vnc_router(
-            orchestrator=_get_training_orchestrator(_DB_PATH), db_path=_DB_PATH
-        )
-    )
     # UTF-8 copy/paste bridge for the noVNC view (CDP-based, bypasses x11vnc's broken
     # clipboard): POST /clipboard/paste inserts text into the jailed browser, /copy
     # reads its current selection. The frontend intercepts Ctrl/Cmd+V and +C.

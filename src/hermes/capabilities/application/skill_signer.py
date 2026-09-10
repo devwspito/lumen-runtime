@@ -25,7 +25,7 @@ from datetime import UTC, datetime
 from typing import Protocol
 from uuid import UUID
 
-from hermes.training.domain.skill_package import SkillPackage
+from hermes.capabilities.domain.skill_package import SkillPackage
 
 logger = logging.getLogger(__name__)
 

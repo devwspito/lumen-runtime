@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from hermes.training.domain.skill_state import SkillState
+from hermes.capabilities.domain.skill_state import SkillState
 
 
 @dataclass(frozen=True, slots=True)
