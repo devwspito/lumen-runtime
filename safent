@@ -45,6 +45,12 @@ DATA_VOLUME="${SAFENT_DATA_VOLUME:-${NAME}-data}"
 # Derived from NAME for the same reason DATA_VOLUME is: a second instance
 # gets its own machine automatically instead of colliding on one name.
 MACHINE_NAME="${SAFENT_MACHINE_NAME:-${NAME}-engine}"
+# macOS-only: the bundled machine disk's FLAT filename once staged+packaged
+# (stage-runtime.sh's _stage_macos stages it at machine/<blob_filename>;
+# Tauri's bundle.resources glob flattens that away, same as bin/podman ->
+# podman — see runtime-manifest.lock's machine_image.blob_filename, the one
+# committed source for this name). MAC-06, verificacion-mac-1.md.
+MACHINE_IMAGE_FILE="${SAFENT_MACHINE_IMAGE_FILE:-podman-machine.aarch64.applehv.raw.zst}"
 # Graceful stop (item #2, spec 025 matriz): PID1 is systemd, which needs
 # SIGRTMIN+3 (not SIGTERM) to begin an orderly shutdown of every unit —
 # STOPSIGNAL SIGRTMIN+3 is baked into the image, but pinning it here too
@@ -1809,8 +1815,31 @@ cmd_ensure_machine() {
   if [ -z "$name" ]; then
     name="$MACHINE_NAME"
     if ! "$RT" machine inspect "$name" >/dev/null 2>&1; then
-      "$RT" machine init "$name" --rootful --cpus 4 --memory 8192 --disk-size 60 >&2 \
-        || _die_porcelain machine_create_failed "No se pudo crear la maquina" true
+      # MAC-06 (verificacion-mac-1.md): without --image, podman would
+      # download its OWN copy of the very same 932 MB machine image this
+      # app already ships (93% of the DMG) and needs network to do it —
+      # contracts/app-engine.md §4 promises "sin red". Only when running
+      # the BUNDLED podman (never a bare terminal install's own, which
+      # ships no machine image at all) AND the file is actually there.
+      # --provider applehv: the bundled disk boots under either backend on
+      # Apple Silicon (runtime-manifest.lock's own machine_image note), but
+      # vfkit (Apple's Virtualization.framework, zero extra runtime deps)
+      # is what this app bundles vfkit/gvproxy specifically to drive for a
+      # FRESH create — krunkit + its GPU libs (libkrun/libepoxy/MoltenVK/
+      # virglrenderer) travel only to start a machine already ADOPTED under
+      # libkrun from a previous run, never to create a new one.
+      _machine_image=""
+      if [ -n "${_podman_bundle_dir:-}" ] && [ -f "$_podman_bundle_dir/$MACHINE_IMAGE_FILE" ]; then
+        _machine_image="$_podman_bundle_dir/$MACHINE_IMAGE_FILE"
+      fi
+      if [ -n "$_machine_image" ]; then
+        "$RT" machine init "$name" --image "$_machine_image" --provider applehv \
+          --rootful --cpus 4 --memory 8192 --disk-size 60 >&2 \
+          || _die_porcelain machine_create_failed "No se pudo crear la maquina" true
+      else
+        "$RT" machine init "$name" --rootful --cpus 4 --memory 8192 --disk-size 60 >&2 \
+          || _die_porcelain machine_create_failed "No se pudo crear la maquina" true
+      fi
     fi
     # Written (or re-written) every time we settle on OUR OWN name — never
     # "true" here: this CLI no longer has an adoption path for a machine it

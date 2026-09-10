@@ -864,3 +864,76 @@ class TestBundledPodmanGetsItsOwnStorage:
         result = _run_safent("facts", env=env)
         assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
         assert not (state_home / "podman" / "storage.conf").exists()
+
+
+class TestMachineInitUsesTheBundledImage:
+    """MAC-06 (verificacion-mac-1.md): `machine init` shipped with no
+    `--image` at all, so the bundled 932 MB `podman-machine.aarch64.
+    applehv.raw.zst` (93% of the DMG) went unused and podman would download
+    its own copy from quay.io — contradicting contracts/app-engine.md §4's
+    "crea la nuestra desde la imagen empaquetada, sin red". Only applies to
+    the PINNED podman (SAFENT_PODMAN set, same distinction
+    TestBundledPodmanGetsItsOwnStorage draws) — a bare terminal install
+    ships no machine image to point at."""
+
+    def test_machine_init_receives_image_and_provider_when_the_bundled_image_is_present(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        _fake_darwin(fake_bin_dir)
+        pinned_dir = tmp_path / "bundle"
+        pinned_dir.mkdir()
+        pinned = pinned_dir / "podman"
+        pinned.write_text(_FAKE_PODMAN)
+        pinned.chmod(0o755)
+        image_file = pinned_dir / "podman-machine.aarch64.applehv.raw.zst"
+        image_file.write_bytes(b"not a real disk image, existence is what's tested")
+
+        podman_log = tmp_path / "podman.log"
+        machines_state = tmp_path / "machines.state"
+        machines_state.write_text("")
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            extra_env={"FAKE_MACHINES_STATE": str(machines_state)},
+        )
+        env["SAFENT_PODMAN"] = str(pinned)
+
+        result = _run_safent("ensure-machine", "--porcelain", env=env)
+
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        calls = _podman_calls(podman_log)
+        expected = (
+            f"machine init safent-test-engine --image {image_file} --provider applehv "
+            "--rootful --cpus 4 --memory 8192 --disk-size 60"
+        )
+        assert expected in calls, f"expected exactly: {expected!r}\ngot: {calls}"
+
+    def test_machine_init_omits_image_and_provider_when_the_bundled_image_file_is_absent(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        _fake_darwin(fake_bin_dir)
+        pinned_dir = tmp_path / "bundle"
+        pinned_dir.mkdir()
+        pinned = pinned_dir / "podman"
+        pinned.write_text(_FAKE_PODMAN)
+        pinned.chmod(0o755)
+        # Deliberately NOT creating podman-machine.aarch64.applehv.raw.zst.
+
+        podman_log = tmp_path / "podman.log"
+        machines_state = tmp_path / "machines.state"
+        machines_state.write_text("")
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            extra_env={"FAKE_MACHINES_STATE": str(machines_state)},
+        )
+        env["SAFENT_PODMAN"] = str(pinned)
+
+        result = _run_safent("ensure-machine", "--porcelain", env=env)
+
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        calls = _podman_calls(podman_log)
+        assert "machine init safent-test-engine --rootful --cpus 4 --memory 8192 --disk-size 60" in calls
+        assert not any("--image" in c for c in calls), calls
