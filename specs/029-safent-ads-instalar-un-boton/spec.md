@@ -2,7 +2,7 @@
 
 **Feature Directory**: `specs/029-safent-ads-instalar-un-boton/`
 **Created**: 2026-09-10
-**Status**: Draft — 3 preguntas abiertas
+**Status**: Resuelta — CL-001/CL-002/CL-003 cerradas el 10-sep-2026 (ver «Resolución de aclaraciones» al final)
 **Input**: User description (verbatim, 10-sep-2026): «este MCP de safent-ads debe ser "Instalar" y punto. Luego me pedirá lo que necesite de meta y de google, pero no puedes pedirle al usuario que levante el MCP aparte y te dé el enlace, eso no tiene sentido.» · «safent-ads viene native installed → un botón y debe levantar el MCP y todo, y el onboarding y la UI debe pedirte las credenciales de meta y el OAuth de Google Cloud.»
 
 ## Contexto (por qué existe esta spec)
@@ -174,8 +174,78 @@ camino por defecto. No es MVP: P1 ya deja el companion operativo.
 
 ## Ready for next step?
 
-BLOCKED — resolver estos `[NEEDS CLARIFICATION]` en `/team-clarify` o Q&A con el propietario antes de planificar:
+READY — CL-001, CL-002 y CL-003 resueltas el 10-sep-2026 (§«Resolución de aclaraciones»). El plan conjunto con 028 vive en `../028-safent-app-nativa/{plan,research,data-model,tasks}.md` y `../028-safent-app-nativa/contracts/`.
 
-- **CL-001 (alcance/seguridad)**: ¿P2 (FR-010) incluye recoger en la UI las credenciales de la **app desarrolladora del vendor** (app de Meta + cliente OAuth de Google Cloud) —hoy editadas a mano en el host—, o se limita a **conectar cuentas** por OAuth dentro del panel ya existente? Cambia la superficie de escritura de secretos en el host.
-- **CL-002 (alcance/UX, ligado al mayor riesgo)**: cuando Safent arrancó **sin** companion, ¿se acepta que «Instalar» **recree/reinicie** Safent (breve interrupción) para que el daemon vea el companion y llegue a `ready`, o «Instalar» debe operar **sin** reinicio y por tanto solo cuando Safent arrancó con capacidad de companion?
-- **CL-003 (datos/seguridad)**: al «Quitar» desde P3, ¿se **conserva** el estado/credenciales del companion (equivalente a `remove`) o se **purga** (equivalente a `--purge`)? Propuesta por defecto: conservar.
+---
+
+## Resolución de aclaraciones (10-sep-2026)
+
+Decisiones del dueño y del coordinador. **Vinculantes.** El detalle y las
+alternativas rechazadas viven en `../028-safent-app-nativa/research.md`.
+
+### El principio rector de 028 aplica también aquí
+
+- **FR-014**: Instalar Anuncios **NO DEBE tener ningún paso del usuario que pueda
+  salir mal**: una pulsación y nada más. Cero comandos, cero URL, cero elecciones,
+  nada que pegar.
+- **FR-015**: Todo estado adverso DEBE **auto-sanarse sin preguntar**: red previa que
+  coincide ⇒ se reutiliza; compañero a medio aprovisionar ⇒ se converge; descarga
+  cortada ⇒ se reanuda; imagen envejecida ⇒ se re-baja verificada por **digest**;
+  segunda pulsación ⇒ no dispara una segunda instalación.
+- **FR-016**: Lo que no se pueda reparar DEBE mostrarse en **una sola pantalla** con
+  la causa y **un** «Reintentar». **Prohibida toda instrucción de terminal.**
+- **SC-006**: Una persona que **nunca ha oído la palabra «contenedor»** deja Anuncios
+  operativo (instalado, con credenciales y con una cuenta conectada) **sin leer
+  nada**: 5 de 5 intentos.
+- **SC-007**: En una batería de 6 estados adversos (limpio · con red previa · a medio
+  aprovisionar · agente del host caído · sin red · imagen envejecida), **0** piden
+  algo al propietario más allá de pulsar «Reintentar», y **0** muestran un comando.
+
+### CL-001 — alcance del onboarding: **incluye las credenciales del vendor**
+
+La UI recoge **las credenciales de la app desarrolladora del vendor** (cliente OAuth
+de Google Cloud con su **developer token**, y app de Meta con `app_id`/`app_secret`)
+**y** conecta las cuentas por OAuth. Nunca por `vendor.env`, nunca por entorno,
+nunca por línea de comandos.
+
+**No se construye nada nuevo**: safent-ads **ya tiene** ese camino
+(`GET/PUT/DELETE /platform-apps` con reautenticación, cifrado en el bróker y estado
+enmascarado de vuelta; panel en `ConexionesPage` + `ConnectProviderCard`). El
+onboarding lo **encadena**, no lo duplica.
+
+- **FR-010 (revisado)**: el onboarding DEBE recoger en la UI las credenciales del
+  vendor **y** conectar las cuentas, reutilizando el panel existente del compañero.
+- **Hueco real detectado**: no existe campo **`developer_token` de Google Ads** en el
+  esquema de credenciales del vendor. Es la **única** pieza nueva que 029 necesita en
+  safent-ads (tarea T021 de `../028-safent-app-nativa/tasks.md`).
+
+### CL-002 — «Instalar» **no** reinicia Safent en el caso normal
+
+Sí, «Instalar» **puede** reiniciar Safent de forma transparente si hiciera falta —
+pero el diseño hace que **no haga falta**: el **andamiaje del compañero** (red fija,
+estado y los cuatro ficheros de sólo lectura) se aprovisiona **siempre**, esté o no
+instalado el compañero. Así «Instalar» es bajar la imagen, levantar los servicios y
+un verbo del daemon que **relee** la presencia — sin interrupción.
+
+- **FR-017**: el andamiaje del compañero DEBE existir siempre, de modo que instalar
+  Anuncios NO exija recrear Safent.
+- **FR-018**: sólo una instalación **heredada** sin esos ficheros cae al camino de
+  recreación; en ese caso la app DEBE declarar la interrupción breve en el progreso y
+  devolver la ventana al producto. Nunca fingir `ready`.
+
+Esto neutraliza el «Risk (el mayor)» de esta spec.
+
+### CL-003 — «Quitar» **conserva** los datos
+
+- **FR-019**: «Quitar» DEBE conservar estado y credenciales del compañero. Purgar
+  exige una **segunda confirmación explícita** que nombre lo que se borra.
+- **FR-020**: purgar DEBE llevarse **todo** lo purgable — incluidos los tres volúmenes
+  del compañero (con la base de datos de campañas) y la red — y conservar DEBE
+  conservarlos. Hoy ninguna de las dos cosas es cierta (matriz 025, CLI-11/CLI-12).
+
+### Condición previa de esta spec
+
+`ready` es hoy **inalcanzable** por el bloqueante **ADS-02** de la matriz 025: la
+clave SSO del compañero llega ilegible para el daemon y el puente `/ads/` responde
+503. Se corrige antes que nada (tarea T001). **`ready` no se declara nunca por
+contadores de contenedores**: sólo cuando el puente responde de verdad.

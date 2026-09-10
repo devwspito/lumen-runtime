@@ -2,7 +2,7 @@
 
 **Feature Directory**: `specs/028-safent-app-nativa/`
 **Created**: 2026-09-10
-**Status**: Draft — 5 preguntas abiertas
+**Status**: Resuelta — 5 preguntas cerradas el 10-sep-2026 (ver «Resolución de aclaraciones» al final)
 **Input**: User description: «"Safent" es una app. No debe abrirme un http://localhost:18090/app/. Me instala la app nativa, y la interfaz que abre es solo la app, no un navegador.» · «la función "Actualizar" solo debe estar visible cuando realmente hay una actualización que hacer. Y debe ser efectiva: el proceso perfecto desde que el usuario pincha en actualizar, pasa todo lo que tiene que pasar y dejas al usuario con la app abierta y actualizada, aunque eso signifique que la app se cierre y vuelva a abrir»
 
 ## User Scenarios & Testing *(mandatory)*
@@ -203,4 +203,81 @@ Cambiar el motor o su jaula (sigue siendo el servicio local enjaulado de hoy) ·
 5. [NEEDS CLARIFICATION: ver FR-023 — al actualizar con trabajo del motor en curso, ¿esperar a que acabe con espera acotada, o advertir y cortar bajo confirmación?]
 
 ## Ready for next step?
-BLOCKED — las cinco preguntas de arriba condicionan alcance, comportamiento observable, seguridad y canal; deben resolverse en `/team-clarify` antes de planificar. El resto del contrato está cerrado.
+READY — las cinco preguntas quedaron resueltas el 10-sep-2026 (§«Resolución de aclaraciones»). Plan, contratos y tareas viven en `plan.md`, `contracts/` y `tasks.md` de este mismo directorio.
+
+---
+
+## Resolución de aclaraciones (10-sep-2026)
+
+Decisiones del dueño y del coordinador. **Vinculantes.** El detalle y las
+alternativas rechazadas viven en `research.md`; el diseño, en `plan.md`.
+
+### Principio rector que gobierna toda la entrega
+
+> «Que el sistema funcione "bien" pero el usuario hizo algo mal es lo mismo que
+> "la app no sirve". Por eso debe funcionar como Codex app o Claude Code app.»
+
+- **FR-031**: **NO DEBE existir ningún paso del usuario que pueda salir mal**: cero
+  comandos, cero elecciones sobre bases de ejecución, puertos, máquinas o versiones,
+  y nada que pegar. Los únicos avisos admitidos son los **obligatorios del sistema
+  operativo**: Gatekeeper en macOS (que la notarización elimina) y el prompt de
+  privilegio del gestor de paquetes en Linux.
+- **FR-032**: Todo estado del equipo DEBE **auto-sanarse sin preguntar**: base de
+  ejecución o máquina preexistentes (rootless, de otro tamaño, de otra versión) se
+  adoptan o se ignoran sin tocarlas; puerto ocupado ⇒ se elige otro y la app sigue;
+  contenedor o compañero a medio aprovisionar ⇒ se reconcilia; descarga interrumpida
+  ⇒ se reanuda; imagen envejecida ⇒ se re-baja verificada; segunda apertura ⇒ se
+  enfoca la ventana existente.
+- **FR-033**: Lo que la app no pueda reparar DEBE mostrarse en **una sola pantalla
+  honesta** con la causa en lenguaje del dueño y **un** «Reintentar». **Queda
+  prohibida toda instrucción de terminal en la interfaz.**
+- **FR-034**: La app DEBE traer dentro su propia base de ejecución (motor de
+  contenedores fijado y, en macOS, la imagen de máquina). **No** puede depender de
+  lo que el dueño tenga instalado, de su PATH, de su gestor de paquetes ni de
+  versiones ajenas.
+- **FR-035**: Los paquetes de macOS DEBEN distribuirse **notarizados y grapados**.
+  Un aviso de origen desconocido es un fallo de usuario, y por tanto un fallo del
+  producto. *(El acuerdo del Programa de Desarrolladores de Apple está aceptado
+  desde el 10-sep-2026: la notarización pasa de «mejor esfuerzo» a requisito.)*
+- **SC-014**: Una persona que **nunca ha oído la palabra «contenedor»** instala y usa
+  Safent y Anuncios **sin leer nada**: 5 de 5 intentos.
+- **SC-015**: En 20 recorridos completos, número de preguntas al dueño que **no** sean
+  autorizaciones obligatorias del sistema operativo: **0**.
+- **SC-016**: De 12 estados adversos provocados (máquina preexistente rootless ·
+  máquina de otro tamaño · máquina ajena en uso · puerto ocupado · contenedor a
+  medias · compañero a medias · descarga cortada · imagen envejecida · estado local
+  ausente · estado local corrupto · sin espacio · espacios de nombres bloqueados),
+  **12** se resuelven solos o terminan en **una** pantalla con «Reintentar»; **0**
+  piden algo al dueño y **0** muestran un comando.
+
+### Preguntas abiertas — resueltas
+
+1. **¿Base de ejecución instalada, empaquetada o guiada?** → **Empaquetada.** La app
+   trae el motor de contenedores fijado y, en macOS, la imagen de máquina; crea la
+   máquina **sin red** y con el tamaño correcto. Las imágenes de Safent y del
+   compañero **no** se empaquetan (2,50 GB comprimidos > el límite de 2 GiB por
+   fichero de GitHub Releases): se traen **por digest**, con reintentos, reanudación
+   por capa y progreso honesto. Instrucción guiada: **descartada** (es el paso de
+   usuario prohibido).
+2. **¿Cerrar la ventana detiene el motor?** → **No.** El motor sigue vivo, con
+   elemento en la barra de menús / bandeja que declara el estado y ofrece «Abrir»,
+   «Reiniciar el motor» y **«Salir»** explícito. Salir sí lo detiene de forma
+   ordenada. Resuelve FR-030.
+3. **¿Windows entra?** → **No en esta entrega.** Mac y Linux ahora; Windows después.
+   El sitio de descarga lo declara «aún no servido». La US4 se difiere.
+4. **¿Canal de distribución?** → **Descarga directa firmada** desde el sitio, con
+   actualizador propio de manifiestos firmados. **Tiendas descartadas**: sus reglas
+   son incompatibles con una app que instala y gobierna un motor local y se
+   autoactualiza.
+5. **¿Actualizar con trabajo del motor en curso?** → **Ni preguntar ni cortar.** La
+   app declara el trabajo, pausa la cola, espera de forma acotada (≤ 10 min con
+   progreso) y, si excede, avisa y **re-encola** el ítem para después del reinicio.
+   Resuelve FR-023 sin introducir una decisión del usuario.
+
+### Alcance confirmado
+
+- El motor de instalación es el **CLI que ya existe**, embebido en la app y dirigido
+  por ella (una sola implementación de la jaula). El camino de terminal sobrevive
+  para operadores.
+- El control remoto queda **fuera** de esta entrega (specs 030/031).
+- Anuncios viene instalado y se cubre en la spec **029**.
