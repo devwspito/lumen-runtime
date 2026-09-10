@@ -15,6 +15,15 @@ use std::io::{BufRead, BufReader, Read};
 use std::process::{Command, Stdio};
 use tauri::Manager;
 
+// Bootstrap engine (specs/028-safent-app-nativa, T007/T008/T009/T011): pure
+// domain + reconciler + ports/adapter + the observe-plan-apply loop that will
+// replace the ad hoc install flow below. Wiring into `main()` lands with the
+// boot service (T011); until then this module is compiled and tested but not
+// yet driving the window. `allow(dead_code)` is temporary — it comes off
+// once boot.rs (T011) calls into the full API surface.
+#[allow(dead_code)]
+mod domain;
+
 const BOOTSTRAP_URL: &str =
     "https://raw.githubusercontent.com/devwspito/safent-runtime/main/get-safent.sh";
 
