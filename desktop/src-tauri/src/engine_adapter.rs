@@ -813,7 +813,7 @@ fn map_host_facts(wire: WireHostFacts) -> Result<HostFacts, EngineError> {
 
 fn map_os(raw: &str) -> HostOs {
     match raw {
-        "macos" => HostOs::MacOs,
+        "darwin" => HostOs::MacOs,
         "linux" => HostOs::Linux,
         _ => HostOs::Unsupported,
     }
@@ -824,6 +824,28 @@ fn map_arch(raw: &str) -> Arch {
         "arm64" | "aarch64" => Arch::Arm64,
         "amd64" | "x86_64" => Arch::Amd64,
         _ => Arch::Unsupported,
+    }
+}
+
+/// MAC-01 (verificacion-mac-1.md): the CLI's `cmd_facts` (`safent`) has
+/// always emitted `os_id=darwin` for a `Darwin` `uname -s` — this adapter
+/// was the side out of sync, only ever accepting `"macos"`, a string the
+/// CLI never produces. Every Mac observation therefore mapped to
+/// `HostOs::Unsupported` and `reconcile::preflight_violation` turned that
+/// into a non-retryable `unsupported_os` before the engine ever started.
+/// Contract fixed ONE way (contracts/app-engine.md §3): the wire vocabulary
+/// for `os` is `uname -s` lower-cased — `"darwin"` / `"linux"` — not a
+/// product name. No back-compat alias: `"macos"` was never real CLI output.
+#[cfg(test)]
+mod os_vocabulary_tests {
+    use super::*;
+
+    #[test]
+    fn map_os_recognizes_the_full_wire_vocabulary() {
+        assert_eq!(map_os("darwin"), HostOs::MacOs);
+        assert_eq!(map_os("linux"), HostOs::Linux);
+        assert_eq!(map_os("windows"), HostOs::Unsupported);
+        assert_eq!(map_os(""), HostOs::Unsupported);
     }
 }
 

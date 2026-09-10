@@ -70,6 +70,20 @@ type EngineEvent =
 · `daemon_unhealthy` · `companion_network_conflict` · `companion_migration_failed`
 · `companion_unreachable` · `backup_failed` · `restore_failed` · `clock_skew`.
 
+**Vocabulario de `HostFacts.os`** (MAC-01, verificacion-mac-1.md): el CLI
+deriva `os` de su propio `uname -s` en minúsculas — **`"darwin"`** (macOS) o
+**`"linux"`**, nunca un nombre de producto (`"macos"` no es, ni ha sido nunca,
+un valor real emitido por `cmd_facts`). El envoltorio (`engine_adapter.rs`,
+`map_os`) acepta exactamente esas dos cadenas; cualquier otra cosa mapea a
+`HostOs::Unsupported` → `unsupported_os` (no retryable). Las dos partes deben
+seguir esta única tabla si el vocabulario alguna vez crece:
+
+| `uname -s` | `HostFacts.os` | `HostOs` |
+|---|---|---|
+| `Darwin` | `darwin` | `MacOs` |
+| `Linux` | `linux` | `Linux` |
+| cualquier otro | el valor crudo de `uname -s` | `Unsupported` |
+
 ## 4. Verbos
 
 | Verbo | Qué hace | Idempotente | Etapas que emite |
