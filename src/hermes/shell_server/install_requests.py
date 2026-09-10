@@ -1,0 +1,315 @@
+"""install_requests — the marker the UI leaves for the host to fulfil
+(contracts/install-request.md, T006).
+
+Extends the pre-existing marker mechanism (`.update-requested` /
+`.uninstall-requested` in /var/lib/hermes/instance/, consumed by `safent
+agent`) to a closed, five-verb vocabulary with per-verb TTL and structured
+status readback.
+
+Constitution Principle 0 condition (plan.md): this module has ZERO
+governance/reasoning logic. It validates an enum and writes/reads a JSON
+file — nothing else. Every decision about WHAT to do with a live request
+(pull an image, run compose, recreate a container) is made by the host CLI
+(`safent agent` / the desktop wrapper's embedded driver), never here.
+
+Backward compatibility (data-model.md "expandir -> contraer"): POST
+/api/v1/system/update and POST /api/v1/system/uninstall keep working
+exactly as before AND additionally write the new-format marker, because
+`safent agent` binaries already installed in the field only know how to
+watch the OLD flat flag files — until a future session teaches the agent
+the new format (T016), both are written together so neither path silently
+regresses.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import json
+import logging
+import os
+import time
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
+
+logger = logging.getLogger("hermes.shell_server.install_requests")
+
+_INSTANCE_DIR = Path("/var/lib/hermes/instance")
+_ISO_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+# Closed vocabulary (install-request.md §1 / §3). `_COMPANION_SLUGS` is
+# deliberately its OWN small constant here rather than importing
+# companions.py's private `_COMPANION_SLUGS` — this endpoint validates its
+# own input independently of that module's trust boundary. Keep both lists
+# in sync if a companion is ever added.
+VERBS: frozenset[str] = frozenset(
+    {
+        "install_companion",
+        "repair_companion",
+        "remove_companion",
+        "update_system",
+        "uninstall_system",
+    }
+)
+_COMPANION_VERBS: frozenset[str] = frozenset(
+    {"install_companion", "repair_companion", "remove_companion"}
+)
+_COMPANION_SLUGS: frozenset[str] = frozenset({"safent-ads"})
+_DEFAULT_SLUG = "safent-ads"
+_RETENTIONS: frozenset[str] = frozenset({"keep", "purge"})
+_DEFAULT_RETENTION = "keep"
+
+# Per-verb TTL (install-request.md §2) — replaces the old single
+# _FLAG_STALE_S=15min, measured too short for a big download (UPD-03).
+_TTL_S: dict[str, int] = {
+    "install_companion": 30 * 60,
+    "repair_companion": 15 * 60,
+    "remove_companion": 5 * 60,
+    "update_system": 45 * 60,
+    "uninstall_system": 10 * 60,
+}
+
+# Legacy flat marker NAMES (system_update.py's original mechanism) — dual
+# written ONLY for the two verbs an already-installed `safent agent` still
+# watches (see module docstring). Resolved against _INSTANCE_DIR at call
+# time (not a precomputed Path) so tests can retarget _INSTANCE_DIR.
+_LEGACY_FLAG_NAME: dict[str, str] = {
+    "update_system": ".update-requested",
+    "uninstall_system": ".uninstall-requested",
+}
+
+# install-request.md §4: a claim younger than this is respected as live.
+_CLAIM_TTL_S = 60
+
+
+@dataclass(frozen=True)
+class InstallRequestStatus:
+    verb: str
+    state: str  # 'pending' | 'claimed'
+    expires_at: str
+
+
+def _marker_path(verb: str) -> Path:
+    return _INSTANCE_DIR / f"request-{verb}.json"
+
+
+def _claim_path(verb: str) -> Path:
+    return _INSTANCE_DIR / f"request-{verb}.claim"
+
+
+def _now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _iso(dt: datetime) -> str:
+    return dt.strftime(_ISO_FORMAT)
+
+
+def _read_marker(verb: str) -> dict[str, object] | None:
+    try:
+        with open(_marker_path(verb), encoding="utf-8") as fh:
+            parsed = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _is_expired(marker: dict[str, object]) -> bool:
+    expires_at = marker.get("expires_at")
+    if not isinstance(expires_at, str):
+        return True
+    try:
+        expiry = datetime.strptime(expires_at, _ISO_FORMAT).replace(tzinfo=UTC)
+    except ValueError:
+        return True
+    return _now() >= expiry
+
+
+def _delete_marker(verb: str) -> None:
+    with contextlib.suppress(OSError):
+        os.remove(_marker_path(verb))
+
+
+def _has_live_claim(verb: str) -> bool:
+    try:
+        age_s = time.time() - os.stat(_claim_path(verb)).st_mtime
+    except OSError:
+        return False
+    return age_s < _CLAIM_TTL_S
+
+
+def _status_from_marker(verb: str, marker: dict[str, object]) -> InstallRequestStatus:
+    state = "claimed" if _has_live_claim(verb) else "pending"
+    return InstallRequestStatus(verb=verb, state=state, expires_at=str(marker.get("expires_at")))
+
+
+def _write_marker_atomic(verb: str, document: dict[str, object]) -> None:
+    _INSTANCE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp_path = _marker_path(verb).with_suffix(".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as fh:
+        json.dump(document, fh)
+    os.chmod(tmp_path, 0o600)
+    os.replace(tmp_path, _marker_path(verb))
+
+
+def _write_legacy_flag(verb: str) -> None:
+    legacy_name = _LEGACY_FLAG_NAME.get(verb)
+    if legacy_name is None:
+        return
+    try:
+        _INSTANCE_DIR.mkdir(parents=True, exist_ok=True)
+        with open(_INSTANCE_DIR / legacy_name, "w", encoding="utf-8") as fh:
+            fh.write("requested\n")
+    except OSError as exc:
+        logger.warning("hermes.install_requests.legacy_flag_write_failed verb=%s: %s", verb, exc)
+
+
+def is_verb_live(verb: str) -> bool:
+    """True if `verb` has a pending/claimed request right now. Lazily
+    expires a stale marker as a side effect (install-request.md §1 #4)."""
+    marker = _read_marker(verb)
+    if marker is None:
+        return False
+    if _is_expired(marker):
+        _delete_marker(verb)
+        logger.info("hermes.install_requests.expired verb=%s", verb)
+        return False
+    return True
+
+
+def create_request(
+    verb: str, *, slug: str | None = None, retention: str | None = None
+) -> tuple[bool, InstallRequestStatus]:
+    """Validate-free creation (the HTTP layer validates the enum before
+    calling this). Returns (accepted, status) — accepted=False means a live
+    request already existed and its status is returned unchanged
+    (install-request.md §1 #5: the second press never starts a second
+    install)."""
+    existing = _read_marker(verb)
+    if existing is not None and not _is_expired(existing):
+        logger.info("hermes.install_requests.already_live verb=%s", verb)
+        return False, _status_from_marker(verb, existing)
+
+    created_at = _now()
+    expires_at = created_at + timedelta(seconds=_TTL_S[verb])
+    document: dict[str, object] = {
+        "schema_version": 1,
+        "verb": verb,
+        "created_at": _iso(created_at),
+        "expires_at": _iso(expires_at),
+        "attempt": 1,
+    }
+    if slug is not None:
+        document["slug"] = slug
+    if retention is not None:
+        document["retention"] = retention
+
+    _write_marker_atomic(verb, document)
+    _write_legacy_flag(verb)
+    logger.info("hermes.install_requests.created verb=%s slug=%s", verb, slug)
+    return True, InstallRequestStatus(verb=verb, state="pending", expires_at=_iso(expires_at))
+
+
+def list_live_requests() -> list[InstallRequestStatus]:
+    statuses: list[InstallRequestStatus] = []
+    for verb in sorted(VERBS):
+        marker = _read_marker(verb)
+        if marker is None:
+            continue
+        if _is_expired(marker):
+            _delete_marker(verb)
+            logger.info("hermes.install_requests.expired verb=%s", verb)
+            continue
+        statuses.append(_status_from_marker(verb, marker))
+    return statuses
+
+
+def _status_payload(status: InstallRequestStatus) -> dict[str, object]:
+    return {"verb": status.verb, "state": status.state, "expires_at": status.expires_at}
+
+
+def _validate_and_normalize(
+    body: dict[str, object],
+) -> tuple[str, str | None, str | None] | str:
+    """Returns (verb, slug, retention) on success, or the 400 `code` string
+    on failure. The ONLY logic this module contains beyond marker I/O
+    (Constitution Principle 0 condition): enum membership, nothing else."""
+    verb = body.get("verb")
+    if verb not in VERBS:
+        return "unknown_verb"
+    assert isinstance(verb, str)  # narrowed by the membership check above
+
+    slug: str | None = None
+    if verb in _COMPANION_VERBS:
+        raw_slug = body.get("slug")
+        slug = raw_slug if isinstance(raw_slug, str) and raw_slug else _DEFAULT_SLUG
+        if slug not in _COMPANION_SLUGS:
+            return "unknown_slug"
+
+    retention: str | None = None
+    if verb == "remove_companion":
+        raw_retention = body.get("retention")
+        if isinstance(raw_retention, str) and raw_retention in _RETENTIONS:
+            retention = raw_retention
+        else:
+            retention = _DEFAULT_RETENTION
+
+    return verb, slug, retention
+
+
+def create_install_requests_router() -> APIRouter:
+    from hermes.shell_server.cowork.live_view_support import verify_token  # noqa: PLC0415
+
+    router = APIRouter()
+
+    def _auth(request: Request) -> None:
+        expected = getattr(request.app.state, "shell_webui_token", "")
+        auth = request.headers.get("authorization", "")
+        tok = auth[7:] if auth[:7].lower() == "bearer " else ""
+        if not verify_token(tok, expected):
+            raise HTTPException(status_code=401, detail="unauthorized")
+
+    @router.post("/api/v1/system/requests")
+    async def post_install_request(request: Request) -> JSONResponse:
+        _auth(request)
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError):
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+
+        result = _validate_and_normalize(body)
+        if isinstance(result, str):
+            logger.warning("hermes.install_requests.rejected code=%s body=%r", result, body)
+            return JSONResponse(status_code=400, content={"accepted": False, "code": result})
+
+        verb, slug, retention = result
+        accepted, status = create_request(verb, slug=slug, retention=retention)
+        content = {"accepted": accepted, "request": _status_payload(status)}
+        return JSONResponse(status_code=200 if accepted else 409, content=content)
+
+    @router.get("/api/v1/system/requests")
+    async def get_install_requests(request: Request) -> dict[str, object]:
+        _auth(request)
+        return {"requests": [_status_payload(s) for s in list_live_requests()]}
+
+    # Backward-compat aliases (install-request.md §3) — behaviour preserved
+    # byte-for-byte for existing callers: always 200/accepted, no 409 at
+    # this path (a second press stays idempotent via create_request itself).
+    @router.post("/api/v1/system/update")
+    async def legacy_update_alias(request: Request) -> dict[str, object]:
+        _auth(request)
+        create_request("update_system")
+        return {"ok": True, "updating": True}
+
+    @router.post("/api/v1/system/uninstall")
+    async def legacy_uninstall_alias(request: Request) -> dict[str, object]:
+        _auth(request)
+        create_request("uninstall_system")
+        return {"ok": True}
+
+    return router

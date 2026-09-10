@@ -110,7 +110,9 @@ NAME="${SAFENT_NAME:-safent}"
 # Volume follows the container name so a test container (SAFENT_NAME=next-smoke)
 # can never mount production's safent-data by accident. Override with SAFENT_VOLUME.
 VOLUME="${SAFENT_VOLUME:-${NAME}-data}"
-RUNTIME="$(command -v podman || command -v docker)"
+# SAFENT_PODMAN wins over PATH resolution — same rule as the `safent` CLI
+# (contracts/app-engine.md §1): the desktop app ships its own pinned podman.
+RUNTIME="${SAFENT_PODMAN:-$(command -v podman || command -v docker)}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SECCOMP="${SAFENT_SECCOMP:-$HERE/seccomp/safent.json}"
 
