@@ -1,11 +1,15 @@
 """F3 — Unified skill store tests.
 
-Covers the five mandatory test cases:
+Covers the mandatory test cases:
   (a) skill_manage create via broker → SKILL.md written + signed v2 (not unsigned).
   (b) Unsigned/v1/manipulated skill → not loaded/executed (fail-closed).
-  (c) skill_compiler (teaching path) emits same SKILL.md + signs identically.
   (d) Both paths write to the same store + same governance gate.
   (e) Progressive loading works for signed skills.
+
+(c) — skill_compiler (teaching path) parity — removed with the dead
+``hermes.training`` GEPA subtree (unreachable from every real entrypoint;
+oleada 1 lane L1c). The live teaching path is
+``hermes.agents_os.application.skill_compiler``, unrelated to this module.
 """
 
 from __future__ import annotations
@@ -26,15 +30,12 @@ from hermes.shell_server.skills.skill_governance_service import (
     SkillGovernanceService,
     SkillSignatureVerificationFailed,
 )
-from hermes.training.application.skill_compiler import SkillCompiler, to_skill_md
 from hermes.training.application.skill_signer import (
     KmsSigningKeyPort,
     SignatureVerificationError,
     SkillSigner,
     verify_skill_signature,
 )
-from hermes.training.domain.decision_rule import DecisionRule, DecisionRuleSource
-from hermes.training.domain.narrative_completeness import NarrativeCompleteness
 from hermes.training.domain.skill_md_document import (
     SkillMdDocument,
     SkillMdParseError,
@@ -42,12 +43,6 @@ from hermes.training.domain.skill_md_document import (
 )
 from hermes.training.domain.skill_package import SkillPackage
 from hermes.training.domain.skill_state import SkillState
-from hermes.training.domain.training_session import TrainingSession, TrainingSessionState
-from hermes.training.domain.voice_narrative import (
-    VoiceFragment,
-    VoiceFragmentState,
-    VoiceNarrative,
-)
 
 pytestmark = pytest.mark.unit
 
@@ -445,133 +440,6 @@ class TestFailClosedSignatureVerification:
         )
         with pytest.raises(SignatureVerificationError):
             await verify_skill_signature(package=pkg, kms=kms)
-
-
-# ---------------------------------------------------------------------------
-# (c) skill_compiler teaching path emits same SKILL.md format + signs same way
-# ---------------------------------------------------------------------------
-
-
-class TestTeachingPathSkillMdConvergence:
-    def test_to_skill_md_produces_valid_skill_md_document(self) -> None:
-        narrative = VoiceNarrative(
-            narrative_id=uuid4(),
-            training_session_id=uuid4(),
-            tenant_id=uuid4(),
-            fragments=(
-                VoiceFragment(
-                    fragment_id=uuid4(),
-                    transcript="When the invoice arrives",
-                    confidence=0.9,
-                    state=VoiceFragmentState.ASSOCIATED,
-                ),
-            ),
-            completeness=NarrativeCompleteness.FULL,
-        )
-        rule = DecisionRule(
-            source=DecisionRuleSource.LLM_COMPILE_INFERRED,
-            action="click pay button",
-            confidence=0.95,
-            requires_review=False,
-            categorical_markers=(),
-        )
-
-        doc = to_skill_md(
-            skill_name="pay-invoice",
-            description="Pay an invoice via the portal",
-            narrative=narrative,
-            decision_rules=[rule],
-        )
-
-        assert doc.name == "pay-invoice"
-        assert doc.description == "Pay an invoice via the portal"
-        assert doc.version == "1"
-        assert "## When" in doc.body
-        assert "## Procedure" in doc.body
-        assert "click pay button" in doc.body
-
-    def test_to_skill_md_is_parseable(self) -> None:
-        narrative = VoiceNarrative(
-            narrative_id=uuid4(),
-            fragments=(),
-            completeness=NarrativeCompleteness.NONE,
-        )
-        doc = to_skill_md(
-            skill_name="test-skill",
-            description="A skill for testing",
-            narrative=narrative,
-            decision_rules=[],
-        )
-
-        # Roundtrip: serialize → parse → same document
-        serialized = doc.serialize()
-        reparsed = parse_skill_md(serialized)
-        assert reparsed.name == doc.name
-        assert reparsed.description == doc.description
-        assert reparsed.version == doc.version
-
-    async def test_teaching_path_content_hash_covers_skill_md_bytes(self) -> None:
-        """content_hash = SHA-256 of the SKILL.md bytes, not a random UUID."""
-        narrative = VoiceNarrative(
-            narrative_id=uuid4(),
-            fragments=(),
-            completeness=NarrativeCompleteness.NONE,
-        )
-        doc = to_skill_md(
-            skill_name="hash-test",
-            description="Hash test skill",
-            narrative=narrative,
-            decision_rules=[],
-        )
-
-        expected_hash = hashlib.sha256(doc.content_bytes()).hexdigest()
-        assert len(expected_hash) == 64
-
-        # Verify the SkillStoreAdapter also uses SHA-256 of content_bytes
-        # (testing the same derivation path)
-        import hashlib as _hl
-        actual = _hl.sha256(doc.content_bytes()).hexdigest()
-        assert actual == expected_hash
-
-    async def test_teaching_path_signs_with_skill_signer_v2(self) -> None:
-        kms = _InMemoryKms()
-        signer = SkillSigner(kms=kms)
-
-        narrative = VoiceNarrative(
-            narrative_id=uuid4(),
-            fragments=(),
-            completeness=NarrativeCompleteness.NONE,
-        )
-        doc = to_skill_md(
-            skill_name="signing-test",
-            description="Signing test skill",
-            narrative=narrative,
-            decision_rules=[],
-        )
-        content_hash = hashlib.sha256(doc.content_bytes()).hexdigest()
-
-        # Build a SkillPackage the same way SkillStoreAdapter does
-        package_id = uuid4()
-        pkg = SkillPackage(
-            package_id=package_id,
-            skill_id=uuid4(),
-            skill_version=1,
-            tenant_id=uuid4(),
-            replay_script_id=package_id,
-            voice_narrative_id=package_id,
-            decision_rule_ids=(),
-            state=SkillState.VALIDATED,
-            signature_hex="",
-            signing_key_id="",
-            runtime_version="test",
-            compiled_by_operator_id=None,
-            content_hash=content_hash,
-        )
-
-        signed = await signer.sign(package=pkg, signing_key_id=_KEY_ID)
-        # Verify roundtrip
-        await verify_skill_signature(package=signed, kms=kms)
-        assert signed.signing_key_id == _KEY_ID
 
 
 # ---------------------------------------------------------------------------
