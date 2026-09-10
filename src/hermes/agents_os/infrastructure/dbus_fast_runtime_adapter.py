@@ -39,6 +39,11 @@ from uuid import UUID
 from dbus_fast import DBusError, Variant
 from dbus_fast.service import ServiceInterface, method, signal
 
+from hermes.agents_os.infrastructure.companion_sso_authority import (
+    CompanionSsoAuthorityError,
+    CompanionSsoRateLimitedError,
+)
+
 if TYPE_CHECKING:
     from dbus_fast.aio import MessageBus
 
@@ -1039,6 +1044,42 @@ class Runtime1ServiceInterface(ServiceInterface):
         result = await self._wiring.remove_mcp_server(
             server_id=server_id, sender_uid=sender_uid
         )
+        return json.dumps(result)
+
+    # ── Companion SSO bridge (026, contracts/sso.md §3, T004) ────────────
+
+    @method()
+    async def MintCompanionOwnerAssertion(self, slug: "s") -> "s":  # noqa: N802,F821,UP037
+        """Firma una aserción de propietario de un solo uso para *slug*.
+
+        authZ: SOLO el uid del shell-server (contracts/sso.md §3) — ni
+        siquiera el operador (hermes-user) puede llamar este verbo
+        directamente, la aserción no lleva identidad humana que extraer.
+        Devuelve JSON {assertion, expires_at}. La clave privada nunca sale
+        de este proceso.
+        """
+        sender_uid = await self._resolve_current_sender_uid()
+        try:
+            result = self._wiring.mint_companion_owner_assertion(
+                slug=slug, sender_uid=sender_uid
+            )
+        except PermissionError as exc:
+            raise DBusError("org.hermes.Error.Unauthorized", str(exc)) from exc
+        except CompanionSsoRateLimitedError as exc:
+            raise DBusError("org.hermes.Error.RateLimited", str(exc)) from exc
+        except CompanionSsoAuthorityError as exc:
+            raise DBusError("org.hermes.Error.Unavailable", str(exc)) from exc
+        return json.dumps(result)
+
+    @method()
+    async def GetCompanionHealth(self, slug: "s") -> "s":  # noqa: N802,F821,UP037
+        """`/mcp/health` read-only (sin authZ, igual que GetKillSwitchStatus).
+
+        Devuelve JSON {state, reachable, http_status, contract_version,
+        accounts_linked}. Nunca lanza: cualquier anomalía de red/TLS se
+        resuelve a state="unreachable" (FR-3, companion opcional).
+        """
+        result = await self._wiring.get_companion_health(slug=slug)
         return json.dumps(result)
 
     @method()
