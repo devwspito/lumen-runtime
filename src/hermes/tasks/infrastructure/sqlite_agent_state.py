@@ -31,19 +31,40 @@ class SqliteAgentState:
 
     Args:
         db_path:    Ruta al shell-state.db.
-        signer:     AuditHashChainSigner opcional — si presente, firma cada
-                    transición AGENT_PAUSED/AGENT_RESUMED (CTRL-12/AUD-1).
-        audit_repo: SignedAuditRepositoryPort opcional — si presente, persiste
-                    la entrada de audit firmada.
+        signer:     AuditHashChainSigner — firma cada transición
+                    AGENT_PAUSED/AGENT_RESUMED (CTRL-12/AUD-1).
+        audit_repo: SignedAuditRepositoryPort — persiste la entrada de audit
+                    firmada.
+
+    Raises:
+        RuntimeError: si `signer` o `audit_repo` son None. Antes de este fix
+            ambos eran opcionales y `_emit_audit_paused`/`_emit_audit_resumed`
+            se limitaban a un `return` silencioso — construir el estado sin
+            ellos dejaba el freno de emergencia (`safent brake release`,
+            engage/release por API) auditado en NINGUNA parte: la cadena
+            firmada crecía con otros eventos pero 0 `AGENT_PAUSED`/
+            `AGENT_RESUMED` (CLI-N4, specs/025-safent-repaso
+            matriz-final-39eeb8e, CWE-778). Ahora es fail-loud: sin
+            signer+audit_repo reales, este objeto ni siquiera se construye.
+            Tests que no necesiten verificar el audit chain deben pasar un
+            signer/audit_repo de prueba real (ver tests/tasks/
+            test_kill_switch.py) en vez de omitirlos.
     """
 
     def __init__(
         self,
         *,
         db_path: Path,
-        signer: AuditHashChainSigner | None = None,
-        audit_repo: SignedAuditRepositoryPort | None = None,
+        signer: AuditHashChainSigner,
+        audit_repo: SignedAuditRepositoryPort,
     ) -> None:
+        if signer is None or audit_repo is None:
+            raise RuntimeError(
+                "hermes.tasks.sqlite_agent_state.audit_wiring_missing: "
+                "signer y audit_repo son obligatorios — AGENT_PAUSED/"
+                "AGENT_RESUMED nunca deben auditarse en silencio "
+                "(CTRL-12/CWE-778, CLI-N4)."
+            )
         self._db_path = db_path
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._signer = signer
@@ -135,9 +156,8 @@ class SqliteAgentState:
             ensure_tasks_schema(conn)
 
     async def _emit_audit_paused(self, *, by: UUID | None, reason: str) -> None:
-        """Firma y persiste AGENT_PAUSED si signer+audit_repo están inyectados."""
-        if self._signer is None or self._audit_repo is None:
-            return
+        """Firma y persiste AGENT_PAUSED — signer/audit_repo son invariantes
+        de construcción (__init__ falla si faltan), nunca None aquí."""
         from hermes.agents_os.application.audit_hash_chain import AuditKind  # noqa: PLC0415
 
         await self._signer.append_and_persist(
@@ -149,7 +169,7 @@ class SqliteAgentState:
         )
 
     async def _emit_audit_resumed(self, *, by: UUID | None, reason: str = "") -> None:
-        """Firma y persiste AGENT_RESUMED si signer+audit_repo están inyectados.
+        """Firma y persiste AGENT_RESUMED.
 
         `reason` (security review 2026-09-10, MEDIUM finding — CWE-778/
         STRIDE-R): before this, a release via `safent brake release` (host
@@ -158,9 +178,10 @@ class SqliteAgentState:
         BOTH `description` (human-readable on a plain audit read) and
         `payload` (machine-readable for tooling) — empty string for the
         normal path, "host_cli" for the sovereign fallback.
+
+        signer/audit_repo are invariants of construction (__init__ fails if
+        missing) — never None here.
         """
-        if self._signer is None or self._audit_repo is None:
-            return
         from hermes.agents_os.application.audit_hash_chain import AuditKind  # noqa: PLC0415
 
         await self._signer.append_and_persist(

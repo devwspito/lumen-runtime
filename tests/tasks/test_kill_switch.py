@@ -478,21 +478,22 @@ class TestAuditOnPauseResume:
         assert "host_cli" not in resumed[1].description
         assert resumed[2].description == "Agent resumed"  # no reason -> no parens
 
-    async def test_audit_not_emitted_without_repo(self) -> None:
-        """Sin signer/audit_repo inyectados, SqliteAgentState funciona igual (sin crash)."""
+    async def test_construction_without_signer_or_audit_repo_raises(self) -> None:
+        """CLI-N4 (specs/025-safent-repaso matriz-final-39eeb8e, CWE-778): a
+        SqliteAgentState built without signer/audit_repo used to work "fine"
+        (no crash) and silently drop every AGENT_PAUSED/AGENT_RESUMED audit
+        entry — `safent brake release` claimed "audited as the owner" while
+        the signed chain stayed at 0 AGENT_RESUMED. Now fail-loud: it must
+        not even construct."""
         from pathlib import Path
         import tempfile
 
         from hermes.tasks.infrastructure.sqlite_agent_state import SqliteAgentState
 
         tmp = Path(tempfile.mkdtemp())
-        # Sin signer — no debe crashear
-        state = SqliteAgentState(db_path=tmp / "shell-state.db")
 
-        await state.pause(by=_OPERATOR, reason="test")
-        assert await state.is_paused() is True
-        await state.resume(by=_OPERATOR)
-        assert await state.is_paused() is False
+        with pytest.raises(RuntimeError, match="audit_wiring_missing"):
+            SqliteAgentState(db_path=tmp / "shell-state.db", signer=None, audit_repo=None)
 
 
 # ---------------------------------------------------------------------------

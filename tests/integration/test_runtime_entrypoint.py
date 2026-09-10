@@ -70,7 +70,7 @@ class TestRuntimeEntrypointWiring:
         signing_key = bytes.fromhex(os.environ["HERMES_AUDIT_KEY"])
         firmer = AuditHashChainSigner(signing_key=signing_key)
         audit_repo = SqliteAuditRepository(db_path=db_path)
-        state = SqliteAgentState(db_path=db_path)
+        state = SqliteAgentState(db_path=db_path, signer=firmer, audit_repo=audit_repo)
 
         import hermes.runtime.__main__ as m
         consent_manager = m._build_consent_manager()
@@ -102,7 +102,7 @@ class TestRuntimeEntrypointWiring:
         signing_key = bytes.fromhex(os.environ["HERMES_AUDIT_KEY"])
         firmer = AuditHashChainSigner(signing_key=signing_key)
         audit_repo = SqliteAuditRepository(db_path=db_path)
-        state = SqliteAgentState(db_path=db_path)
+        state = SqliteAgentState(db_path=db_path, signer=firmer, audit_repo=audit_repo)
         consent_manager = m._build_consent_manager()
 
         broker, _intent_log, _gate, *_ = m._build_real_broker(
@@ -136,7 +136,7 @@ class TestRuntimeEntrypointWiring:
         signing_key = bytes.fromhex(os.environ["HERMES_AUDIT_KEY"])
         firmer = AuditHashChainSigner(signing_key=signing_key)
         audit_repo = SqliteAuditRepository(db_path=db_path)
-        state = SqliteAgentState(db_path=db_path)
+        state = SqliteAgentState(db_path=db_path, signer=firmer, audit_repo=audit_repo)
         consent_manager = m._build_consent_manager()
 
         broker, _il, _gate, *_ = m._build_real_broker(
