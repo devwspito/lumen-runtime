@@ -170,6 +170,20 @@ class TestTailscaleddHardeningPresent:
         assert "/var/lib/hermes/master.key" in _TAILSCALED_TEXT
         assert "/var/lib/hermes/keys" in _TAILSCALED_TEXT
 
+    def test_restrict_address_families_includes_netlink(self) -> None:
+        """Regression (fresh-image check, 2026-09-10): without AF_NETLINK the
+        unit crash-loops on boot — netmon's NETLINK_ROUTE socket for the
+        container's OWN interface state gets EAFNOSUPPORT ("netlinkrib:
+        address family not supported by protocol"), so tailscaled never
+        comes up. Verified live: adding AF_NETLINK fixed it, nothing else
+        changed. A stricter list that breaks the daemon is not more secure."""
+        af_line = next(
+            line
+            for line in _TAILSCALED_TEXT.splitlines()
+            if line.startswith("RestrictAddressFamilies=")
+        )
+        assert "AF_NETLINK" in af_line
+
 
 class TestControlServiceHardeningPresent:
     @pytest.mark.parametrize(

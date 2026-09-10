@@ -51,7 +51,14 @@ LockPersonality=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
 RestrictNamespaces=yes
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# AF_NETLINK: tailscaled's netmon (link/route change monitor) opens a NETLINK_ROUTE
+# socket to watch the container's OWN interface state (default route, addresses) —
+# informational only, unrelated to the fake (no-op) userspace tun/router. Verified on
+# a fresh image (2026-09-10): without it the unit crash-loops on boot ("netlinkrib:
+# address family not supported by protocol" = RestrictAddressFamilies injecting
+# EAFNOSUPPORT), so tailscaled never comes up at all — a stricter list that breaks
+# the daemon is not "more secure", it just fails the fresh-image check every time.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 # Userspace mode needs no capabilities. Start empty; add only if a fresh-image test proves
 # a specific syscall is denied (verify on a REBUILT image, never a warm container).
 CapabilityBoundingSet=
