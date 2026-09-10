@@ -37,9 +37,11 @@ class _FakeInterface:
         self._result = result
         self._exc = exc
         self.calls = 0
+        self.reasons: list[str] = []
 
-    async def call_resume(self) -> bool:
+    async def call_resume(self, reason: str) -> bool:
         self.calls += 1
+        self.reasons.append(reason)
         if self._exc is not None:
             raise self._exc
         return self._result
@@ -104,6 +106,21 @@ class TestReleaseBrakeCallsTheExactDbusVerb:
         bus = holder["bus"]
         assert bus.introspected_with == ("org.hermes.Runtime", "/org/hermes/Runtime")
         assert bus.disconnect_called is True
+
+    def test_calls_resume_with_the_host_cli_audit_reason(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Security review 2026-09-10 (MEDIUM finding): this exact string is
+        what makes the signed AGENT_RESUMED entry distinguishable from a
+        TOTP/device-password UI release — see security_api.py's own
+        "totp"/"device_password" reasons on the REST path."""
+        iface = _FakeInterface(result=True)
+        _install_fake_bus(monkeypatch, iface)
+
+        asyncio.run(brake_release_cli._release_brake())
+
+        assert iface.reasons == ["host_cli"]
+        assert iface.reasons == [brake_release_cli._RELEASE_REASON]
 
     def test_a_false_resume_result_is_propagated_not_swallowed(
         self, monkeypatch: pytest.MonkeyPatch

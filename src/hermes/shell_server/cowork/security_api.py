@@ -327,17 +327,23 @@ def create_security_router() -> APIRouter:
         mfa_store = MfaStore()
         if mfa_store.is_enrolled():
             require_owner_mfa(mfa_store, body.totp or "", action="liberar el freno de emergencia")
-        elif not await _verify_device_password(body.device_password or ""):
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "code": "invalid_device_password",
-                    "message": "Libera el freno de emergencia con tu contraseña de dispositivo.",
-                },
-            )
+            release_reason = "totp"
+        else:
+            if not await _verify_device_password(body.device_password or ""):
+                raise HTTPException(
+                    status_code=403,
+                    detail={
+                        "code": "invalid_device_password",
+                        "message": "Libera el freno de emergencia con tu contraseña de dispositivo.",
+                    },
+                )
+            release_reason = "device_password"
 
         try:
-            await proxy.call_bool("resume")
+            # Audit provenance (security review 2026-09-10, MEDIUM finding):
+            # distinguishes this MFA-verified UI/REST release from `safent
+            # brake release`'s "host_cli" on the signed AGENT_RESUMED entry.
+            await proxy.call_bool("resume", release_reason)
         except AgentUnavailable as exc:
             _raise_503(exc, "kill_switch_release")
         return {"ok": True, "engaged": False}

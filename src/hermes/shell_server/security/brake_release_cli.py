@@ -53,11 +53,21 @@ _OBJECT_PATH = "/org/hermes/Runtime"
 _INTERFACE_NAME = "org.hermes.Runtime1"
 _DBUS_CALL_TIMEOUT_S = 8.0
 
+# Security review 2026-09-10 (MEDIUM finding, CWE-778/STRIDE-R): this exact
+# string is threaded through Resume() -> request_resume ->
+# AgentStatePort.resume -> the signed AGENT_RESUMED audit entry, so an
+# incident review can tell "released via host CLI, no MFA" apart from a
+# TOTP/device-password release (security_api.py's own "totp"/
+# "device_password" reasons). Matched by
+# tests/unit/shell_server/test_brake_release_cli.py.
+_RELEASE_REASON = "host_cli"
+
 
 async def _release_brake() -> bool:
-    """Call Resume() on the system bus. Raises on any D-Bus/transport error —
-    the caller turns that into a clear, non-zero-exit CLI failure (fail-closed:
-    an owner who sees this command succeed must be able to trust it worked)."""
+    """Call Resume(reason="host_cli") on the system bus. Raises on any D-Bus/
+    transport error — the caller turns that into a clear, non-zero-exit CLI
+    failure (fail-closed: an owner who sees this command succeed must be
+    able to trust it worked)."""
     from dbus_fast import BusType  # noqa: PLC0415
     from dbus_fast.aio import MessageBus  # noqa: PLC0415
 
@@ -66,7 +76,11 @@ async def _release_brake() -> bool:
         introspection = await bus.introspect(_WELL_KNOWN_NAME, _OBJECT_PATH)
         proxy = bus.get_proxy_object(_WELL_KNOWN_NAME, _OBJECT_PATH, introspection)
         iface = proxy.get_interface(_INTERFACE_NAME)
-        return bool(await asyncio.wait_for(iface.call_resume(), timeout=_DBUS_CALL_TIMEOUT_S))
+        return bool(
+            await asyncio.wait_for(
+                iface.call_resume(_RELEASE_REASON), timeout=_DBUS_CALL_TIMEOUT_S
+            )
+        )
     finally:
         if getattr(bus, "connected", False):
             bus.disconnect()
@@ -81,7 +95,10 @@ def cmd_release() -> int:
     if not released:
         print("[x] Resume() returned false — the brake may still be engaged.", file=sys.stderr)
         return 1
-    print("[ok] Emergency brake released (sovereign host CLI, audited as the owner).")
+    print(
+        "[ok] Emergency brake released (sovereign host CLI, audited as the "
+        f'owner, reason="{_RELEASE_REASON}").'
+    )
     return 0
 
 

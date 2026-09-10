@@ -487,10 +487,18 @@ class DbusRuntimeServiceWiring:
         *,
         sender_uid: int,
         operator_token: str | None = None,
+        reason: str = "",
     ) -> None:
         """Reanuda el agente. sender_uid resuelto por el bus (CWE-862).
 
         operator_token required when sender_uid == proxy_uid.
+
+        reason: audit-only provenance marker (security review 2026-09-10,
+        MEDIUM finding) — "host_cli" from `safent brake release`, empty for
+        the normal TOTP-gated UI release via the REST proxy. Never used for
+        authorization, only threaded into the signed AGENT_RESUMED entry
+        (AgentStatePort.resume's own docstring) so the two are no longer
+        indistinguishable on the audit chain.
 
         Raises:
             DbusAuthorizationError: UID del sender no está autorizado o token inválido.
@@ -498,10 +506,10 @@ class DbusRuntimeServiceWiring:
         operator_id = self._authorize_and_resolve(
             sender_uid, operation="request_resume", operator_token=operator_token
         )
-        await self._state.resume(by=operator_id)
+        await self._state.resume(by=operator_id, reason=reason)
         logger.info(
             "hermes.dbus.agent_resumed",
-            extra={"by_uid": sender_uid},
+            extra={"by_uid": sender_uid, "reason": reason or None},
         )
 
     # ------------------------------------------------------------------
