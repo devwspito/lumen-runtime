@@ -253,8 +253,17 @@ class AgentStatePort(Protocol):
         """
         ...
 
-    async def resume(self, *, by: UUID | None) -> None:
-        """Reanuda sin pérdida ni duplicación. Auditada (AGENT_RESUMED)."""
+    async def resume(self, *, by: UUID | None, reason: str = "") -> None:
+        """Reanuda sin pérdida ni duplicación. Auditada (AGENT_RESUMED).
+
+        reason (security review 2026-09-10, MEDIUM finding): audit-only
+        provenance marker, e.g. "host_cli" for `safent brake release` vs ""
+        for the normal TOTP-gated UI release — so the signed AGENT_RESUMED
+        entry can distinguish "released after MFA proof in the UI" from
+        "released by whoever had a shell on the host", which it could not
+        before. Never persisted to agent_runtime_state.reason (that column
+        is "why currently PAUSED", cleared on resume — unrelated semantics).
+        """
         ...
 
     async def status(self) -> dict:

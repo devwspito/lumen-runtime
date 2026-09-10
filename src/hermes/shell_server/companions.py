@@ -70,6 +70,15 @@ def runtime_bearer_path(slug: str) -> str:
     from any JSON field (a tampered `bearer_ref` can never point here)."""
     return f"{COMPANION_RUNTIME_BEARER_DIR}/{slug}.bearer"
 
+
+# The 026 SSO private key (contracts/sso.md §3) has the EXACT SAME unreadable-
+# by-the-daemon problem as the bearer above, and the SAME fix: `hermes-
+# companion-bearer`'s root `ExecStartPre=-+` also copies this one. Fixed path,
+# not per-slug — there is exactly one companion today (_COMPANION_SLUGS) and
+# `companion_sso_authority.py` never templates it on a JSON field.
+COMPANION_SSO_KEY_MOUNT_PATH = f"{_COMPANION_MOUNT_DIR}/ads-sso.key"
+COMPANION_RUNTIME_SSO_KEY_PATH = f"{COMPANION_RUNTIME_BEARER_DIR}/ads-sso.key"
+
 # The only companions this build knows how to seed/trust. An entry for any
 # other slug is a tampered or future-version file — rejected, not ignored
 # per-field (a slug we don't recognise gets NO partial trust).

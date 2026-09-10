@@ -1894,7 +1894,9 @@ export function KillSwitchSection() {
           description={tNew(
             t,
             'seg.killswitch.release.password_hint',
-            'El MFA no está configurado en esta instancia — libera el freno con la contraseña de tu dispositivo.',
+            'El MFA no está configurado en esta instancia. Si tu dispositivo tampoco tiene ' +
+              'contraseña configurada (instalación nueva), libera el freno desde la terminal ' +
+              'del propio equipo con: safent brake release',
           )}
           onSign={password => { void handleReleaseWith({ devicePassword: password }) }}
           onCancel={() => setConfirmRelease(false)}

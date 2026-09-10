@@ -23,6 +23,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from hermes.agents_os.infrastructure.companion_sso_authority import (
     _RATE_LIMIT_MAX_PER_MINUTE,
+    _SSO_PRIVATE_KEY_PATH,
     CompanionSsoAuthority,
     CompanionSsoKeyUnavailableError,
     CompanionSsoRateLimitedError,
@@ -98,6 +99,32 @@ def trust_all_key_files(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         companions_mod, "is_companion_secret_file_trustworthy", lambda _path: True
     )
+
+
+# ============================================================================
+# ADS-02 regression — the daemon must read the ROOT-STAGED runtime copy, not
+# the raw bind mount `MintCompanionOwnerAssertion` used to read directly.
+# That mount is root:root 0400 inside the container (rootless remap or not)
+# while the daemon runs as `User=hermes` (uid 880) — every mint attempt
+# raised PermissionError and `/ads/*` 503'd (matriz-app-completa-resultados-
+# dgx.md, ADS-02). The fix mirrors the 024 companion-bearer stage-in exactly:
+# hermes-companion-bearer's root ExecStartPre=-+ copies the mount to
+# /run/hermes/companions/ads-sso.key, 0440 root:hermes, readable by the
+# daemon's own group.
+# ============================================================================
+
+
+class TestDefaultKeyPathIsTheRootStagedCopy:
+    def test_default_path_is_the_runtime_staged_copy_not_the_raw_mount(self) -> None:
+        assert _SSO_PRIVATE_KEY_PATH == Path(companions_mod.COMPANION_RUNTIME_SSO_KEY_PATH)
+        assert _SSO_PRIVATE_KEY_PATH != Path(companions_mod.COMPANION_SSO_KEY_MOUNT_PATH)
+
+    def test_the_wiring_used_in_production_relies_on_that_default(self) -> None:
+        """`DbusRuntimeServiceWiring` builds `CompanionSsoAuthority()` with NO
+        override (dbus_runtime_service.py) — the module default IS what the
+        real daemon reads from."""
+        authority = CompanionSsoAuthority()
+        assert authority._private_key_path == _SSO_PRIVATE_KEY_PATH  # noqa: SLF001
 
 
 # ============================================================================

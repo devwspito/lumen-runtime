@@ -81,8 +81,15 @@ class SqliteAgentState:
             )
         await self._emit_audit_paused(by=by, reason=reason)
 
-    async def resume(self, *, by: UUID | None) -> None:
-        """Reanuda el loop — persiste loop_state = 'running', emite AGENT_RESUMED."""
+    async def resume(self, *, by: UUID | None, reason: str = "") -> None:
+        """Reanuda el loop — persiste loop_state = 'running', emite AGENT_RESUMED.
+
+        `reason` is audit-only (AGENT_RESUMED payload/description) — the
+        `agent_runtime_state.reason` COLUMN stays cleared to NULL on every
+        resume regardless: that column means "why is it currently paused",
+        not "what released it", and a stale pause-reason surviving a resume
+        would misreport `status()` to any caller reading it while running.
+        """
         now_iso = datetime.now(tz=UTC).isoformat()
         with self._connect() as conn:
             conn.execute(
@@ -96,7 +103,7 @@ class SqliteAgentState:
                 """,
                 (str(by) if by else None, now_iso),
             )
-        await self._emit_audit_resumed(by=by)
+        await self._emit_audit_resumed(by=by, reason=reason)
 
     async def status(self) -> dict:
         """Snapshot del freno: {engaged, reason, changed_by, changed_at}."""
@@ -141,8 +148,17 @@ class SqliteAgentState:
             audit_repo=self._audit_repo,
         )
 
-    async def _emit_audit_resumed(self, *, by: UUID | None) -> None:
-        """Firma y persiste AGENT_RESUMED si signer+audit_repo están inyectados."""
+    async def _emit_audit_resumed(self, *, by: UUID | None, reason: str = "") -> None:
+        """Firma y persiste AGENT_RESUMED si signer+audit_repo están inyectados.
+
+        `reason` (security review 2026-09-10, MEDIUM finding — CWE-778/
+        STRIDE-R): before this, a release via `safent brake release` (host
+        access, no MFA) produced the EXACT SAME entry as a TOTP-gated UI
+        release — the signed chain could not tell them apart. Included in
+        BOTH `description` (human-readable on a plain audit read) and
+        `payload` (machine-readable for tooling) — empty string for the
+        normal path, "host_cli" for the sovereign fallback.
+        """
         if self._signer is None or self._audit_repo is None:
             return
         from hermes.agents_os.application.audit_hash_chain import AuditKind  # noqa: PLC0415
@@ -150,8 +166,8 @@ class SqliteAgentState:
         await self._signer.append_and_persist(
             audit_kind=AuditKind.AGENT_RESUMED,
             actor=str(by) if by else "system",
-            description="Agent resumed",
-            payload={"changed_by": str(by) if by else None},
+            description=f"Agent resumed ({reason})" if reason else "Agent resumed",
+            payload={"changed_by": str(by) if by else None, "reason": reason or None},
             audit_repo=self._audit_repo,
         )
 

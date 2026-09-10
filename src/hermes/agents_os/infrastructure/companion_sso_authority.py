@@ -1,11 +1,22 @@
 """CompanionSsoAuthority — daemon-side authority for the Safent -> safent-ads
 session bridge (026, contracts/sso.md §3).
 
-The daemon is the ONLY reader of the SSO private key (`/etc/hermes/
-companions/ads-sso.key`, read-only bind provisioned by T001) and the ONLY
-signer of owner assertions. The shell-server (transport, T005) never sees
-the key — it asks the daemon over D-Bus for a fresh, short-lived, single-use
-assertion and forwards ONLY the resulting opaque string to the companion.
+The daemon is the ONLY reader of the SSO private key and the ONLY signer of
+owner assertions. The shell-server (transport, T005) never sees the key — it
+asks the daemon over D-Bus for a fresh, short-lived, single-use assertion and
+forwards ONLY the resulting opaque string to the companion.
+
+The key is read from `/run/hermes/companions/ads-sso.key` — a root-staged
+0440 root:hermes copy on tmpfs, NOT the raw `/etc/hermes/companions/
+ads-sso.key` bind mount (provisioned 0400 by provision.sh). The daemon runs
+as `User=hermes` (uid 880); the mount's uid inside the container is an ENGINE
+artefact (root:root either way — see hermes.shell_server.companions' own
+note on rootless-vs-rootful remap), never `hermes`, so a direct read of the
+mount raises PermissionError. `hermes-companion-bearer`'s root
+`ExecStartPre=-+` stages this copy every boot — EXACT same mechanism already
+proven for the companion bearer (024); see
+hermes.shell_server.companions.COMPANION_RUNTIME_SSO_KEY_PATH /
+COMPANION_SSO_KEY_MOUNT_PATH.
 
 Security invariants (verified by tests/unit/agents_os/
 test_companion_sso_assertion.py):
@@ -40,7 +51,12 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 logger = logging.getLogger("hermes.agents_os.companion_sso_authority")
 
-_SSO_PRIVATE_KEY_PATH = Path("/etc/hermes/companions/ads-sso.key")
+# Literal, not imported from hermes.shell_server.companions — this module
+# stays import-light at load time (every hermes.* dependency below is a lazy,
+# in-function import for the same reason). MUST equal
+# hermes.shell_server.companions.COMPANION_RUNTIME_SSO_KEY_PATH — pinned by
+# test_companion_sso_assertion.py::TestDefaultKeyPathIsTheRootStagedCopy.
+_SSO_PRIVATE_KEY_PATH = Path("/run/hermes/companions/ads-sso.key")
 
 # Payload literals — contracts/sso.md §3. Product constants, never overridden
 # at runtime (a configurable `iss`/`aud`/`purpose` would let a caller mint an

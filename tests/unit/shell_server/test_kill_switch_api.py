@@ -123,7 +123,10 @@ class TestReleaseRequiresOwnerMfa:
 
         assert r.status_code == 200
         assert r.json() == {"ok": True, "engaged": False}
-        proxy.call_bool.assert_awaited_once_with("resume")
+        # Security review 2026-09-10 (MEDIUM finding): the "totp" reason
+        # travels to the signed AGENT_RESUMED entry, distinguishing this
+        # MFA-verified release from `safent brake release`'s "host_cli".
+        proxy.call_bool.assert_awaited_once_with("resume", "totp")
 
 
 class TestReleaseDevicePasswordFallback:
@@ -173,7 +176,9 @@ class TestReleaseDevicePasswordFallback:
         # resume() is the SAME D-Bus call the TOTP path makes — the daemon's
         # AgentStatePort.resume(by=, reason=) records changed_by/reason/
         # changed_at there; no separate audit write needed on this path.
-        proxy.call_bool.assert_awaited_once_with("resume")
+        # "device_password" (not "totp") is what distinguishes the two on
+        # the signed AGENT_RESUMED entry (security review 2026-09-10).
+        proxy.call_bool.assert_awaited_once_with("resume", "device_password")
 
     def test_enrolled_ignores_device_password_totp_path_unchanged(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -195,7 +200,7 @@ class TestReleaseDevicePasswordFallback:
         assert r.status_code == 200
         assert r.json() == {"ok": True, "engaged": False}
         verify.assert_not_awaited()
-        proxy.call_bool.assert_awaited_once_with("resume")
+        proxy.call_bool.assert_awaited_once_with("resume", "totp")
 
     def test_enrolled_bad_totp_still_401_even_with_device_password(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

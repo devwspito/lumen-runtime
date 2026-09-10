@@ -107,8 +107,18 @@ OS="$(uname -s 2>/dev/null || echo unknown)"
 
 # ---- helpers ----------------------------------------------------------------
 
-_exists()  { "$RT" inspect "$NAME" >/dev/null 2>&1; }
-_running() { [ "$("$RT" inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null || echo false)" = true ]; }
+# --type container (BKP-01): a bare `podman/docker inspect $NAME`, with no
+# type pinned, can match a DIFFERENT resource that happens to share (part of)
+# the name — reproduced live: after `restore` imports ONLY a volume named
+# "$NAME-data" (no container), `podman inspect $NAME` still returned an
+# object (the volume's own record), so `_exists` reported true, `cmd_start`
+# took the "already exists, just start it" branch, `podman start $NAME`
+# failed against a nonexistent container (silenced by `|| true`), and the
+# CLI printed "[ok] Restored"/"[ok] Safent started" with NO container ever
+# created. Pinning the type makes the volume unmatchable here, so `_exists`
+# means exactly "a container by this name exists" everywhere it's used.
+_exists()  { "$RT" inspect --type container "$NAME" >/dev/null 2>&1; }
+_running() { [ "$("$RT" inspect --type container -f '{{.State.Running}}' "$NAME" 2>/dev/null || echo false)" = true ]; }
 
 # Pairing marker — written to the persistent volume on pair, removed on unpair.
 # Stored inside the volume so it survives container recreates. config-sync's
@@ -635,6 +645,17 @@ cmd_restore() {
 
   echo "[*] Starting Safent..."
   cmd_start >/dev/null 2>&1 || true
+
+  # BKP-01: cmd_start's own result was never checked — a silent `podman
+  # start` failure against a nonexistent container (see _exists's own note)
+  # still printed "[ok] Restored" with no container running anywhere. Verify
+  # the postcondition explicitly instead of trusting cmd_start's exit code
+  # (which is itself `|| true`d by callers throughout this CLI).
+  if ! _exists || ! _running; then
+    echo "[x] The archive's data was imported, but no Safent container is running." >&2
+    echo "    Check:  $RT ps -a --filter name=$NAME   /   safent logs" >&2
+    exit 1
+  fi
   echo "[ok] Restored from $_archive"
 }
 
@@ -676,6 +697,35 @@ cmd_unpair() {
   # Remove the pairing marker so config-sync goes inert again (community mode).
   "$RT" exec "$NAME" rm -f "$_ENTERPRISE_MARKER" >/dev/null 2>&1 || true
   echo "[ok] Instance unpaired.  Restart Safent to revert to community edition: safent restart"
+}
+
+# R17 — sovereign fallback to release the emergency brake without MFA. A
+# brake can be engaged before the owner ever enrolls TOTP, and a fresh
+# install has no device/OS password either (the PAM fallback the REST API
+# already offers, POST /api/v1/security/kill-switch, fails closed 403 with
+# neither) — the owner was left with no way out short of enrolling MFA with
+# the brake still on. Host access to run `podman exec` on THIS container
+# already IS the owner (same trust boundary every other host verb here
+# relies on: pair/unpair, companion rotate/update, backup/restore). Execs
+# as hermes-user (uid 1000) — the SAME uid the desktop shell's own DIRECT
+# D-Bus calls already run as and the daemon's authorized_uids already
+# trusts unconditionally — so the release is audited under the real owner
+# identity, not a synthetic one. See brake_release_cli.py's own docstring
+# for the full authorization chain. TOTP via the UI remains the primary,
+# normal path — this is reachable only from the host CLI.
+cmd_brake() {
+  case "${1:-}" in
+    release|libera) ;;
+    "") echo "[x] Usage: safent brake release"; exit 1 ;;
+    *) echo "[x] Unknown 'safent brake' subcommand: $1"; echo "    Usage: safent brake release"; exit 1 ;;
+  esac
+  _ensure_machine
+  if ! _running; then
+    echo "[x] Safent must be running to release the brake.  Start it with: safent start" >&2
+    exit 1
+  fi
+  "$RT" exec -u hermes-user "$NAME" python3 -m hermes.shell_server.security.brake_release_cli release \
+    || { echo "[x] Could not release the brake — see the error above." >&2; exit 1; }
 }
 
 cmd_status() {
@@ -721,17 +771,78 @@ cmd_agent() {
   done
 }
 
-# Exports the three vars compose.yaml interpolates (SAFENT_STATE,
-# SAFENT_ADS_IMAGE, ADS_POSTGRES_PASSWORD), same values `provision.sh` used to
-# bring the companion up. Shared by every `$RT compose ...` call site below so
-# there is exactly ONE place that resolves them, never copy-pasted per verb.
-_companion_env() {
+# Halves of the companion env shared by every resolution below — never the
+# image, which resolves differently per verb (see _companion_env vs
+# _companion_update_env).
+_companion_env_common() {
   SAFENT_STATE="$COMPANION_STATE"
-  SAFENT_ADS_IMAGE="${SAFENT_ADS_IMAGE:-ghcr.io/devwspito/safent-ads:latest}"
   if [ -f "$COMPANION_STATE/pg_password" ]; then
     ADS_POSTGRES_PASSWORD="$(cat "$COMPANION_STATE/pg_password" 2>/dev/null || true)"
   else
     ADS_POSTGRES_PASSWORD="unused-for-down"
+  fi
+}
+
+# The image ref `provision.sh` persisted at $COMPANION_STATE/image on the
+# last provisioning run (CLI-10).
+#
+# Security review 2026-09-10 (MEDIUM finding): this used to fall back to
+# the hard-coded ghcr.io/…/safent-ads:latest default when the marker file
+# was absent — deleting that ONE file (0700 dir, no integrity protection,
+# same owner as `safent` itself) silently restored the EXACT CLI-10
+# divergence this whole fix set out to close (status/rotate/remove
+# recreating against a DIFFERENT image than what is actually running).
+# Fail closed instead: refuse with a clear recovery step rather than guess.
+# `safent companion update` is the ONE place a missing marker is still a
+# legitimate bootstrap case (see _companion_update_env) — never here.
+_persisted_ads_image() {
+  if [ -f "$COMPANION_STATE/image" ]; then
+    cat "$COMPANION_STATE/image"
+    return 0
+  fi
+  echo "[x] $COMPANION_STATE/image not found — refusing to guess the companion's image." >&2
+  echo "    Run 'safent companion update' once to record it, then retry." >&2
+  exit 1
+}
+
+# Exports the three vars compose.yaml interpolates (SAFENT_STATE,
+# SAFENT_ADS_IMAGE, ADS_POSTGRES_PASSWORD). Shared by every `$RT compose ...`
+# call site below so there is exactly ONE place that resolves them, never
+# copy-pasted per verb.
+#
+# SAFENT_ADS_IMAGE is ALWAYS the persisted ref (never an ambient env var) —
+# status/rotate/remove must reuse the EXACT image already running, or a
+# rotate recreates ads-api against a DIFFERENT image than ads-worker still
+# runs, and an image whose alembic history doesn't know the database's
+# current revision dies `Can't locate revision …` (CLI-10, verified live:
+# ghcr.io/devwspito/safent-ads:latest got pulled and mixed in even though
+# run-safent.sh had actually provisioned with safent-ads:local). `safent
+# companion update` is the ONE verb allowed to pick a NEW image — see
+# _companion_update_env — and the only one that overwrites the marker.
+_companion_env() {
+  _companion_env_common
+  SAFENT_ADS_IMAGE="$(_persisted_ads_image)"
+  export SAFENT_STATE SAFENT_ADS_IMAGE ADS_POSTGRES_PASSWORD
+}
+
+# `safent companion update`'s own resolution: an explicit SAFENT_ADS_IMAGE
+# from the caller's env WINS (that is how an owner asks for a specific new
+# image); with none given, keep whatever is already persisted — a plain
+# re-pull/refresh of the same tag. `update` is the ONE place a missing
+# marker is still a legitimate bootstrap (recovering a companion whose
+# $STATE/image was lost, or a companion provisioned before CLI-10 ever
+# wrote one) — deliberately does NOT call the now-fail-closed
+# _persisted_ads_image (that helper is for status/rotate/remove, which
+# must NEVER guess); falls back to the published default INLINE instead,
+# same historical shape, only reachable from this one explicit verb.
+_companion_update_env() {
+  _companion_env_common
+  if [ -n "${SAFENT_ADS_IMAGE:-}" ]; then
+    : # explicit override from the caller — use it as-is
+  elif [ -f "$COMPANION_STATE/image" ]; then
+    SAFENT_ADS_IMAGE="$(cat "$COMPANION_STATE/image")"
+  else
+    SAFENT_ADS_IMAGE="ghcr.io/devwspito/safent-ads:latest"
   fi
   export SAFENT_STATE SAFENT_ADS_IMAGE ADS_POSTGRES_PASSWORD
 }
@@ -762,9 +873,18 @@ _uninstall_companion() {
 # `podman/docker compose ps -q [-a]` prints one container ID per line — the
 # same ID format `$RT inspect` accepts, so counting running vs total reuses
 # the exact primitive `_running()` already uses for the main container.
+#
+# CLI-08 root cause: this used to call compose WITHOUT `_companion_env`, so
+# compose.yaml's `${ADS_POSTGRES_PASSWORD:?...}` interpolation failed
+# ("required variable ... is missing a value"), `ps -q -a` printed nothing,
+# and `safent companion status` reported `0/0 running` against a companion
+# whose 5 containers were actually Up/healthy. `_companion_env` here (not
+# just at the call site) means every current AND future caller gets it
+# right by construction.
 _companion_container_counts() {
   total=0
   running=0
+  _companion_env
   ids="$("$RT" compose -p safent-ads -f "$COMPANION_COMPOSE" ps -q -a 2>/dev/null || true)"
   for id in $ids; do
     total=$((total + 1))
@@ -807,6 +927,53 @@ cmd_companion_status() {
   fi
 }
 
+# CLI-10 guard: `ads-migrate` (`alembic upgrade head`) dies loud
+# (`Can't locate revision identified by '<rev>'`, exit 255) when *image*'s
+# migration set never heard of the revision already applied to the database
+# — but only AFTER ads-api/ads-worker have already been recreated against
+# that mismatched image, leaving ads-api down (verified live). `alembic
+# history` reads only the image's own migration scripts (no DB connection,
+# no --network needed) — if the database's current revision never appears
+# in it, *image* cannot possibly upgrade past it: refuse before recreating
+# anything.
+#
+# Security review 2026-09-10 (MEDIUM finding, CWE-754): this used to fail
+# OPEN twice — an unreadable `history` (image inspection failed for ANY
+# reason) proceeded "without the guard", and the match itself was a bare
+# substring (`case "$history" in *"$db_rev"*)`), so a db_rev that happened
+# to appear inside an unrelated line (revision-message text, another
+# revision's hash as a substring) satisfied it wrongly. Now: ONLY a
+# genuinely brand-new database (no alembic_version row at all — nothing
+# to compare yet, not a failure) skips the guard; once db_rev is read
+# successfully, an unreadable history is a REFUSAL, not a shrug, and the
+# match is word-bounded (`grep -qw`, not a substring).
+_refuse_if_image_predates_the_database() {
+  image="$1"
+  db_rev="$("$RT" compose -p safent-ads -f "$COMPANION_COMPOSE" exec -T ads-db \
+    psql -U ads -d ads -tAc 'SELECT version_num FROM alembic_version;' 2>/dev/null \
+    | tr -d '[:space:]')"
+  if [ -z "$db_rev" ]; then
+    echo "[*] No alembic_version row yet — skipping the migration-head guard."
+    return 0
+  fi
+  # Security review 2026-09-10 (LOW finding, CWE-88): `--` stops podman/
+  # docker from ever reading $image as an option (e.g. a value beginning
+  # with `-`) — $STATE is 0700, owner-only, no privilege boundary crossed
+  # today, but the image ref sits in option position regardless.
+  history="$("$RT" run --rm --network none -- "$image" alembic history 2>/dev/null || true)"
+  if [ -z "$history" ]; then
+    echo "[x] Could not read '$image' migration history — refusing to update against an unverifiable image." >&2
+    echo "    The database is already at revision '$db_rev'; retry once the image can be inspected." >&2
+    exit 1
+  fi
+  if printf '%s\n' "$history" | grep -qw -- "$db_rev"; then
+    return 0
+  fi
+  echo "[x] '$image' does not know revision '$db_rev' (already applied to the database)." >&2
+  echo "    That image is OLDER than the database — refusing to update (it would break ads-api/ads-worker)." >&2
+  exit 1
+}
+
 # Pull the owner's published companion image and recreate its containers —
 # ONLY the companion, never Safent itself (that coupling was exactly T193's
 # gap: `safent update` re-provisioned the companion as a SIDE EFFECT of
@@ -816,12 +983,15 @@ cmd_companion_update() {
     echo "[x] Companion not provisioned yet. Run 'safent update' first." >&2
     exit 1
   fi
-  _companion_env
+  _companion_update_env
   echo "[*] Pulling $SAFENT_ADS_IMAGE..."
   "$RT" pull "$SAFENT_ADS_IMAGE" || { echo "[x] Could not pull the companion image." >&2; exit 1; }
+  _refuse_if_image_predates_the_database "$SAFENT_ADS_IMAGE"
   echo "[*] Recreating the companion containers..."
   "$RT" compose -p safent-ads -f "$COMPANION_COMPOSE" up -d \
     || { echo "[x] Companion update failed." >&2; exit 1; }
+  printf '%s' "$SAFENT_ADS_IMAGE" > "$COMPANION_STATE/image.tmp"
+  mv -f "$COMPANION_STATE/image.tmp" "$COMPANION_STATE/image"
   echo "[ok] Companion updated."
 }
 
@@ -847,6 +1017,14 @@ cmd_companion_rotate() {
     echo "[x] $api_env not found — cannot rotate (companion secrets missing)." >&2
     exit 1
   fi
+  # Resolve (and, on a missing $STATE/image marker, fail closed) BEFORE
+  # touching anything — security review 2026-09-10 follow-up: _companion_env
+  # used to run only right before the SSO-keygen step, well after the
+  # bearer was already rotated on disk; a missing marker would then leave
+  # the companion in a half-rotated state (new bearer, old SSO key) instead
+  # of refusing cleanly up front.
+  _companion_env
+
   echo "[*] Rotating the companion bearer..."
   new_bearer="$(openssl rand -hex 32)"
   printf '%s' "$new_bearer" > "$COMPANION_STATE/bearer.tmp"
@@ -863,8 +1041,9 @@ cmd_companion_rotate() {
   mv -f "$tmp_env" "$api_env"
 
   echo "[*] Rotating the SSO Ed25519 keypair (026)..."
-  _companion_env
-  sso_keypair="$("$RT" run --rm --network none "$SAFENT_ADS_IMAGE" \
+  # -- (LOW finding, CWE-88): see _refuse_if_image_predates_the_database's
+  # own comment on this exact pattern.
+  sso_keypair="$("$RT" run --rm --network none -- "$SAFENT_ADS_IMAGE" \
     python -m safent_ads.tools.gen_keys)"
   sso_seed="$(printf '%s\n' "$sso_keypair" | sed -n 's/^ADS_APPROVAL_SIGNING_KEY=//p')"
   sso_pub_std="$(printf '%s\n' "$sso_keypair" | sed -n 's/^ADS_APPROVAL_PUBLIC_KEY=//p')"
@@ -889,6 +1068,13 @@ cmd_companion_rotate() {
   ' "$api_env" > "$tmp_env2"
   chmod 0600 "$tmp_env2"
   mv -f "$tmp_env2" "$api_env"
+
+  # Security review 2026-09-10 (MEDIUM finding): rotate recreates ads-api
+  # via --force-recreate below — the SAME guard `update` uses, applied here
+  # too, so a persisted image that has somehow drifted behind the
+  # database (e.g. provision.sh re-running with a stale SAFENT_ADS_IMAGE)
+  # is caught before ads-api restarts against it, not after.
+  _refuse_if_image_predates_the_database "$SAFENT_ADS_IMAGE"
 
   echo "[*] Restarting ads-api with the new token..."
   "$RT" compose -p safent-ads -f "$COMPANION_COMPOSE" up -d --force-recreate ads-api \
@@ -1301,6 +1487,10 @@ safent - control your local Safent
   safent companion rotate            issue a new /mcp bearer on both sides, restart ads-api
   safent companion remove [--purge]  stop + remove the companion (keeps its state unless --purge)
 
+  safent brake release   release the emergency brake without MFA (host access == owner;
+                          use only when MFA isn't enrolled yet and no device password
+                          exists — TOTP via the UI is the normal path)
+
   --no-companion    FIRST argument, any command: skip provisioning/joining the
                      preinstalled Safent Ads companion (MCP campaign tools).
                      A failed provisioning attempt never blocks Safent itself.
@@ -1344,6 +1534,7 @@ case "${1:-open}" in
   ensure-machine)               cmd_ensure_machine ;;
   ensure-images)                 cmd_ensure_images ;;
   up)                           cmd_up "${2:-}" "${3:-}" ;;
+  brake|freno)                 cmd_brake "${2:-}" ;;
   -h|--help|help|ayuda)        usage ;;
   *) echo "Unknown command: $1"; echo; usage; exit 1 ;;
 esac

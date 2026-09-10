@@ -236,10 +236,16 @@ class Runtime1ServiceInterface(ServiceInterface):
         return True
 
     @method()
-    async def Resume(self) -> "b":  # noqa: N802,F821,UP037
-        """Reanuda. by = UID del bus."""
+    async def Resume(self, reason: "s") -> "b":  # noqa: N802,F821,UP037
+        """Reanuda. by = UID del bus.
+
+        reason (security review 2026-09-10, MEDIUM finding): audit-only
+        provenance string, threaded to the signed AGENT_RESUMED entry via
+        request_resume/AgentStatePort.resume — "host_cli" for `safent brake
+        release`, "" for the normal REST/UI path (cowork/dbus_proxy.py).
+        """
         sender_uid = await self._resolve_current_sender_uid()
-        await self._wiring.request_resume(sender_uid=sender_uid)
+        await self._wiring.request_resume(sender_uid=sender_uid, reason=reason)
         return True
 
     @method()
