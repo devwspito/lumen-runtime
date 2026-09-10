@@ -39,7 +39,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID
 
 import pytest
@@ -275,6 +275,98 @@ class TestSetActiveProviderNativeIds:
             wiring.set_active_provider(provider_id=saved["provider_id"], sender_uid=1000)
 
         mock_write_model.assert_called_once_with("openai-api", "gpt-5.4-nano", "")
+
+
+# ---------------------------------------------------------------------------
+# B2. test_provider — native (non-UUID) ids (specs/025-safent-repaso PROV-03)
+# ---------------------------------------------------------------------------
+#
+# Before the fix, test_provider did `pid = _UUID(provider_id)` unconditionally.
+# A native catalogue id ("anthropic", "gemini"...) is not a UUID, so this
+# raised ValueError — uncaught, it crosses the D-Bus boundary as a generic
+# error that dbus_proxy._translate_dbus_error can't match to any
+# org.hermes.Error.* name, so it falls through to AgentUnavailable. The REST
+# route then reports 200 {"ok": false, "error": "daemon_unavailable"} for
+# EVERY native "Test" click, valid key or not, and the card never activates.
+
+
+class TestTestProviderNativeIds:
+    async def test_native_id_reaches_the_real_validator_instead_of_crashing(
+        self, tmp_path: Path, _hermes_home: Path
+    ) -> None:
+        wiring = _make_wiring(tmp_path)
+        with patch.dict("sys.modules", {"hermes_cli.auth": MagicMock(PROVIDER_REGISTRY=_FAKE_REGISTRY)}):
+            # Save a key + model WITHOUT activating (mirrors the UI's
+            # "Add/Connect" step before the "Test" click).
+            wiring.configure_native_provider(
+                provider_id="anthropic", api_key="sk-ant-real", model="claude-x",
+                base_url="", sender_uid=1000, set_active=False,
+            )
+
+            with patch(
+                f"{_DBUS_MODULE}._nous_validate_model_string",
+                new=AsyncMock(return_value=(True, None)),
+            ) as mock_validate:
+                result = await wiring.test_provider(provider_id="anthropic", sender_uid=1000)
+
+        assert result == {"ok": True, "error": None}
+        mock_validate.assert_awaited_once_with("anthropic/claude-x", "sk-ant-real", "")
+
+    async def test_unknown_native_id_fails_soft_not_valueerror(
+        self, tmp_path: Path, _hermes_home: Path
+    ) -> None:
+        wiring = _make_wiring(tmp_path)
+        with patch.dict("sys.modules", {"hermes_cli.auth": MagicMock(PROVIDER_REGISTRY=_FAKE_REGISTRY)}):
+            result = await wiring.test_provider(provider_id="not-a-real-provider", sender_uid=1000)
+        assert result == {"ok": False, "error": "provider desconocido: not-a-real-provider"}
+
+    async def test_native_id_without_saved_key_fails_soft(
+        self, tmp_path: Path, _hermes_home: Path
+    ) -> None:
+        """A native provider never configured (no key in .env) must report a
+        clear reason, not crash and not silently probe with an empty key."""
+        wiring = _make_wiring(tmp_path)
+        with patch.dict("sys.modules", {"hermes_cli.auth": MagicMock(PROVIDER_REGISTRY=_FAKE_REGISTRY)}):
+            result = await wiring.test_provider(provider_id="anthropic", sender_uid=1000)
+        assert result["ok"] is False
+        assert "anthropic" in result["error"]
+
+    async def test_native_id_without_model_fails_soft(
+        self, tmp_path: Path, _hermes_home: Path
+    ) -> None:
+        """specs/025-safent-repaso PROV-02 companion case: a key saved with NO
+        model (the UI's configureNativeProvider({provider_id, api_key}) body,
+        no `model`) must not crash test_provider either."""
+        wiring = _make_wiring(tmp_path)
+        with patch.dict("sys.modules", {"hermes_cli.auth": MagicMock(PROVIDER_REGISTRY=_FAKE_REGISTRY)}):
+            wiring.configure_native_provider(
+                provider_id="anthropic", api_key="sk-ant-real", model="",
+                base_url="", sender_uid=1000, set_active=False,
+            )
+            result = await wiring.test_provider(provider_id="anthropic", sender_uid=1000)
+        assert result == {"ok": False, "error": "anthropic no tiene modelo configurado"}
+
+    async def test_sql_uuid_path_is_unaffected(self, tmp_path: Path, _hermes_home: Path) -> None:
+        """Regression guard: a real SQL-repo provider (custom, UUID id) must
+        keep going through _nous_validate_provider — only non-UUID ids take
+        the new native branch."""
+        wiring = _make_wiring(tmp_path)
+        draft = json.dumps({
+            "kind": "openai", "alias": "t", "default_model": "gpt-5.4-nano",
+            "api_key": "sk-test", "set_active": False,
+        })
+        saved = wiring.add_provider(draft_json=draft, sender_uid=1000)
+        UUID(saved["provider_id"])  # sanity: really a UUID
+
+        with (
+            patch(f"{_DBUS_MODULE}._nous_validate_provider", new=AsyncMock(return_value=(True, None))) as mock_sql,
+            patch.object(wiring, "_test_native_provider", new=AsyncMock()) as mock_native,
+        ):
+            result = await wiring.test_provider(provider_id=saved["provider_id"], sender_uid=1000)
+
+        assert result == {"ok": True, "error": None}
+        mock_sql.assert_awaited_once()
+        mock_native.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
