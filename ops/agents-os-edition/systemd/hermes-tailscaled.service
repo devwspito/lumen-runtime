@@ -3,10 +3,11 @@
 # INERT by default: only runs once the owner opts in (the root control helper writes the
 # `enabled` marker on connect). Runs as the low-privilege user hermes-tailscale in the HOST
 # netns, in USERSPACE-NETWORKING mode — NO /dev/net/tun, NO NET_ADMIN, NO seccomp change.
-# It exposes an HTTP-CONNECT proxy on 127.0.0.1:1055 that ONLY the host-netns egress-proxy
-# can reach (agent netns drop 127.0.0.0/8 + 100.64.0.0/10). So the agent's access to the
-# tailnet is forced through the audited egress allowlist — never a raw route.
-# See specs/022-tailnet-connectivity/plan.md.
+# It exposes an HTTP-CONNECT proxy on 127.0.0.1:1055 (egress-proxy lane) and a SOCKS5 proxy
+# on 127.0.0.1:1056 (tailnet-ssh lane, raw TCP) — BOTH loopback only, reachable ONLY by the
+# host-netns egress-proxy/ssh forwarder (agent netns drop 127.0.0.0/8 + 100.64.0.0/10). So
+# the agent's access to the tailnet is forced through the audited egress allowlist — never
+# a raw route. See specs/022-tailnet-connectivity/plan.md.
 
 [Unit]
 Description=Hermes tailscaled (userspace tailnet egress — governed via the egress proxy)
@@ -22,11 +23,14 @@ StartLimitIntervalSec=0
 Type=simple
 User=hermes-tailscale
 Group=hermes-tailscale
-# Userspace WireGuard (wireguard-go): no tun device, no NET_ADMIN. The HTTP-CONNECT proxy
-# binds LOOPBACK only (never 0.0.0.0) — reachable solely by the host-netns egress-proxy.
+# Userspace WireGuard (wireguard-go): no tun device, no NET_ADMIN. Both proxies bind
+# LOOPBACK only (never 0.0.0.0) — reachable solely by host-netns processes:
+#   1055 HTTP-CONNECT — hermes-egress-proxy (HTTPS/TLS tailnet FQDNs, v1 scope)
+#   1056 SOCKS5       — tailnet-ssh forwarder (raw TCP, deferred v2 scope per plan.md)
 ExecStart=/usr/sbin/tailscaled \
   --tun=userspace-networking \
   --outbound-http-proxy-listen=127.0.0.1:1055 \
+  --socks5-server=127.0.0.1:1056 \
   --socket=/run/hermes/tailscale/tailscaled.sock \
   --statedir=/var/lib/hermes/tailscale \
   --port=41641 \

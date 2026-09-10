@@ -268,6 +268,9 @@ COPY ops/agents-os-edition/scripts/hermes-mcp-proxy-accept /usr/libexec/hermes/h
 # Landlock ruleset (denies the daemon's keystore to the controller) before execing the
 # real node CLI. See project_safent_agent_browser_go_nogo_fase4.
 COPY ops/agents-os-edition/scripts/hermes-agent-browser-shim /usr/libexec/hermes/hermes-agent-browser-shim
+# Governed tailnet control (spec 022) — root oneshot triggered by hermes-tailscale-
+# control.path, connects/disconnects the owner's tailnet + refreshes status.json.
+COPY ops/agents-os-edition/scripts/hermes-tailscale-control /usr/libexec/hermes/hermes-tailscale-control
 # container-specific drop-ins (override ONLY the OS-coupling: bind host)
 COPY ops/container/dropins/ /usr/lib/systemd/system/
 RUN chmod 0755 /usr/libexec/hermes/* /usr/bin/hermes-landlock-assert && \

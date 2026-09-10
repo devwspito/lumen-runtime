@@ -1,0 +1,460 @@
+#!/usr/bin/env python3
+# hermes-tailscale-control — privileged root oneshot that connects/disconnects the
+# governed tailnet on behalf of the shell-server (User=hermes) and refreshes the
+# names-only status the egress lane reads.
+#
+# Triggered by hermes-tailscale-control.path watching
+# /run/hermes/tailscale-control/request.json (0700 hermes:hermes — the DAEMON
+# stages here, unlike remote-control which is staged by the compositor).
+#
+# This script MUST run as root (hermes-tailscale-control.service).
+#
+# Contract (staged JSON, written atomically by the shell-server, mirrors
+# remote_access_tunnel/api.py's _write_staged_request exactly):
+#   {"action": "connect",    "password": "<device password>", "auth_key": "tskey-auth-..."}
+#   {"action": "disconnect", "password": "<device password>"}
+#   {"action": "status"}
+#
+# Security invariants (spec 022):
+#   - The auth key NEVER touches argv/env/Environment=/git/logs. It is staged by
+#     the daemon into the 0600 request file, read here, written to a FRESH
+#     0600 root-owned tmpfs file (AUTHKEY_FILE) so `tailscale up --auth-key=
+#     file:<path>` can read it, then shredded in a finally block — win or lose.
+#   - connect/disconnect both require the SAME device-password PAM gate as
+#     hermes-remote-access-control (ONE password, verified ONE way — plan.md
+#     "Auth key custody"). status is read-only, no gate.
+#   - status.json carries NAMES ONLY (MagicDNS suffix, node DNS name, backend
+#     state) — never a key, never raw IPs.
+#   - The staged request file is shredded in main()'s finally block whether
+#     the action succeeds, fails, or the JSON fails to parse.
+#   - The agent (hermes-sandbox) cannot reach this: /run/hermes/tailscale-control
+#     is 0700 hermes:hermes, and hermes-runtime.service's InaccessiblePaths keeps
+#     the agent out of hermes's own runtime dirs (same isolation as remote-control).
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import pwd
+import random
+import stat
+import subprocess
+import sys
+import time
+from datetime import UTC, datetime
+from pathlib import Path
+
+logging.basicConfig(
+    format="%(levelname)s hermes-tailscale-control: %(message)s",
+    level=logging.INFO,
+    stream=sys.stderr,
+)
+logger = logging.getLogger("hermes-tailscale-control")
+
+# --------------------------------------------------------------------------
+# Constants — every path overridable by env for tests, defaults match the
+# tmpfiles.d entries in ops/agents-os-edition/tmpfiles/hermes.conf.
+# --------------------------------------------------------------------------
+
+STAGE_DIR = Path(
+    os.environ.get("HERMES_TAILSCALE_CONTROL_DIR", "/run/hermes/tailscale-control")
+)
+STAGE_FILE = STAGE_DIR / "request.json"
+
+RUNTIME_DIR = Path(os.environ.get("HERMES_TAILSCALE_RUNTIME_DIR", "/run/hermes/tailscale"))
+STATE_DIR = Path(os.environ.get("HERMES_TAILSCALE_STATE_DIR", "/var/lib/hermes/tailscale"))
+
+TS_SOCKET = Path(os.environ.get("HERMES_TAILSCALE_SOCKET", str(RUNTIME_DIR / "tailscaled.sock")))
+AUTHKEY_FILE = RUNTIME_DIR / "authkey"
+STATUS_FILE = RUNTIME_DIR / "status.json"
+ENABLED_MARKER = STATE_DIR / "enabled"
+
+_TS_BIN = os.environ.get("HERMES_TAILSCALE_BIN", "tailscale")
+_TAILSCALED_UNIT = "hermes-tailscaled.service"
+
+# The interactive login user whose password was set by hermes-account-apply —
+# the SAME device password every consent gate verifies (pam/hermes-auth).
+LOGIN_USER = "hermes-user"
+
+_EXPECTED_FILE_MODE = 0o600
+_KNOWN_ACTIONS = frozenset({"connect", "disconnect", "status"})
+_AUTH_KEY_MAX_LEN = 512
+
+# `tailscale up` races the .path -> .service start of tailscaled: retry with
+# capped exponential backoff + jitter instead of a fixed sleep (reliability).
+_UP_MAX_ATTEMPTS = 5
+_UP_BASE_DELAY = 0.5
+_UP_MAX_DELAY = 4.0
+_UP_SUBPROCESS_TIMEOUT = 15.0
+_STATUS_SUBPROCESS_TIMEOUT = 10.0
+_LOGOUT_SUBPROCESS_TIMEOUT = 15.0
+
+
+# --------------------------------------------------------------------------
+# Helpers — file handling (TOCTOU-safe, mirrors hermes-remote-access-control)
+# --------------------------------------------------------------------------
+
+
+def _hermes_uid() -> int:
+    # El staging lo hace el DAEMON (hermes), NO el compositor (hermes-user):
+    # SecretsVault (donde vive la clave tskey-auth pegada por el owner en la
+    # UI) solo lo puede descifrar el proceso hermes.
+    return pwd.getpwnam("hermes").pw_uid
+
+
+def _read_staged() -> dict:
+    """Read and parse the staged request JSON with TOCTOU mitigations.
+
+    Validates: O_NOFOLLOW, st_uid == uid(hermes), st_mode == 0o600, st_nlink == 1.
+    """
+    flags = os.O_RDONLY | os.O_NOFOLLOW
+    try:
+        fd = os.open(str(STAGE_FILE), flags)
+    except OSError as exc:
+        raise ValueError(f"cannot open staged file: {exc}") from exc
+
+    try:
+        st = os.fstat(fd)
+    except OSError as exc:
+        os.close(fd)
+        raise ValueError(f"fstat failed: {exc}") from exc
+
+    try:
+        expected_uid = _hermes_uid()
+    except KeyError as exc:
+        os.close(fd)
+        raise ValueError("system user 'hermes' not found") from exc
+
+    if st.st_uid != expected_uid:
+        os.close(fd)
+        raise ValueError(
+            f"staged file uid {st.st_uid} != hermes uid {expected_uid} — refusing"
+        )
+    if stat.S_IMODE(st.st_mode) != _EXPECTED_FILE_MODE:
+        os.close(fd)
+        raise ValueError(
+            f"staged file mode {oct(stat.S_IMODE(st.st_mode))} != "
+            f"{oct(_EXPECTED_FILE_MODE)} — refusing"
+        )
+    if st.st_nlink != 1:
+        os.close(fd)
+        raise ValueError(
+            f"staged file has {st.st_nlink} hard links (expected 1) — refusing"
+        )
+
+    try:
+        with os.fdopen(fd, "r", encoding="utf-8") as fh:
+            raw = fh.read()
+    except OSError as exc:
+        raise ValueError(f"cannot read staged file: {exc}") from exc
+
+    data = json.loads(raw)
+    if not isinstance(data, dict):
+        raise ValueError("staged file is not a JSON object")
+    return data
+
+
+def _shred(path: Path) -> None:
+    """Overwrite file content with zeros then unlink. Mirrors _shred everywhere else."""
+    try:
+        size = path.stat().st_size
+        with path.open("r+b") as fh:
+            fh.write(b"\x00" * max(size, 1))
+            fh.flush()
+            os.fsync(fh.fileno())
+    except OSError:
+        pass
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def _write_authkey_file(auth_key: str) -> None:
+    """Write the raw key to a FRESH 0600 root-owned tmpfs file for `--auth-key=file:`.
+
+    Never the staged request file itself — a dedicated, minimal-lifetime copy that
+    is shredded the instant `tailscale up` returns (success or failure).
+    """
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = AUTHKEY_FILE.with_suffix(".tmp")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(auth_key)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+    os.chmod(tmp, 0o600)
+    tmp.rename(AUTHKEY_FILE)
+
+
+def _write_enabled_marker() -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = ENABLED_MARKER.with_suffix(".tmp")
+    tmp.write_text("1\n", encoding="utf-8")
+    os.chmod(tmp, 0o644)
+    tmp.rename(ENABLED_MARKER)
+
+
+def _now_iso() -> str:
+    return datetime.now(tz=UTC).isoformat()
+
+
+def _write_status_json(payload: dict) -> None:
+    """Atomic write, 0644 — readable by the host-netns egress lane. Names only."""
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = STATUS_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    os.chmod(tmp, 0o644)
+    tmp.rename(STATUS_FILE)
+
+
+# --------------------------------------------------------------------------
+# Helpers — PAM verification (mirrors hermes-remote-access-control exactly;
+# each root helper carries its own copy on purpose — no shared module across
+# root-privileged scripts, see hermes-account-apply / hermes-passwd-apply).
+# --------------------------------------------------------------------------
+
+
+def _account_has_real_password(username: str) -> bool:
+    """True solo si *username* tiene una contraseña REAL en /etc/shadow."""
+    try:
+        with open("/etc/shadow", encoding="utf-8") as f:
+            for line in f:
+                parts = line.rstrip("\n").split(":")
+                if parts and parts[0] == username:
+                    pwhash = parts[1] if len(parts) > 1 else ""
+                    return bool(pwhash) and not pwhash.startswith(("!", "*"))
+    except OSError as exc:
+        logger.warning("no se pudo leer /etc/shadow: %s", type(exc).__name__)
+        return False
+    return False  # usuario ausente en shadow → fail closed
+
+
+def _verify_password_pam(username: str, password: str) -> bool:
+    """Verify *username*:*password* via PAM. Fails CLOSED on any error."""
+    if not password:
+        logger.warning("rechazada verificación con contraseña vacía")
+        return False
+    if not _account_has_real_password(username):
+        logger.warning(
+            "cuenta %s sin contraseña válida (passwordless/locked) — "
+            "gate de conexión FAIL-CLOSED (configura una en el onboarding)",
+            username,
+        )
+        return False
+    try:
+        import pam as _pam  # python-pam package
+
+        authenticator = _pam.pam()
+        if authenticator.authenticate(username, password, service="hermes-auth"):
+            return True
+    except ImportError:
+        pass
+    except Exception as exc:
+        logger.warning("pam verify error (python-pam): %s", type(exc).__name__)
+
+    return _verify_password_unix_chkpwd(username, password)
+
+
+def _verify_password_unix_chkpwd(username: str, password: str) -> bool:
+    """Call /usr/sbin/unix_chkpwd <username> nonull. Fail CLOSED on any error."""
+    try:
+        result = subprocess.run(
+            ["/usr/sbin/unix_chkpwd", username, "nonull"],
+            input=password.encode("utf-8"),
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+        return result.returncode == 0
+    except Exception as exc:
+        logger.warning("unix_chkpwd failed: %s", type(exc).__name__)
+        return False
+
+
+# --------------------------------------------------------------------------
+# Helpers — tailscale CLI + systemctl (subprocess boundary; every call is
+# timeout-bounded, capped retries with backoff+jitter on the flaky one).
+# --------------------------------------------------------------------------
+
+
+def _run_tailscale(args: list[str], *, timeout: float) -> subprocess.CompletedProcess | None:
+    cmd = [_TS_BIN, "--socket", str(TS_SOCKET)] + args
+    try:
+        return subprocess.run(cmd, capture_output=True, timeout=timeout, check=False, text=True)
+    except FileNotFoundError:
+        logger.error("tailscale binary not found on PATH")
+        return None
+    except subprocess.TimeoutExpired:
+        logger.warning("tailscale %s timed out after %ss", args[0] if args else "?", timeout)
+        return None
+
+
+def _systemctl(args: list[str]) -> bool:
+    cmd = ["/usr/bin/systemctl"] + args
+    try:
+        result = subprocess.run(cmd, capture_output=True, check=False, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.error("systemctl %s failed: %s", " ".join(args), type(exc).__name__)
+        return False
+    if result.returncode != 0:
+        stderr_safe = result.stderr.decode(errors="replace").strip()
+        logger.error("systemctl %s failed (rc=%d): %s", " ".join(args), result.returncode, stderr_safe)
+    return result.returncode == 0
+
+
+def _tailscale_up_with_retry() -> bool:
+    """`tailscale up` races the .path -> tailscaled start; retry, capped, with jitter."""
+    delay = _UP_BASE_DELAY
+    for attempt in range(1, _UP_MAX_ATTEMPTS + 1):
+        result = _run_tailscale(
+            [
+                "up",
+                f"--auth-key=file:{AUTHKEY_FILE}",
+                "--hostname=safent-agent",
+                "--shields-up",
+                "--accept-routes=false",
+            ],
+            timeout=_UP_SUBPROCESS_TIMEOUT,
+        )
+        if result is not None and result.returncode == 0:
+            return True
+        logger.warning(
+            "tailscale up attempt %d/%d failed%s",
+            attempt,
+            _UP_MAX_ATTEMPTS,
+            f" (rc={result.returncode})" if result is not None else " (no result)",
+        )
+        if attempt < _UP_MAX_ATTEMPTS:
+            time.sleep(delay + random.uniform(0, delay * 0.25))
+            delay = min(delay * 2, _UP_MAX_DELAY)
+    return False
+
+
+def _refresh_status() -> None:
+    """Refresh status.json from `tailscale status --json` — names/online only, never keys."""
+    payload: dict = {"connected": False, "backend_state": "Unknown", "updated_at": _now_iso()}
+    result = _run_tailscale(["status", "--json"], timeout=_STATUS_SUBPROCESS_TIMEOUT)
+    if result is not None and result.returncode == 0:
+        try:
+            data = json.loads(result.stdout)
+        except (json.JSONDecodeError, TypeError):
+            data = {}
+        if isinstance(data, dict):
+            backend_state = data.get("BackendState")
+            if isinstance(backend_state, str) and backend_state:
+                payload["backend_state"] = backend_state
+                payload["connected"] = backend_state == "Running"
+            self_info = data.get("Self")
+            if isinstance(self_info, dict):
+                dns_name = self_info.get("DNSName")
+                if isinstance(dns_name, str) and dns_name:
+                    payload["node_name"] = dns_name.rstrip(".")
+            tailnet_info = data.get("CurrentTailnet")
+            if isinstance(tailnet_info, dict):
+                suffix = tailnet_info.get("MagicDNSSuffix")
+                if isinstance(suffix, str) and suffix:
+                    payload["magicdns_suffix"] = suffix
+    _write_status_json(payload)
+
+
+# --------------------------------------------------------------------------
+# Actions
+# --------------------------------------------------------------------------
+
+
+def _connect(staged: dict) -> bool:
+    auth_key = staged.get("auth_key", "")
+    if (
+        not isinstance(auth_key, str)
+        or not auth_key
+        or "\n" in auth_key
+        or len(auth_key) > _AUTH_KEY_MAX_LEN
+    ):
+        logger.error("connect action: auth_key field missing or invalid — aborting")
+        return False
+
+    _write_enabled_marker()
+    _write_authkey_file(auth_key)
+    try:
+        ok = _tailscale_up_with_retry()
+    finally:
+        _shred(AUTHKEY_FILE)
+    _refresh_status()
+    if ok:
+        logger.info("tailnet connect: tailscale up succeeded")
+    else:
+        logger.warning("tailnet connect: tailscale up failed after retries")
+    return ok
+
+
+def _disconnect() -> bool:
+    _run_tailscale(["logout"], timeout=_LOGOUT_SUBPROCESS_TIMEOUT)
+    ENABLED_MARKER.unlink(missing_ok=True)
+    ok = _systemctl(["stop", _TAILSCALED_UNIT])
+    _refresh_status()
+    if ok:
+        logger.info("tailnet disconnect: stopped %s", _TAILSCALED_UNIT)
+    return ok
+
+
+# --------------------------------------------------------------------------
+# Main
+# --------------------------------------------------------------------------
+
+
+def _apply(staged: dict) -> int:
+    action = staged.get("action", "")
+
+    if action not in _KNOWN_ACTIONS:
+        logger.error(
+            "unknown action %r — ignoring (valid: %s)", action, ", ".join(sorted(_KNOWN_ACTIONS))
+        )
+        return 1
+
+    if action == "status":
+        _refresh_status()
+        return 0
+
+    # connect / disconnect both mutate state — same device-password PAM gate
+    # everywhere (plan.md open question, answered: yes).
+    password = staged.get("password", "")
+    if not isinstance(password, str) or not password:
+        logger.error("%s action: password field missing or empty — aborting", action)
+        return 1
+
+    if not _verify_password_pam(LOGIN_USER, password):
+        logger.warning("%s action: PAM verification FAILED for user '%s' — aborting", action, LOGIN_USER)
+        return 1
+
+    logger.info("%s action: PAM verification passed", action)
+    ok = _connect(staged) if action == "connect" else _disconnect()
+    return 0 if ok else 1
+
+
+def main() -> int:
+    if os.geteuid() != 0:
+        logger.error("must run as root")
+        return 1
+
+    if not STAGE_FILE.exists():
+        logger.info("no staged request — nothing to do")
+        return 0
+
+    try:
+        staged = _read_staged()
+    except Exception as exc:
+        logger.error("failed to parse staged request: %s", exc)
+        _shred(STAGE_FILE)
+        return 1
+
+    try:
+        return _apply(staged)
+    finally:
+        # Always shred — the auth_key field (if present) must not persist on disk.
+        _shred(STAGE_FILE)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

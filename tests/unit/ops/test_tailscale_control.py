@@ -1,0 +1,500 @@
+"""Tests for the hermes-tailscale-control root helper script (022).
+
+Mirrors the pattern of test_remote_access_control_script.py: import the script
+via path, mock subprocess/PAM for the bulk of the logic, and use a FAKE
+`tailscale` binary on PATH for the two properties that must be proven at the
+subprocess boundary itself (not just asserted on the mocked call):
+
+  - the auth key NEVER reaches argv/env — only `--auth-key=file:<path>`, and
+    the file is GONE once the helper returns (shredded, win or lose).
+  - status.json never carries a key, even if `tailscale status --json`
+    hypothetically returned one — the writer is a field whitelist, not a
+    passthrough.
+"""
+
+from __future__ import annotations
+
+import importlib.machinery
+import importlib.util
+import json
+import os
+import stat
+import sys
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+pytestmark = pytest.mark.unit
+
+# ---------------------------------------------------------------------------
+# Load the script as a module (no .py extension).
+# ---------------------------------------------------------------------------
+
+_SCRIPT_PATH = (
+    Path(__file__).parents[3]
+    / "ops"
+    / "agents-os-edition"
+    / "scripts"
+    / "hermes-tailscale-control"
+)
+
+
+def _load_script():
+    loader = importlib.machinery.SourceFileLoader("hermes_tailscale_control", str(_SCRIPT_PATH))
+    spec = importlib.util.spec_from_file_location(
+        "hermes_tailscale_control", _SCRIPT_PATH, loader=loader
+    )
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["hermes_tailscale_control"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+mod = _load_script()
+
+
+# ---------------------------------------------------------------------------
+# Fixtures — redirect every module path constant into tmp_path.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    control_dir = tmp_path / "tailscale-control"
+    control_dir.mkdir(mode=0o700)
+    runtime_dir = tmp_path / "run-tailscale"
+    runtime_dir.mkdir(mode=0o700)
+    state_dir = tmp_path / "state-tailscale"
+    state_dir.mkdir(mode=0o700)
+
+    stage_file = control_dir / "request.json"
+    authkey_file = runtime_dir / "authkey"
+    status_file = runtime_dir / "status.json"
+    enabled_marker = state_dir / "enabled"
+    socket_path = runtime_dir / "tailscaled.sock"
+
+    monkeypatch.setattr(mod, "STAGE_DIR", control_dir)
+    monkeypatch.setattr(mod, "STAGE_FILE", stage_file)
+    monkeypatch.setattr(mod, "RUNTIME_DIR", runtime_dir)
+    monkeypatch.setattr(mod, "STATE_DIR", state_dir)
+    monkeypatch.setattr(mod, "AUTHKEY_FILE", authkey_file)
+    monkeypatch.setattr(mod, "STATUS_FILE", status_file)
+    monkeypatch.setattr(mod, "ENABLED_MARKER", enabled_marker)
+    monkeypatch.setattr(mod, "TS_SOCKET", socket_path)
+
+    return {
+        "control_dir": control_dir,
+        "runtime_dir": runtime_dir,
+        "state_dir": state_dir,
+        "stage_file": stage_file,
+        "authkey_file": authkey_file,
+        "status_file": status_file,
+        "enabled_marker": enabled_marker,
+        "socket_path": socket_path,
+    }
+
+
+def _make_staged_file(path: Path, payload: dict) -> None:
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    os.chmod(path, 0o600)
+
+
+# ---------------------------------------------------------------------------
+# _read_staged TOCTOU checks
+# ---------------------------------------------------------------------------
+
+
+class TestReadStagedValidation:
+    def test_refuses_wrong_uid(self, paths: dict) -> None:
+        _make_staged_file(paths["stage_file"], {"action": "status"})
+        with patch.object(mod, "_hermes_uid", return_value=99999):
+            with pytest.raises(ValueError, match="uid"):
+                mod._read_staged()
+
+    def test_refuses_wrong_mode(self, paths: dict) -> None:
+        paths["stage_file"].write_text('{"action":"status"}', encoding="utf-8")
+        os.chmod(paths["stage_file"], 0o644)
+        with patch.object(mod, "_hermes_uid", return_value=os.getuid()):
+            with pytest.raises(ValueError, match="mode"):
+                mod._read_staged()
+
+    def test_accepts_correct_uid_and_mode(self, paths: dict) -> None:
+        _make_staged_file(paths["stage_file"], {"action": "status"})
+        with patch.object(mod, "_hermes_uid", return_value=os.getuid()):
+            assert mod._read_staged() == {"action": "status"}
+
+
+# ---------------------------------------------------------------------------
+# _apply dispatch
+# ---------------------------------------------------------------------------
+
+
+class TestApplyDispatch:
+    def test_status_action_never_touches_pam(self) -> None:
+        with (
+            patch.object(mod, "_refresh_status") as mock_refresh,
+            patch.object(mod, "_verify_password_pam") as mock_pam,
+        ):
+            rc = mod._apply({"action": "status"})
+        assert rc == 0
+        mock_refresh.assert_called_once()
+        mock_pam.assert_not_called()
+
+    def test_connect_with_correct_password_calls_connect(self) -> None:
+        with (
+            patch.object(mod, "_verify_password_pam", return_value=True),
+            patch.object(mod, "_connect", return_value=True) as mock_connect,
+        ):
+            rc = mod._apply({"action": "connect", "password": "correct", "auth_key": "tskey-x"})
+        assert rc == 0
+        mock_connect.assert_called_once()
+
+    def test_connect_with_wrong_password_never_calls_connect(self) -> None:
+        with (
+            patch.object(mod, "_verify_password_pam", return_value=False),
+            patch.object(mod, "_connect") as mock_connect,
+        ):
+            rc = mod._apply({"action": "connect", "password": "wrong", "auth_key": "tskey-x"})
+        assert rc == 1
+        mock_connect.assert_not_called()
+
+    def test_connect_without_password_rejected_before_pam(self) -> None:
+        with (
+            patch.object(mod, "_verify_password_pam") as mock_pam,
+            patch.object(mod, "_connect") as mock_connect,
+        ):
+            rc = mod._apply({"action": "connect", "auth_key": "tskey-x"})
+        assert rc == 1
+        mock_pam.assert_not_called()
+        mock_connect.assert_not_called()
+
+    def test_disconnect_with_correct_password_calls_disconnect(self) -> None:
+        with (
+            patch.object(mod, "_verify_password_pam", return_value=True),
+            patch.object(mod, "_disconnect", return_value=True) as mock_disconnect,
+        ):
+            rc = mod._apply({"action": "disconnect", "password": "correct"})
+        assert rc == 0
+        mock_disconnect.assert_called_once()
+
+    def test_disconnect_with_wrong_password_never_calls_disconnect(self) -> None:
+        with (
+            patch.object(mod, "_verify_password_pam", return_value=False),
+            patch.object(mod, "_disconnect") as mock_disconnect,
+        ):
+            rc = mod._apply({"action": "disconnect", "password": "wrong"})
+        assert rc == 1
+        mock_disconnect.assert_not_called()
+
+    def test_unknown_action_returns_1_without_pam(self) -> None:
+        with patch.object(mod, "_verify_password_pam") as mock_pam:
+            rc = mod._apply({"action": "reboot"})
+        assert rc == 1
+        mock_pam.assert_not_called()
+
+    def test_missing_action_returns_1(self) -> None:
+        assert mod._apply({}) == 1
+
+
+# ---------------------------------------------------------------------------
+# _connect: auth_key validation + write/shred ordering
+# ---------------------------------------------------------------------------
+
+
+class TestConnect:
+    def test_missing_auth_key_writes_nothing(self, paths: dict) -> None:
+        with (
+            patch.object(mod, "_write_enabled_marker") as mock_marker,
+            patch.object(mod, "_write_authkey_file") as mock_authkey,
+        ):
+            ok = mod._connect({"action": "connect", "password": "x"})
+        assert ok is False
+        mock_marker.assert_not_called()
+        mock_authkey.assert_not_called()
+
+    def test_empty_auth_key_rejected(self, paths: dict) -> None:
+        assert mod._connect({"auth_key": ""}) is False
+
+    def test_multiline_auth_key_rejected(self, paths: dict) -> None:
+        assert mod._connect({"auth_key": "tskey-x\nmalicious"}) is False
+
+    def test_valid_key_writes_marker_and_authkey_then_shreds_on_success(self, paths: dict) -> None:
+        with (
+            patch.object(mod, "_tailscale_up_with_retry", return_value=True) as mock_up,
+            patch.object(mod, "_refresh_status") as mock_refresh,
+        ):
+            ok = mod._connect({"auth_key": "tskey-abc123"})
+        assert ok is True
+        assert paths["enabled_marker"].exists()
+        assert not paths["authkey_file"].exists(), "authkey must be shredded after use"
+        mock_up.assert_called_once()
+        mock_refresh.assert_called_once()
+
+    def test_shreds_authkey_even_when_tailscale_up_fails(self, paths: dict) -> None:
+        with (
+            patch.object(mod, "_tailscale_up_with_retry", return_value=False),
+            patch.object(mod, "_refresh_status"),
+        ):
+            ok = mod._connect({"auth_key": "tskey-abc123"})
+        assert ok is False
+        assert not paths["authkey_file"].exists()
+
+    def test_authkey_file_is_0600(self, paths: dict) -> None:
+        mod._write_authkey_file("tskey-secret")
+        mode = stat.S_IMODE(paths["authkey_file"].stat().st_mode)
+        assert mode == 0o600
+        assert paths["authkey_file"].read_text(encoding="utf-8") == "tskey-secret"
+
+
+# ---------------------------------------------------------------------------
+# _disconnect
+# ---------------------------------------------------------------------------
+
+
+class TestDisconnect:
+    def test_removes_marker_stops_unit_and_refreshes_status(self, paths: dict) -> None:
+        paths["enabled_marker"].write_text("1\n", encoding="utf-8")
+        with (
+            patch.object(mod, "_run_tailscale", return_value=MagicMock(returncode=0)) as mock_run,
+            patch.object(mod, "_systemctl", return_value=True) as mock_systemctl,
+            patch.object(mod, "_refresh_status") as mock_refresh,
+        ):
+            ok = mod._disconnect()
+        assert ok is True
+        assert not paths["enabled_marker"].exists()
+        mock_systemctl.assert_called_once_with(["stop", "hermes-tailscaled.service"])
+        mock_run.assert_called_once_with(["logout"], timeout=mod._LOGOUT_SUBPROCESS_TIMEOUT)
+        mock_refresh.assert_called_once()
+
+    def test_marker_absent_is_not_an_error(self, paths: dict) -> None:
+        with (
+            patch.object(mod, "_run_tailscale", return_value=None),
+            patch.object(mod, "_systemctl", return_value=True),
+            patch.object(mod, "_refresh_status"),
+        ):
+            ok = mod._disconnect()
+        assert ok is True
+
+
+# ---------------------------------------------------------------------------
+# _refresh_status — names/online only, never a key, whitelist not passthrough
+# ---------------------------------------------------------------------------
+
+
+class TestRefreshStatus:
+    def test_writes_disconnected_when_tailscale_unreachable(self, paths: dict) -> None:
+        with patch.object(mod, "_run_tailscale", return_value=None):
+            mod._refresh_status()
+        payload = json.loads(paths["status_file"].read_text(encoding="utf-8"))
+        assert payload["connected"] is False
+        assert payload["backend_state"] == "Unknown"
+
+    def test_parses_backend_state_node_name_and_suffix(self, paths: dict) -> None:
+        fake_result = MagicMock(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "BackendState": "Running",
+                    "Self": {"DNSName": "safent-agent.tailnet123.ts.net."},
+                    "CurrentTailnet": {"MagicDNSSuffix": "tailnet123.ts.net"},
+                }
+            ),
+        )
+        with patch.object(mod, "_run_tailscale", return_value=fake_result):
+            mod._refresh_status()
+        payload = json.loads(paths["status_file"].read_text(encoding="utf-8"))
+        assert payload["connected"] is True
+        assert payload["backend_state"] == "Running"
+        assert payload["node_name"] == "safent-agent.tailnet123.ts.net"  # trailing dot stripped
+        assert payload["magicdns_suffix"] == "tailnet123.ts.net"
+
+    def test_never_writes_a_key_even_if_present_in_tailscale_output(self, paths: dict) -> None:
+        """Whitelist, not passthrough: an unexpected field in `status --json`
+        (e.g. a hypothetical key/token) must never reach status.json."""
+        fake_result = MagicMock(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "BackendState": "Running",
+                    "AuthKey": "tskey-should-never-appear",
+                    "Self": {"DNSName": "n.ts.net", "PrivateKey": "should-never-appear-either"},
+                    "CurrentTailnet": {"MagicDNSSuffix": "ts.net"},
+                }
+            ),
+        )
+        with patch.object(mod, "_run_tailscale", return_value=fake_result):
+            mod._refresh_status()
+        raw = paths["status_file"].read_text(encoding="utf-8")
+        assert "should-never-appear" not in raw
+        assert "tskey" not in raw
+        assert "PrivateKey" not in raw
+        assert "AuthKey" not in raw
+
+    def test_status_file_is_0644(self, paths: dict) -> None:
+        with patch.object(mod, "_run_tailscale", return_value=None):
+            mod._refresh_status()
+        mode = stat.S_IMODE(paths["status_file"].stat().st_mode)
+        assert mode == 0o644
+
+    def test_malformed_json_from_tailscale_does_not_crash(self, paths: dict) -> None:
+        fake_result = MagicMock(returncode=0, stdout="not json {{{")
+        with patch.object(mod, "_run_tailscale", return_value=fake_result):
+            mod._refresh_status()  # must not raise
+        payload = json.loads(paths["status_file"].read_text(encoding="utf-8"))
+        assert payload["connected"] is False
+
+
+# ---------------------------------------------------------------------------
+# _tailscale_up_with_retry — capped retries, backoff+jitter, no real sleep
+# ---------------------------------------------------------------------------
+
+
+class TestTailscaleUpRetry:
+    def test_succeeds_on_first_attempt_no_sleep(self, paths: dict) -> None:
+        with (
+            patch.object(mod, "_run_tailscale", return_value=MagicMock(returncode=0)) as mock_run,
+            patch("time.sleep") as mock_sleep,
+        ):
+            ok = mod._tailscale_up_with_retry()
+        assert ok is True
+        assert mock_run.call_count == 1
+        mock_sleep.assert_not_called()
+
+    def test_retries_up_to_the_cap_then_gives_up(self, paths: dict) -> None:
+        with (
+            patch.object(mod, "_run_tailscale", return_value=MagicMock(returncode=1)) as mock_run,
+            patch("time.sleep") as mock_sleep,
+        ):
+            ok = mod._tailscale_up_with_retry()
+        assert ok is False
+        assert mock_run.call_count == mod._UP_MAX_ATTEMPTS
+        assert mock_sleep.call_count == mod._UP_MAX_ATTEMPTS - 1
+
+    def test_succeeds_after_transient_failures(self, paths: dict) -> None:
+        results = [MagicMock(returncode=1), MagicMock(returncode=1), MagicMock(returncode=0)]
+        with (
+            patch.object(mod, "_run_tailscale", side_effect=results),
+            patch("time.sleep"),
+        ):
+            ok = mod._tailscale_up_with_retry()
+        assert ok is True
+
+    def test_up_command_never_puts_the_raw_key_in_argv(self, paths: dict) -> None:
+        with patch.object(mod, "_run_tailscale", return_value=MagicMock(returncode=0)) as mock_run:
+            mod._tailscale_up_with_retry()
+        (args,), kwargs = mock_run.call_args
+        joined = " ".join(args)
+        assert "--auth-key=file:" in joined
+        assert "tskey-" not in joined  # no raw key literal ever appears in argv
+
+
+# ---------------------------------------------------------------------------
+# main(): root gate + always-shred
+# ---------------------------------------------------------------------------
+
+
+class TestMain:
+    def test_requires_root(self, paths: dict) -> None:
+        with patch("os.geteuid", return_value=1000):
+            rc = mod.main()
+        assert rc == 1
+
+    def test_no_staged_file_is_a_noop(self, paths: dict) -> None:
+        with patch("os.geteuid", return_value=0):
+            rc = mod.main()
+        assert rc == 0
+
+    def test_shreds_staged_file_on_parse_failure(self, paths: dict) -> None:
+        paths["stage_file"].write_text("NOT VALID JSON", encoding="utf-8")
+        os.chmod(paths["stage_file"], 0o600)
+        with patch("os.geteuid", return_value=0):
+            rc = mod.main()
+        assert rc == 1
+        assert not paths["stage_file"].exists()
+
+    def test_shreds_staged_file_after_successful_status(self, paths: dict) -> None:
+        _make_staged_file(paths["stage_file"], {"action": "status"})
+        with (
+            patch.object(mod, "_hermes_uid", return_value=os.getuid()),
+            patch.object(mod, "_run_tailscale", return_value=None),
+            patch("os.geteuid", return_value=0),
+        ):
+            rc = mod.main()
+        assert rc == 0
+        assert not paths["stage_file"].exists()
+
+
+# ---------------------------------------------------------------------------
+# Fake `tailscale` binary on PATH — proves the argv/file-lifecycle properties
+# at the real subprocess boundary, not just on the mock.
+# ---------------------------------------------------------------------------
+
+_FAKE_TAILSCALE = """#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "$FAKE_TAILSCALE_LOG"
+subcmd=""
+authkey_flag=""
+for a in "$@"; do
+  case "$a" in
+    up|status|logout) subcmd="$a" ;;
+    --auth-key=*) authkey_flag="$a" ;;
+  esac
+done
+if [ -n "$authkey_flag" ]; then
+  printf 'AUTHKEY_FLAG:%s\\n' "$authkey_flag" >> "$FAKE_TAILSCALE_LOG"
+  path="${authkey_flag#--auth-key=file:}"
+  if [ -f "$path" ]; then
+    printf 'AUTHKEY_FILE_EXISTED_AT_CALL\\n' >> "$FAKE_TAILSCALE_LOG"
+  fi
+fi
+case "$subcmd" in
+  up) exit "${FAKE_TAILSCALE_UP_RC:-0}" ;;
+  status) cat "$FAKE_TAILSCALE_STATUS_JSON"; exit 0 ;;
+  logout) exit 0 ;;
+esac
+exit 0
+"""
+
+
+@pytest.fixture()
+def fake_tailscale_on_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    ts = bin_dir / "tailscale"
+    ts.write_text(_FAKE_TAILSCALE)
+    ts.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ.get('PATH', '')}")
+    log = tmp_path / "fake-tailscale.log"
+    monkeypatch.setenv("FAKE_TAILSCALE_LOG", str(log))
+    status_json = tmp_path / "fake-status.json"
+    status_json.write_text(json.dumps({"BackendState": "Running"}), encoding="utf-8")
+    monkeypatch.setenv("FAKE_TAILSCALE_STATUS_JSON", str(status_json))
+    return log
+
+
+class TestFakeBinaryOnPathProvesArgvAndFileLifecycle:
+    def test_connect_calls_real_subprocess_with_file_flag_and_shreds_after(
+        self, paths: dict, fake_tailscale_on_path: Path
+    ) -> None:
+        ok = mod._connect({"auth_key": "tskey-abc123-should-never-be-in-argv"})
+        assert ok is True
+
+        log_text = fake_tailscale_on_path.read_text(encoding="utf-8")
+        assert "--auth-key=file:" in log_text
+        assert "tskey-abc123-should-never-be-in-argv" not in log_text
+        assert "AUTHKEY_FILE_EXISTED_AT_CALL" in log_text  # the file existed WHEN tailscale read it
+
+        # And the file is gone now that the helper has returned.
+        assert not paths["authkey_file"].exists()
+
+    def test_disconnect_calls_logout_and_refreshes_status_via_real_subprocess(
+        self, paths: dict, fake_tailscale_on_path: Path
+    ) -> None:
+        paths["enabled_marker"].write_text("1\n", encoding="utf-8")
+        with patch.object(mod, "_systemctl", return_value=True):
+            ok = mod._disconnect()
+        assert ok is True
+        log_text = fake_tailscale_on_path.read_text(encoding="utf-8")
+        assert "logout" in log_text
+        payload = json.loads(paths["status_file"].read_text(encoding="utf-8"))
+        assert payload["connected"] is True  # fake status.json says Running
