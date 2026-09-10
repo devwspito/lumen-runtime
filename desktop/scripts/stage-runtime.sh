@@ -407,9 +407,24 @@ _stage_app_files() {
 # it at package time) AND the app files above — all addressed by their
 # POST-FLATTEN flat basename, matching what `cmd_stage_runtime`'s own
 # `bundle_dir` will actually contain at runtime.
+#
+# MAC-03 (verificacion-mac-1.md): also carries `engine_image`/
+# `companion_image` straight from `runtime-manifest.lock`'s own top-level
+# fields of the same name — the release pipeline's pinned repo+digest for
+# the engine/companion CONTAINER images (a build-time fact, mirroring how
+# `machine_image.manifest_digest` is already pinned by a human, never
+# queried live here). `boot.rs`/`selftest.rs` read these from THIS shipped
+# file instead of the `SAFENT_ENGINE_DIGEST` env var nothing in the real
+# packaging pipeline ever sets. `null` (repo absent, or digest not yet
+# pinned) ships through unchanged — a legitimate "not fixed yet" state the
+# wrapper fails closed on, not a staging error.
 _write_runtime_bundle_manifest() {
-  local podman_version out
+  local podman_version out engine_repo engine_digest companion_repo companion_digest
   podman_version="$(jq -r '.targets[$t].podman_version' --arg t "$TARGET" "$LOCKFILE")"
+  engine_repo="$(jq -r '.engine_image.repo // empty' "$LOCKFILE")"
+  engine_digest="$(jq -r '.engine_image.digest // empty' "$LOCKFILE")"
+  companion_repo="$(jq -r '.companion_image.repo // empty' "$LOCKFILE")"
+  companion_digest="$(jq -r '.companion_image.digest // empty' "$LOCKFILE")"
   out="$DEST/runtime-bundle.json"
   {
     find "$DEST" -type f ! -name 'runtime-bundle.json' -print0
@@ -418,7 +433,18 @@ _write_runtime_bundle_manifest() {
     s="$(SHA256 "$f")"
     m="$(stat -c '%a' "$f" 2>/dev/null || stat -f '%Lp' "$f")"
     printf '{"path":"%s","sha256":"%s","mode":"0%s"}\n' "$b" "$s" "$m"
-  done | jq -s --arg v "$podman_version" '{podman_version: $v, entries: .}' > "$out"
+  done | jq -s \
+    --arg v "$podman_version" \
+    --arg er "$engine_repo" --arg ed "$engine_digest" \
+    --arg cr "$companion_repo" --arg cd "$companion_digest" \
+    '{
+      podman_version: $v,
+      entries: .,
+      engine_image: (if $er == "" then null
+                      else {repo: $er, digest: (if $ed == "" then null else $ed end)} end),
+      companion_image: (if $cr == "" then null
+                          else {repo: $cr, digest: (if $cd == "" then null else $cd end)} end)
+    }' > "$out"
   chmod 0644 "$out"
   echo "    wrote runtime-bundle.json ($(jq '.entries | length' "$out") entries)"
 }

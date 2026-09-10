@@ -341,6 +341,16 @@ pub enum FailureCode {
     /// purely local storage problem, with the real detail (the podman
     /// process's own stderr) captured by the adapter but never shown.
     LocalStorageConflict,
+    /// NOT part of the CLI's vocabulary — synthesized by `boot.rs` when the
+    /// engine/companion image digest a packaged run needs is not available
+    /// from the shipped `runtime-bundle.json` (missing file, malformed
+    /// JSON, or a `digest` field the release pipeline has not pinned yet).
+    /// MAC-03 (verificacion-mac-1.md): before this variant existed, a
+    /// missing digest source (`SAFENT_ENGINE_DIGEST`, an env var nothing in
+    /// the real packaging pipeline ever sets) surfaced as the unrelated,
+    /// misleading `cli_porcelain_unsupported` — this name says exactly
+    /// what is missing instead.
+    EngineDigestMissing,
 }
 
 impl FailureCode {
@@ -375,6 +385,7 @@ impl FailureCode {
             FailureCode::CancelledByOwner => "cancelled_by_owner",
             FailureCode::RepairIneffective => "repair_ineffective",
             FailureCode::LocalStorageConflict => "local_storage_conflict",
+            FailureCode::EngineDigestMissing => "engine_digest_missing",
         }
     }
 }
@@ -461,9 +472,11 @@ pub enum EnginePhase {
     EngineStarting,
     EngineReady,
     CompanionProvisioning,
-    /// Reached once boot.rs actually drives companion convergence (currently
-    /// `desired_state_from_env` never sets a companion digest — that lands
-    /// with 029's onboarding). Exercised today only by this module's own
+    /// Reached once boot.rs actually drives companion convergence (no real
+    /// invocation path asks for one today outside an explicit
+    /// `SAFENT_COMPANION_DIGEST`/shipped `companion_image` override — the
+    /// owner-facing flow that always wants one lands with 029's
+    /// onboarding). Exercised today only by this module's own
     /// transition-table tests.
     #[allow(dead_code)]
     CompanionReady,

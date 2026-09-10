@@ -334,5 +334,15 @@
         "mode": "0644"
       }
     ]
+  },
+  "engine_image": {
+    "repo": "ghcr.io/devwspito/safent",
+    "digest": null,
+    "note": "Digest publicado del contenedor del motor (NDJSON t=facts, contracts/app-engine.md). Lo fija el pipeline de release (ops-release-publisher) antes de empaquetar — el sha256 real de la imagen que ese checkout publicó, igual que machine_image.manifest_digest arriba: un hecho humano/de release, jamás consultado en vivo aquí (MAC-03, verificacion-mac-1.md). null = todavía sin fijar para este checkout; stage-runtime.sh copia este campo (incluido null) a runtime-bundle.json, y boot.rs/selftest.rs fallan cerrado con engine_digest_missing en vez de adivinar cuando falta."
+  },
+  "companion_image": {
+    "repo": "ghcr.io/devwspito/safent-ads",
+    "digest": null,
+    "note": "Igual que engine_image — opcional; un build sin digest de compañero simplemente nunca ofrece PullCompanion (misma opcionalidad que SAFENT_COMPANION_DIGEST ya tenía)."
   }
 }
