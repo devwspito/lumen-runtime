@@ -35,19 +35,59 @@ nunca deja un binario a medio verificar).
 
 ## Dónde caen los ficheros (contrato para quien consuma esto — T009)
 
-`tauri.conf.json`'s `bundle.resources` usa **un** patrón glob —
-`"resources/runtime/*/**/*": "runtime"` — porque en cualquier build real sólo
-existe UN triple bajo `resources/runtime/` (el que ese runner stageó) y porque
-ni `MacConfig` ni `LinuxConfig` (verificado contra `tauri-utils` 2.9.3, el
-`Cargo.lock` real de este crate) tienen un campo `resources` propio —
-`bundle.macOS`/`bundle.linux` sólo traen `files`/`dmg`/`deb`/`appimage`/`rpm`,
-nada que sirva para esto. Un patrón glob en `bundle.resources` **aplana** la
-estructura (comportamiento verificado leyendo `tauri-utils::resources` y
-probado con el `glob` crate real 0.3.3 contra el árbol stageado de verdad): en
-el paquete final, **todo** queda directo bajo `$RESOURCES/runtime/<nombre>`,
-sin `bin/`/`libexec/podman/`/`etc/containers/` — cada nombre de fichero es único
-en todo el conjunto (macOS + Linux), así que aplanar no pisa nada. En tiempo de
-ejecución: `app.path().resource_dir()?.join("runtime").join("podman")`, etc.
+`bundle.resources` usa **un** patrón glob — `"resources/runtime/*/**/*":
+"runtime"` — porque en cualquier build real sólo existe UN triple bajo
+`resources/runtime/` (el que ese runner stageó) y porque ni `MacConfig` ni
+`LinuxConfig` (verificado contra `tauri-utils` 2.9.3, el `Cargo.lock` real de
+este crate) tienen un campo `resources` propio — `bundle.macOS`/`bundle.linux`
+sólo traen `files`/`dmg`/`deb`/`appimage`/`rpm`, nada que sirva para esto. Un
+patrón glob en `bundle.resources` **aplana** la estructura (comportamiento
+verificado leyendo `tauri-utils::resources` y probado con el `glob` crate real
+0.3.3 contra el árbol stageado de verdad): en el paquete final, **todo** queda
+directo bajo `$RESOURCES/runtime/<nombre>`, sin `bin/`/`libexec/podman/`/
+`etc/containers/` — cada nombre de fichero es único en todo el conjunto (macOS
++ Linux), así que aplanar no pisa nada. En tiempo de ejecución:
+`app.path().resource_dir()?.join("runtime").join("podman")`, etc.
+
+### `bundle.resources` vive en un overlay, NO en `tauri.conf.json`
+
+`tauri-build`'s propio `build.rs` (`tauri_build::try_build`, no sólo `tauri
+build`) resuelve el glob de `bundle.resources` en **cada** `cargo build`/
+`clippy`/`test` — con `resources/runtime/` vacío o ausente (checkout limpio,
+sin `stage-runtime.sh` corrido) el glob no matchea nada y `try_build` hace
+panic: `glob pattern resources/runtime/*/**/* path not found or didn't match
+any files`. Se comprobó en vivo (gate roto en trunk con checkout limpio) y se
+reprodujo aquí a propósito para confirmarlo antes de corregirlo.
+
+Corrección: `bundle.resources` vive **sólo** en
+`desktop/src-tauri/tauri.bundle.conf.json` (overlay, nunca en
+`tauri.conf.json`). `cargo build`/`clippy`/`test` normales no lo ven — pasan
+en un checkout limpio sin nada stageado (verificado: `rm -rf
+resources/runtime/*` + `cargo fmt --check && cargo clippy --all-targets --
+-D warnings && cargo test`, limpio). El build de producción lo aplica
+explícitamente, **después** de `stage-runtime.sh` para el target de ese
+runner:
+
+```sh
+desktop/scripts/stage-runtime.sh <triple>          # puebla resources/runtime/<triple>/
+cd desktop/src-tauri
+TAURI_CONFIG="$(cat tauri.bundle.conf.json)" cargo tauri build   # o: tauri build --config tauri.bundle.conf.json
+```
+
+(`--config`/`TAURI_CONFIG` son el mismo mecanismo — `tauri-build` lee
+`TAURI_CONFIG` directamente en `build.rs` y hace `json_patch::merge` sobre la
+config base; no requiere el CLI `tauri` instalado para probarlo.) Probado sin
+el CLI (no está instalado en esta DGX): con el overlay + el target stageado,
+`TAURI_CONFIG="$(cat tauri.bundle.conf.json)" cargo build` termina en verde y
+copia exactamente los 16 ficheros esperados (aplanados) a
+`target/debug/runtime/`; con el overlay puesto y `resources/runtime/` vacío,
+el MISMO comando reproduce el panic exacto de arriba — confirma que el overlay
+ejercita el glob de verdad, no es un no-op.
+
+`plugins.updater.pubkey` se queda en `tauri.conf.json` (no en el overlay): el
+placeholder `__TAURI_UPDATER_PUBKEY__` no es una ruta ni un glob, `try_build`
+no lo valida — confirmado, no rompe ningún `cargo build`/`clippy`/`test` con o
+sin overlay.
 
 `bundle.linux.deb.post_install_script` es donde va el postinst que instala el
 ayudante privilegiado (perfil AppArmor + `newuidmap`/`newgidmap` +
