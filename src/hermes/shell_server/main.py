@@ -39,12 +39,19 @@ from hermes.tasks.control_plane.domain.ports import AgentUnavailable
 
 logger = logging.getLogger("hermes-shell-server")
 
-_DB_PATH = Path(
-    os.environ.get(
-        "HERMES_SHELL_DB",
-        "/var/lib/hermes/shell-state.db",
-    )
-)
+
+def _resolve_db_path() -> Path:
+    """Read HERMES_SHELL_DB at CALL time, not at module-import time.
+
+    Previously this was a module-level constant bound once, the first time
+    `hermes.shell_server.main` was imported anywhere in the process — every
+    later `create_app()` call (a second test, a differently-configured
+    instance) silently reused that FIRST value no matter what
+    `HERMES_SHELL_DB` was set to afterwards, making tests order-dependent
+    (whichever test file imported this module first "won" the DB path for
+    every other test in the run).
+    """
+    return Path(os.environ.get("HERMES_SHELL_DB", "/var/lib/hermes/shell-state.db"))
 
 
 def _healthz_payload() -> dict[str, Any]:
@@ -627,6 +634,10 @@ def _commitment_matches(commitment: str, presented: str) -> bool:
 
 def create_app() -> FastAPI:
     from contextlib import asynccontextmanager  # noqa: PLC0415
+
+    # Resolved HERE, at call time — see `_resolve_db_path()` docstring. Every
+    # `_DB_PATH` reference below this point is this local, per-call binding.
+    _DB_PATH = _resolve_db_path()
 
     audit_writer = _build_audit_tail_writer()
     prometheus_exporter = _build_prometheus_exporter()

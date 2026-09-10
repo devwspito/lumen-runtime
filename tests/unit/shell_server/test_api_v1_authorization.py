@@ -133,15 +133,6 @@ def app(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
     master_key = os.urandom(32)
     from hermes.shell_server import main as shell_main
 
-    # `_DB_PATH` is read from the env ONCE at module-import time (main.py:42),
-    # not per create_app() call — the env var above only takes effect if this
-    # is the FIRST test in the process to import the module. Patching the
-    # already-bound module attribute makes this fixture order-independent
-    # (safe whether this file runs alone or inside the full shell_server
-    # suite, where some earlier test already imported hermes.shell_server.main
-    # against the real HERMES_SHELL_DB default).
-    monkeypatch.setattr(shell_main, "_DB_PATH", tmp_path / "shell-state.db")
-
     original_vault = shell_main.SecretsVault
 
     class _TestVault(original_vault):  # type: ignore[valid-type]
