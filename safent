@@ -393,7 +393,20 @@ cmd_url() {
   echo "Esperando a que Safent esté listo…" >&2
   url="$(_url)" || url=""
   [ -n "$url" ] || { echo "Safent arrancó pero aún no hay token — prueba: safent logs" >&2; exit 1; }
-  printf '%s\n' "$url"
+  # CLI-N2 (specs/025-safent-repaso matriz-final-39eeb8e): under --porcelain,
+  # stdout is NDJSON-only (app-engine.md §2) and the bootstrap ticket must
+  # NEVER reach it (§5) — this command is not in the closed verb table of §4
+  # (only `up --secret-fd` is), so there is no dedicated descriptor to hand
+  # it through here. Deliver the same line this command has always printed
+  # via stderr instead (uninterpreted diagnostics, same channel every other
+  # porcelain helper below already uses), and mark stdout with a secret-free
+  # completion event so a caller parsing NDJSON still gets a clean signal.
+  if [ "$PORCELAIN" -eq 1 ]; then
+    printf '%s\n' "$url" >&2
+    printf '{"t":"url","delivered_via":"stderr"}\n'
+  else
+    printf '%s\n' "$url"
+  fi
 }
 
 cmd_start() {
@@ -786,12 +799,29 @@ cmd_brake() {
 }
 
 cmd_status() {
+  # CLI-N2 (specs/025-safent-repaso matriz-final-39eeb8e): this used to
+  # `echo` human text unconditionally, on stdout, even under --porcelain —
+  # violating app-engine.md §2 ("stdout — exclusivamente NDJSON"). Not in
+  # the closed verb table of §4 either, so no wrapper depends on the human
+  # text shape; still, every verb honours the flag now (T004 pattern above).
   if _exists && _running; then
-    echo "[ok] Safent running at  http://localhost:$(_port)/   (open with: safent)"
+    if [ "$PORCELAIN" -eq 1 ]; then
+      printf '{"t":"status","state":"running","port":%s}\n' "$(_port)"
+    else
+      echo "[ok] Safent running at  http://localhost:$(_port)/   (open with: safent)"
+    fi
   elif _exists; then
-    echo "[ ] Safent is stopped.  Start it with: safent"
+    if [ "$PORCELAIN" -eq 1 ]; then
+      printf '{"t":"status","state":"stopped"}\n'
+    else
+      echo "[ ] Safent is stopped.  Start it with: safent"
+    fi
   else
-    echo "[ ] Safent is not installed.  Install with: safent update"
+    if [ "$PORCELAIN" -eq 1 ]; then
+      printf '{"t":"status","state":"not_installed"}\n'
+    else
+      echo "[ ] Safent is not installed.  Install with: safent update"
+    fi
   fi
 }
 
