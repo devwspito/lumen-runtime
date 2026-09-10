@@ -940,6 +940,15 @@ const translations = {
     'cost.gov.selfhosted.label':     'Cómputo propio',
     'cost.gov.selfhosted.note':      'acciones sin coste externo',
 
+    // Reconnect screen (028 FR-012/SC-012) — the ONE honest state for a
+    // tokenless load, a stale cache, or a failed refresh. Never a stack of
+    // errors, never a retry loop: one screen, one action.
+    'reconnect.title':                 'Reabre Safent',
+    'reconnect.reason.no_token':       'No se encontró una sesión de Safent en esta ventana.',
+    'reconnect.reason.refresh_failed': 'La sesión de Safent ha caducado.',
+    'reconnect.hint':                  'Ciérrala y vuelve a abrirla desde el icono de Safent.',
+    'reconnect.action':                'Reintentar',
+
     // System update
     'sysupdate.current':        'Versión {v}',
     'sysupdate.action':         'Actualizar',
@@ -1874,6 +1883,15 @@ const translations = {
     'cost.gov.failures.note':        ' of total actions',
     'cost.gov.selfhosted.label':     'Self-hosted compute',
     'cost.gov.selfhosted.note':      'actions with no external cost',
+
+    // Reconnect screen (028 FR-012/SC-012) — the ONE honest state for a
+    // tokenless load, a stale cache, or a failed refresh. Never a stack of
+    // errors, never a retry loop: one screen, one action.
+    'reconnect.title':                 'Reopen Safent',
+    'reconnect.reason.no_token':       'No Safent session was found in this window.',
+    'reconnect.reason.refresh_failed': 'Your Safent session has expired.',
+    'reconnect.hint':                  'Close it and open it again from the Safent icon.',
+    'reconnect.action':                'Retry',
 
     // System update
     'sysupdate.current':        'Version {v}',

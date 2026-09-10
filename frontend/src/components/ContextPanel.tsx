@@ -205,10 +205,12 @@ export default function ContextPanel({ onClose, busy = false }: ContextPanelProp
     // Each source is independent — one failing must not blank the others.
     listWorkspaceFiles()
       .then(data => setFiles(Array.isArray(data) ? data : []))
+      .catch(() => { /* transient — keep last known files */ })
       .finally(() => setFilesLoading(false))
 
     listSkills()
       .then(data => setSkills(Array.isArray(data) ? data : []))
+      .catch(() => { /* transient — keep last known skills */ })
       .finally(() => setSkillsLoading(false))
 
     // Composio 503s on a fresh install — catch silently so the panel still renders

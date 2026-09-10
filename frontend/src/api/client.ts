@@ -1,4 +1,4 @@
-import { token, refreshToken } from '../lib/token'
+import { token, refreshToken, getAuthStatus } from '../lib/token'
 import type {
   Agent,
   ActiveAgentResponse,
@@ -82,6 +82,15 @@ interface RequestOptions extends RequestInit {
 }
 
 async function request<T>(path: string, options: RequestOptions = {}, _retried = false): Promise<T> {
+  // 028 FR-012/SC-012: once we know the bearer is gone (no token was ever present,
+  // or a prior refresh definitively failed), every caller short-circuits HERE,
+  // before fetch() — this is what turns "session lost" into zero further
+  // /api/v1/* calls instead of every polling hook 401-ing forever. The app shell
+  // (App.tsx) reacts to the same auth status by swapping to the reconnect screen.
+  if (getAuthStatus().kind === 'unauthenticated' && path !== '/session/refresh') {
+    throw new ApiError('No hay una sesión activa.', 401, null)
+  }
+
   const { timeoutMs = DEFAULT_TIMEOUT_MS, headers: extraHeaders, ...rest } = options
 
   const headers: Record<string, string> = {
