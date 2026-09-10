@@ -85,8 +85,16 @@ class SqliteAgentState:
             return False
         return row["loop_state"] == "paused"
 
-    async def pause(self, *, by: UUID | None, reason: str) -> None:
-        """Pausa el loop — persiste loop_state = 'paused', emite AGENT_PAUSED."""
+    async def pause(
+        self, *, by: UUID | None, reason: str, provenance: str = ""
+    ) -> None:
+        """Pausa el loop — persiste loop_state = 'paused', emite AGENT_PAUSED.
+
+        `provenance` (AgentPauseProvenance, 025 re-verificación d2eb8c6) es
+        audit-only, igual que el `reason` de provenance de `resume`: nunca se
+        persiste en `agent_runtime_state` (esa columna es el `reason` humano,
+        "por qué está pausado", que la UI muestra tal cual).
+        """
         now_iso = datetime.now(tz=UTC).isoformat()
         with self._connect() as conn:
             conn.execute(
@@ -100,7 +108,7 @@ class SqliteAgentState:
                 """,
                 (reason, str(by) if by else None, now_iso),
             )
-        await self._emit_audit_paused(by=by, reason=reason)
+        await self._emit_audit_paused(by=by, reason=reason, provenance=provenance)
 
     async def resume(self, *, by: UUID | None, reason: str = "") -> None:
         """Reanuda el loop — persiste loop_state = 'running', emite AGENT_RESUMED.
@@ -155,16 +163,28 @@ class SqliteAgentState:
         with self._connect() as conn:
             ensure_tasks_schema(conn)
 
-    async def _emit_audit_paused(self, *, by: UUID | None, reason: str) -> None:
+    async def _emit_audit_paused(
+        self, *, by: UUID | None, reason: str, provenance: str = ""
+    ) -> None:
         """Firma y persiste AGENT_PAUSED — signer/audit_repo son invariantes
-        de construcción (__init__ falla si faltan), nunca None aquí."""
+        de construcción (__init__ falla si faltan), nunca None aquí.
+
+        `provenance` (025 re-verificación d2eb8c6, "echar el freno no tiene
+        vocabulario de procedencia"): marcador cerrado (AgentPauseProvenance)
+        machine-readable, simétrico al de `_emit_audit_resumed` — nunca
+        texto libre del llamante, a diferencia de `reason`.
+        """
         from hermes.agents_os.application.audit_hash_chain import AuditKind  # noqa: PLC0415
 
         await self._signer.append_and_persist(
             audit_kind=AuditKind.AGENT_PAUSED,
             actor=str(by) if by else "system",
             description=f"Agent paused: {reason}",
-            payload={"changed_by": str(by) if by else None, "reason": reason},
+            payload={
+                "changed_by": str(by) if by else None,
+                "reason": reason,
+                "provenance": provenance or None,
+            },
             audit_repo=self._audit_repo,
         )
 

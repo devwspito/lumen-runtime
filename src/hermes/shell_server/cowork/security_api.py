@@ -46,6 +46,7 @@ from pydantic import BaseModel, Field
 from hermes.shell_server.security.mfa import MfaStore
 from hermes.shell_server.security.owner_mfa_gate import issue_reauth_grant, require_owner_mfa
 from hermes.tasks.control_plane.domain.ports import AgentUnavailable
+from hermes.tasks.domain.ports import AgentPauseProvenance
 
 logger = logging.getLogger("hermes.shell_server.cowork.security_api")
 
@@ -327,7 +328,7 @@ def create_security_router() -> APIRouter:
         mfa_store = MfaStore()
         if mfa_store.is_enrolled():
             require_owner_mfa(mfa_store, body.totp or "", action="liberar el freno de emergencia")
-            release_reason = "totp"
+            release_reason = AgentPauseProvenance.TOTP
         else:
             if not await _verify_device_password(body.device_password or ""):
                 raise HTTPException(
@@ -337,7 +338,7 @@ def create_security_router() -> APIRouter:
                         "message": "Libera el freno de emergencia con tu contraseña de dispositivo.",
                     },
                 )
-            release_reason = "device_password"
+            release_reason = AgentPauseProvenance.DEVICE_PASSWORD
 
         try:
             # Audit provenance (security review 2026-09-10, MEDIUM finding):

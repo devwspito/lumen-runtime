@@ -432,16 +432,30 @@ class DbusRuntimeServiceWiring:
         generación del LLM sin tool en curso se detiene en su próximo
         checkpoint (broker Paso 0 / claim del worker), no aquí.
 
+        provenance (025 re-verificación d2eb8c6, "echar el freno no tiene
+        vocabulario de procedencia"): derivado del MISMO sender_uid ya
+        autorizado, no de un campo que el llamante pudiera rellenar —
+        proxy_uid (la REST API vía el shell-server) => API; cualquier uid
+        directo autorizado (host/TUI) => HOST_CLI. Sólo esta función decide;
+        ningún caller necesita cambiar.
+
         Raises:
             DbusAuthorizationError: UID del sender no está autorizado o token inválido.
         """
+        from hermes.tasks.domain.ports import AgentPauseProvenance  # noqa: PLC0415
+
         operator_id = self._authorize_and_resolve(
             sender_uid, operation="request_pause", operator_token=operator_token
         )
-        await self._state.pause(by=operator_id, reason=reason)
+        provenance = (
+            AgentPauseProvenance.API
+            if sender_uid == self._proxy_uid
+            else AgentPauseProvenance.HOST_CLI
+        )
+        await self._state.pause(by=operator_id, reason=reason, provenance=provenance)
         logger.info(
             "hermes.dbus.agent_paused",
-            extra={"by_uid": sender_uid, "reason": reason},
+            extra={"by_uid": sender_uid, "reason": reason, "provenance": provenance},
         )
         self._cancel_live_turns(reason="freno de emergencia activado")
 
