@@ -116,6 +116,56 @@ class TestSpend:
 
 
 # ---------------------------------------------------------------------------
+# SPEND — safent-ads companion (024/T091)
+#
+# Hardcoded, tight unit coverage for the curated set. See
+# test_ads_companion_sensitivity_drift.py for the exhaustive, catalog.py-
+# driven sweep that fails loudly on drift (a new ads write tool landing
+# without a matching classification here).
+# ---------------------------------------------------------------------------
+
+
+class TestAdsCompanionSpend:
+    @pytest.mark.parametrize(
+        "tool_name",
+        [
+            "mcp__safent-ads__propose_budget_change",
+            "mcp__safent-ads__propose_pause",
+            "mcp__safent-ads__propose_targeting_change",
+            "mcp__safent-ads__propose_creative_publication",
+            "mcp__safent-ads__withdraw_proposal",
+            "mcp__safent-ads__apply_defensive_action",
+        ],
+    )
+    def test_every_ads_write_tool_is_spend(self, tool_name: str) -> None:
+        assert SensitivityCategory.SPEND in sensitivity(tool_name, {})
+
+    @pytest.mark.parametrize(
+        "tool_name",
+        [
+            "mcp__safent-ads__list_campaigns",
+            "mcp__safent-ads__get_campaign",
+            "mcp__safent-ads__get_portfolio_overview",
+            "mcp__safent-ads__explain_signal",
+            "mcp__safent-ads__get_kill_switch_status",
+        ],
+    )
+    def test_ads_read_tools_are_never_spend(self, tool_name: str) -> None:
+        assert SensitivityCategory.SPEND not in sensitivity(tool_name, {})
+
+    def test_matching_is_by_full_qualified_name_not_bare_tool_name(self) -> None:
+        """A bundle cannot relabel an unrelated companion's tool into SPEND
+        just by naming it identically — only a call actually resolved
+        against the safent-ads slug (McpCapabilityRegistry's own
+        binding.tool_name, mcp__<slug>__<tool>) qualifies."""
+        assert SensitivityCategory.SPEND not in sensitivity("apply_defensive_action", {})
+        assert (
+            SensitivityCategory.SPEND
+            not in sensitivity("mcp__some-other-companion__apply_defensive_action", {})
+        )
+
+
+# ---------------------------------------------------------------------------
 # Fail-soft
 # ---------------------------------------------------------------------------
 

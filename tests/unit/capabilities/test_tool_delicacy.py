@@ -11,6 +11,8 @@ independently of this classification.
 
 from __future__ import annotations
 
+import pytest
+
 from hermes.capabilities.application.capability_registry import CapabilityRegistry
 from hermes.capabilities.tool_delicacy import (
     Delicacy,
@@ -57,3 +59,56 @@ class TestDelegateToColleagueCapabilityBindingStillForcesHitl:
         assert binding is not None
         assert binding.risk is RiskLevel.HIGH
         assert binding.persistent_forbidden is True
+
+
+# ---------------------------------------------------------------------------
+# safent-ads companion (024/T091/T194) — MFA tier
+#
+# Only apply_defensive_action is MFA-tier: it is the SOLE ads write tool that
+# reaches the real ad platform directly (never a pending row awaiting a
+# SEPARATE human approval, unlike propose_*/withdraw_proposal — see
+# tool_delicacy._MFA_TIER_ADS_COMPANION's docstring for the full rationale
+# and tests/unit/capabilities/test_broker_approval_override.py for the
+# mechanism this feeds (capability_broker._needs_hitl's "auto" override can
+# never re-widen an MFA-tier tool).
+# ---------------------------------------------------------------------------
+
+
+class TestAdsCompanionMfaTier:
+    def test_apply_defensive_action_is_mfa_tier(self) -> None:
+        assert is_mfa_required("mcp__safent-ads__apply_defensive_action") is True
+
+    @pytest.mark.parametrize(
+        "tool_name",
+        [
+            "mcp__safent-ads__propose_budget_change",
+            "mcp__safent-ads__propose_pause",
+            "mcp__safent-ads__propose_targeting_change",
+            "mcp__safent-ads__propose_creative_publication",
+            "mcp__safent-ads__withdraw_proposal",
+        ],
+    )
+    def test_propose_and_withdraw_tools_are_not_mfa_tier(self, tool_name: str) -> None:
+        """These never touch the real platform — the SPEND classification
+        (tool_sensitivity) still applies for audit context, but the
+        override-widening mechanism must stay open for them, exactly like
+        today (test_broker_approval_override.py's existing coverage)."""
+        assert is_mfa_required(tool_name) is False
+
+    @pytest.mark.parametrize(
+        "tool_name",
+        [
+            "mcp__safent-ads__list_campaigns",
+            "mcp__safent-ads__get_campaign",
+            "mcp__safent-ads__get_kill_switch_status",
+        ],
+    )
+    def test_ads_read_tools_are_not_mfa_tier(self, tool_name: str) -> None:
+        assert is_mfa_required(tool_name) is False
+
+    def test_matching_is_by_full_qualified_name_not_bare_tool_name(self) -> None:
+        """Same anti-relabeling contract as tool_sensitivity's SPEND set —
+        the bare tool name, or a different companion's slug, never
+        inherits the MFA tier."""
+        assert is_mfa_required("apply_defensive_action") is False
+        assert is_mfa_required("mcp__some-other-companion__apply_defensive_action") is False

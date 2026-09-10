@@ -166,10 +166,31 @@ def is_destructive(tool: str) -> bool:
 # The cage + broker enforcement still applies; TOTP is not required to approve.
 _MOST_DELICATE_SIMPLE_HITL: frozenset[str] = frozenset({"cronjob"})
 
-# Per-action HITL mfa tier = cage-widening tools (minus scheduling) + destructive.
+# safent-ads companion (024/T091/T194) — of the companion's WRITE tools
+# (tool_sensitivity._SAFENT_ADS_WRITE_TOOLS carries the full SPEND set for
+# audit context), ONLY apply_defensive_action is MFA-tier here.
+# propose_*/withdraw_proposal never touch the real ad platform — they create
+# a pending row in the companion's OWN datastore that a human approves later
+# through a SEPARATE channel (Telegram/REST, contracts/mcp-tools.md), so
+# capability_broker's "auto" override widening staying open for them is
+# correct and intentional (tool-surface.md §5, TestApprovalOverrideWidens
+# AutoExecutable.test_auto_override_makes_low_write_auto_executable).
+# apply_defensive_action is the SOLE write tool that reaches the platform
+# directly, bypassing that second approval — the full qualified name
+# (mcp__safent-ads__apply_defensive_action, never the bare name) so a bundle
+# cannot relabel an unrelated companion's tool into this tier. This is
+# defense in depth: is_mfa_required() only blocks a policy_overlay "auto"
+# override from RE-WIDENING this tool past a False baseline
+# (capability_broker._needs_hitl) — the actual production gate is the ads
+# bundle's policy_overlay.json entry for this tool set to "hitl" (T194,
+# owned by the safent-ads repo, outside this runtime).
+_MFA_TIER_ADS_COMPANION: frozenset[str] = frozenset({"mcp__safent-ads__apply_defensive_action"})
+
+# Per-action HITL mfa tier = cage-widening tools (minus scheduling) +
+# destructive + the ads companion's platform-executing write tool.
 _MFA_TIER_HITL: frozenset[str] = (
     _MOST_DELICATE - _MOST_DELICATE_SIMPLE_HITL
-) | _DESTRUCTIVE
+) | _DESTRUCTIVE | _MFA_TIER_ADS_COMPANION
 
 
 def is_mfa_required(tool: str) -> bool:

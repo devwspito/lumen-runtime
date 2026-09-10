@@ -65,13 +65,35 @@ _EGRESS_CAPABLE_TOOLS: frozenset[str] = frozenset({
 # classification-only (nothing is gated on it yet). Validate the exact
 # Composio action slugs with security-engineer and extend as real payment
 # toolkits are connected, before any later phase gates on this set.
+#
+# safent-ads (024/T091) — the companion's WRITE tools (contracts/mcp-tools.md
+# §Escrituras, safent_ads.mcp.presentation.catalog._WRITE_CATALOG): every one
+# either moves/authorizes ad spend directly (apply_defensive_action) or
+# creates a pending action that WILL move spend once approved (propose_*,
+# withdraw_proposal). Entries are the FULL qualified MCP name
+# (mcp__<slug>__<tool>, McpCapabilityRegistry's own binding.tool_name) —
+# NEVER the bare tool name — so a bundle cannot relabel an unrelated
+# companion's tool into this set just by naming a tool identically; only a
+# call actually resolved against the "safent-ads" slug qualifies. Read tools
+# (list_*/get_*/search_*/explain_*) are deliberately absent — they carry no
+# SPEND signal, see TestAdsReadToolsAreNotSpend.
+_SAFENT_ADS_SLUG = "safent-ads"
+_SAFENT_ADS_WRITE_TOOLS: frozenset[str] = frozenset({
+    "propose_budget_change",
+    "propose_pause",
+    "propose_targeting_change",
+    "propose_creative_publication",
+    "withdraw_proposal",
+    "apply_defensive_action",
+})
+
 _SPEND_TOOLS: frozenset[str] = frozenset({
     "STRIPE_CREATE_PAYMENT_LINK",
     "STRIPE_CREATE_CHECKOUT_SESSION",
     "STRIPE_CREATE_REFUND",
     "PAYPAL_CREATE_ORDER",
     "PAYPAL_CREATE_PAYOUT",
-})
+}) | frozenset(f"mcp__{_SAFENT_ADS_SLUG}__{tool}" for tool in _SAFENT_ADS_WRITE_TOOLS)
 
 
 def sensitivity(
