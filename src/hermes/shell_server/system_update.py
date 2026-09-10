@@ -15,6 +15,8 @@ from __future__ import annotations
 import logging
 import os
 import urllib.request
+from datetime import UTC, datetime
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -33,6 +35,22 @@ _LATEST_URL = os.environ.get(
     "SAFENT_VERSION_URL",
     "https://raw.githubusercontent.com/devwspito/safent-runtime/main/VERSION",
 )
+
+# The running engine's OWN build identity — baked at image build time
+# (ops/container/Containerfile: `echo "${GIT_SHA}" > /usr/share/hermes/build`,
+# the same value as the `org.opencontainers.image.revision` label). This is
+# the closest honest answer to VersionSet.engine obtainable FROM INSIDE the
+# container: a content digest would need host-side `podman inspect`, which
+# this daemon-side route cannot reach — contracts/update.md §3's "dos
+# fuentes, una verdad" names the desktop app (host-side) as the other one.
+_ENGINE_BUILD_FILE = Path("/usr/share/hermes/build")
+
+
+def _current_engine_build() -> str:
+    try:
+        return _ENGINE_BUILD_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
 
 
 def _parse(v: str) -> tuple[int, ...]:
@@ -80,6 +98,21 @@ def create_system_update_router() -> APIRouter:
         if manifest:
             companion_digest = manifest.companion.get("safent-ads", {}).get(arch_key)
         pieces = pieces_for_arch(manifest, arch_key) if manifest else []
+
+        # UPD-N2 (specs/025-safent-repaso matriz-final-39eeb8e): the contract
+        # (update.md §3) says this route "se amplía con los mismos campos"
+        # del objeto `window.__safentUpdate` — available/current (VersionSet)
+        # /to/checked_at — CONSERVING current_version/latest_version/
+        # update_available above. `available` mirrors `update_available`
+        # exactly (both are the same boolean, spelled for either shape's
+        # readers); `to` is only populated when there is something to move
+        # to (an empty plan → null, per §3's own "plan vacío -> null" rule).
+        current_set = {"app": current, "engine": _current_engine_build(), "companion": None}
+        to_set = (
+            {"app": latest, "engine": engine_digest, "companion": companion_digest}
+            if available
+            else None
+        )
         return {
             "current_version": current,
             "latest_version": latest,
@@ -88,6 +121,10 @@ def create_system_update_router() -> APIRouter:
             "engine_digest": engine_digest,
             "companion_digest": companion_digest,
             "pieces": pieces,
+            "available": available,
+            "current": current_set,
+            "to": to_set,
+            "checked_at": datetime.now(tz=UTC).isoformat(),
         }
 
     return router

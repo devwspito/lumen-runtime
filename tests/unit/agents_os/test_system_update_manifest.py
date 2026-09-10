@@ -24,6 +24,7 @@ import base64
 import hashlib
 import shutil
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -456,6 +457,93 @@ class TestGetSystemUpdateShape:
         assert body["engine_digest"] is None
         assert body["companion_digest"] is None
         assert body["pieces"] == []
+
+
+class TestGetSystemUpdateContractV3Fields:
+    """UPD-N2 (specs/025-safent-repaso matriz-final-39eeb8e): contracts/
+    update.md §3 says the route "se amplía con los mismos campos" del objeto
+    `window.__safentUpdate` — `available`, `current` (VersionSet), `to`,
+    `checked_at` — CONSERVING `current_version`/`latest_version`/
+    `update_available`. Before this fix only `pieces`/`engine_digest`/
+    `companion_digest` had been added; these four were missing entirely."""
+
+    def test_available_mirrors_update_available_when_false(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import hermes.shell_server.system_update as su
+
+        monkeypatch.setattr(su, "_fetch_latest", lambda: None)
+        monkeypatch.setattr(rm, "_PUBKEY_TEXT_OVERRIDE", "")
+        monkeypatch.setattr(rm, "_BAKED_PUBKEY_PATH", Path("/does/not/exist"))
+        monkeypatch.setattr(rm, "_REPO_PUBKEY_PATH", Path("/does/not/exist/either"))
+
+        body = _client().get("/api/v1/system/update", headers=_auth_headers()).json()
+        assert body["available"] is False
+        assert body["available"] == body["update_available"]
+        assert body["to"] is None
+
+    def test_current_is_a_version_set_with_the_running_app_version(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import hermes.shell_server.system_update as su
+
+        monkeypatch.setattr(su, "_fetch_latest", lambda: None)
+        monkeypatch.setattr(hermes, "__version__", "0.8.42", raising=False)
+        monkeypatch.setattr(rm, "_PUBKEY_TEXT_OVERRIDE", "")
+        monkeypatch.setattr(rm, "_BAKED_PUBKEY_PATH", Path("/does/not/exist"))
+        monkeypatch.setattr(rm, "_REPO_PUBKEY_PATH", Path("/does/not/exist/either"))
+
+        body = _client().get("/api/v1/system/update", headers=_auth_headers()).json()
+        assert body["current"]["app"] == "0.8.42"
+        assert isinstance(body["current"]["engine"], str)  # never null — VersionSet.engine is non-nullable
+        assert body["current"]["companion"] is None
+
+    def test_checked_at_is_a_fresh_iso_timestamp(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import hermes.shell_server.system_update as su
+
+        monkeypatch.setattr(su, "_fetch_latest", lambda: None)
+        monkeypatch.setattr(rm, "_PUBKEY_TEXT_OVERRIDE", "")
+        monkeypatch.setattr(rm, "_BAKED_PUBKEY_PATH", Path("/does/not/exist"))
+        monkeypatch.setattr(rm, "_REPO_PUBKEY_PATH", Path("/does/not/exist/either"))
+
+        before = datetime.now(tz=UTC)
+        body = _client().get("/api/v1/system/update", headers=_auth_headers()).json()
+        after = datetime.now(tz=UTC)
+
+        checked_at = datetime.fromisoformat(body["checked_at"])
+        assert before <= checked_at <= after
+
+    def test_to_is_populated_with_the_target_version_set_when_available(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Same fixture as the existing "flips the button on" test — pins
+        the NEW `available`/`current`/`to` fields on the identical scenario."""
+        import hermes.shell_server.system_update as su
+
+        private_key, pubkey_text = _generate_keypair()
+        file_bytes = _manifest_bytes(
+            version="999.0.0",
+            engine={"linux/amd64": "sha256:" + "a" * 64},
+            companion={"safent-ads": {"linux/amd64": "sha256:" + "b" * 64}},
+        )
+        minisig_text = _minisign_sign(file_bytes, private_key)
+
+        monkeypatch.setattr(su, "_fetch_latest", lambda: "999.0.0")
+        monkeypatch.setattr(hermes, "__version__", "0.1.0", raising=False)
+        monkeypatch.setattr(rm, "_PUBKEY_TEXT_OVERRIDE", pubkey_text)
+        monkeypatch.setattr(rm, "_fetch_raw_bytes", lambda: file_bytes)
+        monkeypatch.setattr(rm, "_fetch_text", lambda _url: minisig_text)
+        monkeypatch.setattr(rm, "current_arch_key", lambda: "linux/amd64")
+        monkeypatch.setattr(su, "current_arch_key", lambda: "linux/amd64")
+
+        body = _client().get("/api/v1/system/update", headers=_auth_headers()).json()
+        assert body["available"] is True
+        assert body["current"] == {"app": "0.1.0", "engine": body["current"]["engine"], "companion": None}
+        assert body["to"] == {
+            "app": "999.0.0",
+            "engine": "sha256:" + "a" * 64,
+            "companion": "sha256:" + "b" * 64,
+        }
 
 
 class TestUpdateAvailableIsFailClosedOnManifestSignature:

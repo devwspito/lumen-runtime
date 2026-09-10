@@ -1053,6 +1053,7 @@ export interface SystemUpdateStatus {
   latest_version: string | null
   update_available: boolean
   updating: boolean
+  available?: boolean
   current?: VersionSet
   to?: VersionSet
   pieces?: UpdatePiece[]
