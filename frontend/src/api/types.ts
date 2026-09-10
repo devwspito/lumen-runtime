@@ -389,6 +389,17 @@ export interface TailnetStatus {
   peers: TailnetPeer[]
 }
 
+// ── Governed SSH allow-list (spec 022 v2) ───────────────────────────────────
+
+export interface SshHostEntry {
+  host: string
+  approved_at: string | null
+}
+
+export interface SshHostsResponse {
+  hosts: SshHostEntry[]
+}
+
 /** Emergency brake — freno de emergencia. Engaging needs no MFA; releasing does. */
 export interface KillSwitchStatus {
   engaged: boolean

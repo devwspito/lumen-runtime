@@ -13,6 +13,9 @@ Coverage:
   POST /disconnect — rate limited after N failures → 429
   POST /disconnect — response never contains the password
   Staged files are 0600
+  GET /ssh-hosts — lists approved hosts + approved_at (spec 022 v2)
+  DELETE /ssh-hosts/{host} — requires owner TOTP; not-enrolled → 403; wrong
+                             code → 401; correct code → revokes + 200
 """
 
 from __future__ import annotations
@@ -27,7 +30,9 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from hermes.shell_server.remote_access_tunnel.rate_limiter import PasswordRateLimiter
+from hermes.shell_server.security.mfa import MfaStore, totp_now
 from hermes.shell_server.tailnet.api import create_tailnet_router
+from hermes.tailnet_ssh.infrastructure.json_host_allowlist_store import JsonHostAllowlistStore
 
 pytestmark = pytest.mark.unit
 
@@ -341,3 +346,179 @@ class TestDisconnectEndpoint:
         r = c.post("/api/v1/tailnet/disconnect", json={"password": "validpassword2"})
         assert r.status_code == 429
         assert r.json()["detail"]["code"] == "too_many_attempts"
+
+
+# ---------------------------------------------------------------------------
+# GET /ssh-hosts, DELETE /ssh-hosts/{host} (spec 022 v2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def ssh_allowlist_path(tmp_path: Path) -> Path:
+    return tmp_path / "run" / "ssh-allowlist.json"
+
+
+@pytest.fixture
+def mfa_store(tmp_path: Path) -> MfaStore:
+    return MfaStore(store_dir=tmp_path / "mfa")
+
+
+def _ssh_client(
+    *,
+    status_path: Path,
+    control_dir: Path,
+    vault_path: Path,
+    fake_vault: MagicMock,
+    fresh_limiter: PasswordRateLimiter,
+    ssh_allowlist_path: Path,
+    mfa: MfaStore,
+) -> TestClient:
+    app = FastAPI()
+    app.include_router(
+        create_tailnet_router(
+            vault=fake_vault,
+            status_path=status_path,
+            control_dir=control_dir,
+            vault_path=vault_path,
+            rate_limiter=fresh_limiter,
+            ssh_allowlist_path=ssh_allowlist_path,
+            mfa=mfa,
+        )
+    )
+    return TestClient(app)
+
+
+class TestListSshHosts:
+    def test_empty_when_no_hosts_approved(
+        self, status_path, control_dir, vault_path, fake_vault, fresh_limiter,
+        ssh_allowlist_path, mfa_store,
+    ) -> None:
+        client = _ssh_client(
+            status_path=status_path, control_dir=control_dir, vault_path=vault_path,
+            fake_vault=fake_vault, fresh_limiter=fresh_limiter,
+            ssh_allowlist_path=ssh_allowlist_path, mfa=mfa_store,
+        )
+        r = client.get("/api/v1/tailnet/ssh-hosts")
+        assert r.status_code == 200
+        assert r.json() == {"hosts": []}
+
+    def test_lists_approved_hosts_with_approved_at(
+        self, status_path, control_dir, vault_path, fake_vault, fresh_limiter,
+        ssh_allowlist_path, mfa_store,
+    ) -> None:
+        JsonHostAllowlistStore(ssh_allowlist_path).allow("db1.tailxxxx.ts.net")
+        client = _ssh_client(
+            status_path=status_path, control_dir=control_dir, vault_path=vault_path,
+            fake_vault=fake_vault, fresh_limiter=fresh_limiter,
+            ssh_allowlist_path=ssh_allowlist_path, mfa=mfa_store,
+        )
+
+        r = client.get("/api/v1/tailnet/ssh-hosts")
+
+        assert r.status_code == 200
+        hosts = r.json()["hosts"]
+        assert len(hosts) == 1
+        assert hosts[0]["host"] == "db1.tailxxxx.ts.net"
+        assert hosts[0]["approved_at"]  # non-empty ISO-8601 string
+
+    def test_requires_no_auth_header_itself_at_router_level(
+        self, status_path, control_dir, vault_path, fake_vault, fresh_limiter,
+        ssh_allowlist_path, mfa_store,
+    ) -> None:
+        """This router mounted standalone has no bearer dependency — the
+        production app (main.py) applies the global /api/v1/* bearer
+        middleware around EVERY router, this one included; see
+        TestUnauthenticatedRequiresBearerInProductionApp below for the
+        full-app 401 check."""
+        client = _ssh_client(
+            status_path=status_path, control_dir=control_dir, vault_path=vault_path,
+            fake_vault=fake_vault, fresh_limiter=fresh_limiter,
+            ssh_allowlist_path=ssh_allowlist_path, mfa=mfa_store,
+        )
+        assert client.get("/api/v1/tailnet/ssh-hosts").status_code == 200
+
+
+class TestRevokeSshHost:
+    def test_not_enrolled_returns_403(
+        self, status_path, control_dir, vault_path, fake_vault, fresh_limiter,
+        ssh_allowlist_path, mfa_store,
+    ) -> None:
+        JsonHostAllowlistStore(ssh_allowlist_path).allow("db1.tailxxxx.ts.net")
+        client = _ssh_client(
+            status_path=status_path, control_dir=control_dir, vault_path=vault_path,
+            fake_vault=fake_vault, fresh_limiter=fresh_limiter,
+            ssh_allowlist_path=ssh_allowlist_path, mfa=mfa_store,
+        )
+
+        r = client.request(
+            "DELETE", "/api/v1/tailnet/ssh-hosts/db1.tailxxxx.ts.net",
+            json={"totp": "000000"},
+        )
+
+        assert r.status_code == 403
+        assert r.json()["detail"]["code"] == "mfa_not_enrolled"
+        assert JsonHostAllowlistStore(ssh_allowlist_path).is_allowed("db1.tailxxxx.ts.net") is True
+
+    def test_wrong_totp_returns_401_and_does_not_revoke(
+        self, status_path, control_dir, vault_path, fake_vault, fresh_limiter,
+        ssh_allowlist_path, mfa_store,
+    ) -> None:
+        JsonHostAllowlistStore(ssh_allowlist_path).allow("db1.tailxxxx.ts.net")
+        mfa_store.enroll()
+        client = _ssh_client(
+            status_path=status_path, control_dir=control_dir, vault_path=vault_path,
+            fake_vault=fake_vault, fresh_limiter=fresh_limiter,
+            ssh_allowlist_path=ssh_allowlist_path, mfa=mfa_store,
+        )
+
+        r = client.request(
+            "DELETE", "/api/v1/tailnet/ssh-hosts/db1.tailxxxx.ts.net",
+            json={"totp": "000000"},
+        )
+
+        assert r.status_code == 401
+        assert JsonHostAllowlistStore(ssh_allowlist_path).is_allowed("db1.tailxxxx.ts.net") is True
+
+    def test_correct_totp_revokes_and_returns_remaining_hosts(
+        self, status_path, control_dir, vault_path, fake_vault, fresh_limiter,
+        ssh_allowlist_path, mfa_store,
+    ) -> None:
+        store = JsonHostAllowlistStore(ssh_allowlist_path)
+        store.allow("db1.tailxxxx.ts.net")
+        store.allow("build-box.tailxxxx.ts.net")
+        _uri, secret = mfa_store.enroll()
+        client = _ssh_client(
+            status_path=status_path, control_dir=control_dir, vault_path=vault_path,
+            fake_vault=fake_vault, fresh_limiter=fresh_limiter,
+            ssh_allowlist_path=ssh_allowlist_path, mfa=mfa_store,
+        )
+
+        r = client.request(
+            "DELETE", "/api/v1/tailnet/ssh-hosts/db1.tailxxxx.ts.net",
+            json={"totp": totp_now(secret)},
+        )
+
+        assert r.status_code == 200
+        remaining = {h["host"] for h in r.json()["hosts"]}
+        assert remaining == {"build-box.tailxxxx.ts.net"}
+        assert store.is_allowed("db1.tailxxxx.ts.net") is False
+        assert store.is_allowed("build-box.tailxxxx.ts.net") is True
+
+    def test_revoking_an_unknown_host_is_a_no_op_200(
+        self, status_path, control_dir, vault_path, fake_vault, fresh_limiter,
+        ssh_allowlist_path, mfa_store,
+    ) -> None:
+        _uri, secret = mfa_store.enroll()
+        client = _ssh_client(
+            status_path=status_path, control_dir=control_dir, vault_path=vault_path,
+            fake_vault=fake_vault, fresh_limiter=fresh_limiter,
+            ssh_allowlist_path=ssh_allowlist_path, mfa=mfa_store,
+        )
+
+        r = client.request(
+            "DELETE", "/api/v1/tailnet/ssh-hosts/never-approved.tailxxxx.ts.net",
+            json={"totp": totp_now(secret)},
+        )
+
+        assert r.status_code == 200
+        assert r.json() == {"hosts": []}
