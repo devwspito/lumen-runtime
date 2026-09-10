@@ -71,6 +71,8 @@ CACHE_DIR="$RESOURCES_ROOT/.cache"
 
 # shellcheck source=lib/fetch-verified.sh
 source "$SCRIPT_DIR/lib/fetch-verified.sh"
+# shellcheck source=lib/normalize-staged-tree.sh
+source "$SCRIPT_DIR/lib/normalize-staged-tree.sh"
 
 TARGET="${1:-}"
 case "$TARGET" in
@@ -265,6 +267,11 @@ case "$TARGET" in
   x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu) _stage_linux ;;
   aarch64-apple-darwin)                               _stage_macos ;;
 esac
+
+# Permissions + symlinks + (on macOS) xattrs, uniformly, regardless of which
+# staging path ran — see lib/normalize-staged-tree.sh for why this exists.
+echo "    normalizing staged tree (permissions, symlinks$([ "$(uname -s)" = Darwin ] && echo ', xattrs'))..."
+normalize_staged_tree "$DEST" || exit "$EXIT_STAGE"
 
 total_bytes="$(find "$DEST" -type f -exec stat -c '%s' {} \; 2>/dev/null | awk '{s+=$1} END {print s+0}')"
 [ -n "$total_bytes" ] && [ "$total_bytes" -gt 0 ] || \
