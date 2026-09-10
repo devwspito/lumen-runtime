@@ -15,6 +15,11 @@ use std::io::{BufRead, BufReader, Read};
 use std::process::{Command, Stdio};
 use tauri::Manager;
 
+// T014: update orchestrator (contracts/update.md) — plan/orchestrator are pure
+// resp. port-driven and exercised entirely by `cargo test`; wiring the plugin
+// into the running app's Builder is bootstrap work for the T011 lane.
+mod update;
+
 const BOOTSTRAP_URL: &str =
     "https://raw.githubusercontent.com/devwspito/safent-runtime/main/get-safent.sh";
 
@@ -66,7 +71,15 @@ fn augmented_path() -> String {
             parts.push(p);
         }
     }
-    for p in ["/opt/homebrew/bin", "/usr/local/bin", "/opt/podman/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"] {
+    for p in [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/opt/podman/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    ] {
         parts.push(p.to_string());
     }
     if let Some(home) = std::env::var_os("HOME") {
@@ -84,7 +97,11 @@ fn installed_safent() -> Option<String> {
             return Some(b.to_string());
         }
     }
-    for c in ["/opt/homebrew/bin/safent", "/usr/local/bin/safent", "/usr/bin/safent"] {
+    for c in [
+        "/opt/homebrew/bin/safent",
+        "/usr/local/bin/safent",
+        "/usr/bin/safent",
+    ] {
         if std::path::Path::new(c).is_file() {
             return Some(c.to_string());
         }
@@ -178,7 +195,13 @@ fn clipboard_read_cmd() -> (&'static str, &'static [&'static str]) {
     #[cfg(target_os = "macos")]
     return ("pbpaste", &[]);
     #[cfg(not(target_os = "macos"))]
-    return ("sh", &["-c", "wl-paste --no-newline 2>/dev/null || xclip -selection clipboard -o 2>/dev/null"]);
+    return (
+        "sh",
+        &[
+            "-c",
+            "wl-paste --no-newline 2>/dev/null || xclip -selection clipboard -o 2>/dev/null",
+        ],
+    );
 }
 
 /// Return the platform command that sets the clipboard from stdin.
@@ -187,7 +210,13 @@ fn clipboard_write_cmd() -> (&'static str, &'static [&'static str]) {
     #[cfg(target_os = "macos")]
     return ("pbcopy", &[]);
     #[cfg(not(target_os = "macos"))]
-    return ("sh", &["-c", "wl-copy 2>/dev/null || xclip -selection clipboard -i 2>/dev/null"]);
+    return (
+        "sh",
+        &[
+            "-c",
+            "wl-copy 2>/dev/null || xclip -selection clipboard -i 2>/dev/null",
+        ],
+    );
 }
 
 /// Apply the platform env the clipboard tools need: augmented PATH, and on macOS a UTF-8
@@ -213,7 +242,9 @@ async fn read_host_clipboard() -> Result<String, String> {
         let mut cmd = Command::new(prog);
         cmd.args(args);
         clipboard_env(&mut cmd);
-        let out = cmd.output().map_err(|e| format!("clipboard read failed: {e}"))?;
+        let out = cmd
+            .output()
+            .map_err(|e| format!("clipboard read failed: {e}"))?;
         if !out.status.success() {
             return Ok(String::new()); // empty clipboard exits non-zero on some tools — not an error
         }
@@ -228,7 +259,9 @@ async fn write_host_clipboard(text: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         let _ = text;
-        return Err("host clipboard bridge unavailable on Windows — use navigator.clipboard".into());
+        return Err(
+            "host clipboard bridge unavailable on Windows — use navigator.clipboard".into(),
+        );
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -244,19 +277,28 @@ async fn write_host_clipboard(text: String) -> Result<(), String> {
             .spawn()
             .map_err(|e| format!("clipboard write failed: {e}"))?;
         if let Some(mut sin) = child.stdin.take() {
-            sin.write_all(text.as_bytes()).map_err(|e| format!("clipboard write failed: {e}"))?;
+            sin.write_all(text.as_bytes())
+                .map_err(|e| format!("clipboard write failed: {e}"))?;
         }
-        let status = child.wait().map_err(|e| format!("clipboard write failed: {e}"))?;
+        let status = child
+            .wait()
+            .map_err(|e| format!("clipboard write failed: {e}"))?;
         if status.success() {
             Ok(())
         } else {
-            Err(format!("clipboard write exited with {}", status.code().unwrap_or(-1)))
+            Err(format!(
+                "clipboard write exited with {}",
+                status.code().unwrap_or(-1)
+            ))
         }
     }
 }
 
 fn js_escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('`', "\\`").replace('$', "\\$").replace('<', "\\u003c")
+    s.replace('\\', "\\\\")
+        .replace('`', "\\`")
+        .replace('$', "\\$")
+        .replace('<', "\\u003c")
 }
 
 /// Push a live status line to the install animation (window.__safentProgress).
@@ -265,7 +307,7 @@ fn progress(window: &tauri::WebviewWindow, msg: &str) {
     if m.is_empty() {
         return;
     }
-    let _ = window.eval(&format!(
+    let _ = window.eval(format!(
         "window.__safentProgress && window.__safentProgress(`{}`);",
         js_escape(m)
     ));
@@ -274,7 +316,7 @@ fn progress(window: &tauri::WebviewWindow, msg: &str) {
 /// Show a human error inside the (already-visible) loader window instead of a blank page.
 fn show_error(window: &tauri::WebviewWindow, message: &str) {
     eprintln!("safent-desktop: {message}");
-    let _ = window.eval(&format!(
+    let _ = window.eval(format!(
         "window.__safentError && window.__safentError(`{}`);",
         js_escape(message)
     ));
@@ -282,7 +324,11 @@ fn show_error(window: &tauri::WebviewWindow, message: &str) {
 
 /// Spawn a command and stream BOTH stdout+stderr, line by line, to the install animation.
 /// Err(last line) on non-zero exit. Used for the curl bootstrap.
-fn run_and_stream(window: &tauri::WebviewWindow, program: &str, args: &[&str]) -> Result<(), String> {
+fn run_and_stream(
+    window: &tauri::WebviewWindow,
+    program: &str,
+    args: &[&str],
+) -> Result<(), String> {
     let mut child = Command::new(program)
         .args(args)
         .env("PATH", augmented_path())
@@ -294,25 +340,31 @@ fn run_and_stream(window: &tauri::WebviewWindow, program: &str, args: &[&str]) -
 
     let mut handles = Vec::new();
     let pipes: [Option<Box<dyn Read + Send>>; 2] = [
-        child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>),
-        child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>),
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
     ];
-    for pipe in pipes {
-        if let Some(p) = pipe {
-            let w = window.clone();
-            handles.push(std::thread::spawn(move || {
-                let mut last = String::new();
-                for line in BufReader::new(p).lines().map_while(Result::ok) {
-                    if !line.trim().is_empty() {
-                        progress(&w, &line);
-                        last = line;
-                    }
+    for p in pipes.into_iter().flatten() {
+        let w = window.clone();
+        handles.push(std::thread::spawn(move || {
+            let mut last = String::new();
+            for line in BufReader::new(p).lines().map_while(Result::ok) {
+                if !line.trim().is_empty() {
+                    progress(&w, &line);
+                    last = line;
                 }
-                last
-            }));
-        }
+            }
+            last
+        }));
     }
-    let status = child.wait().map_err(|e| format!("error esperando el instalador: {e}"))?;
+    let status = child
+        .wait()
+        .map_err(|e| format!("error esperando el instalador: {e}"))?;
     let mut last = String::new();
     for h in handles {
         if let Ok(l) = h.join() {
@@ -324,7 +376,10 @@ fn run_and_stream(window: &tauri::WebviewWindow, program: &str, args: &[&str]) -
     if status.success() {
         Ok(())
     } else if last.is_empty() {
-        Err(format!("el instalador salió con código {}", status.code().unwrap_or(-1)))
+        Err(format!(
+            "el instalador salió con código {}",
+            status.code().unwrap_or(-1)
+        ))
     } else {
         Err(last)
     }
@@ -362,7 +417,9 @@ fn run_url(window: &tauri::WebviewWindow, bin: &str) -> Result<String, String> {
     if let Some(mut p) = child.stdout.take() {
         let _ = p.read_to_string(&mut out);
     }
-    let status = child.wait().map_err(|e| format!("error esperando 'safent url': {e}"))?;
+    let status = child
+        .wait()
+        .map_err(|e| format!("error esperando 'safent url': {e}"))?;
     let last_err = stderr_handle.join().unwrap_or_default();
 
     if !status.success() {
@@ -406,7 +463,11 @@ fn ensure_and_resolve(window: &tauri::WebviewWindow) -> Result<String, String> {
         None => {
             // First run on a fresh machine: fire the SAME one-liner the user would run.
             progress(window, "Instalando Safent por primera vez…");
-            run_and_stream(window, "/bin/sh", &["-c", &format!("curl -fsSL {BOOTSTRAP_URL} | sh")])?;
+            run_and_stream(
+                window,
+                "/bin/sh",
+                &["-c", &format!("curl -fsSL {BOOTSTRAP_URL} | sh")],
+            )?;
             installed_safent().ok_or_else(|| {
                 "El instalador terminó pero no encuentro el comando 'safent'. Abre una \
                  terminal y prueba: safent url"
@@ -437,9 +498,13 @@ fn push_latest_version(window: &tauri::WebviewWindow) {
             // body can never be injected as a "version".
             let ok = !v.is_empty()
                 && v.len() <= 20
-                && v.split('.').all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+                && v.split('.')
+                    .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
             if ok {
-                let _ = window.eval(&format!("window.__safentLatestVersion = `{}`;", js_escape(&v)));
+                let _ = window.eval(format!(
+                    "window.__safentLatestVersion = `{}`;",
+                    js_escape(&v)
+                ));
             }
         }
     }
@@ -481,7 +546,8 @@ fn main() {
                 // No container engine yet → show the one-click "Instalar Podman" screen and
                 // wait for the button (which invokes install_podman → continues from there).
                 if std::env::var("SAFENT_URL").is_err() && !has_engine() {
-                    let _ = window.eval("window.__safentNeedsPodman && window.__safentNeedsPodman();");
+                    let _ =
+                        window.eval("window.__safentNeedsPodman && window.__safentNeedsPodman();");
                     return;
                 }
                 match ensure_and_resolve(&window) {
