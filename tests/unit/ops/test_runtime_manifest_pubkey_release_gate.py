@@ -36,9 +36,10 @@ def _fake_real_pubkey_text() -> str:
 
 
 class TestTheDetectorItselfIsCorrect:
-    def test_todays_committed_key_is_the_placeholder(self) -> None:
+    def test_todays_committed_key_is_the_real_safent_key(self) -> None:
         text = rm._REPO_PUBKEY_PATH.read_text()
-        assert rm.is_placeholder_pubkey(text) is True
+        assert rm.is_placeholder_pubkey(text) is False, "ops/keys/runtime-manifest.pub is the real Safent key now"
+        assert "242808B9F2E191FD" in text
 
     def test_a_plausible_real_key_is_not_flagged(self) -> None:
         assert rm.is_placeholder_pubkey(_fake_real_pubkey_text()) is False
