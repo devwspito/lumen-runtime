@@ -371,6 +371,8 @@ use tauri::{AppHandle, Emitter, Listener, Manager};
 
 use crate::domain::{Bytes, ImageRef, MachineSpec};
 use crate::engine_adapter::{EmbeddedCliConfig, EmbeddedCliDriver};
+use crate::start_update_checker;
+use crate::window_policy::WindowPolicy;
 
 /// The UI lane already codes against these exact channel names.
 pub const ENGINE_EVENT_CHANNEL: &str = "safent://engine-event";
@@ -627,12 +629,23 @@ fn navigate_to_ticket(app: &AppHandle, ticket: &BootstrapTicket) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
-    if let Ok(url) = ticket.expose().parse::<tauri::Url>() {
-        let _ = window.navigate(url);
+    let Ok(url) = ticket.expose().parse::<tauri::Url>() else {
+        // A malformed ticket URL leaves the loader screen up rather than
+        // navigating anywhere unsafe — reconcile/EngineLifecycle already
+        // treat "ready without a usable ticket" as reconnecting, not as
+        // this path.
+        return;
+    };
+    // window_policy's on_navigation denies any http(s) target that was never
+    // declared authorized (contract app-engine.md §7/§8) — this MUST run
+    // before `navigate`, exactly like the legacy install_podman flow already
+    // did for its own navigation, or the engine's own ticketed URL gets
+    // rejected by the policy that exists to protect it.
+    if let Some(policy) = app.try_state::<WindowPolicy>() {
+        policy.set_authorized_origin(url.clone());
     }
-    // A malformed ticket URL leaves the loader screen up rather than
-    // navigating anywhere unsafe — reconcile/EngineLifecycle already treat
-    // "ready without a usable ticket" as reconnecting, not as this path.
+    let _ = window.navigate(url);
+    start_update_checker(&window);
 }
 
 fn app_version() -> SemVer {
@@ -647,11 +660,22 @@ pub fn desired_state_from_env() -> Result<DesiredState, String> {
     let engine_digest = std::env::var("SAFENT_ENGINE_DIGEST").map_err(|_| {
         "SAFENT_ENGINE_DIGEST no está definido (falta el manifiesto del runtime)".to_string()
     })?;
-    let engine_image = ImageRef::new("ghcr.io/devwspito/safent", engine_digest)
+    // Same seam as the digest itself (doc comment below): the published repo
+    // is the production default, overridable for local dev/testing against
+    // an already-built image (e.g. `localhost/safent-runtime`) without
+    // touching a real registry — `cmd_ensure_images`/`podman pull` always
+    // contact the registry named in the reference, even for content already
+    // present locally under a DIFFERENT repo name, so pointing this at a
+    // `localhost/...` image is what lets reconcile converge without network.
+    let engine_repo = std::env::var("SAFENT_ENGINE_IMAGE_REPO")
+        .unwrap_or_else(|_| "ghcr.io/devwspito/safent".to_string());
+    let engine_image = ImageRef::new(engine_repo, engine_digest)
         .map_err(|_| "SAFENT_ENGINE_DIGEST no tiene forma de digest sha256:...".to_string())?;
+    let companion_repo = std::env::var("SAFENT_COMPANION_IMAGE_REPO")
+        .unwrap_or_else(|_| "ghcr.io/devwspito/safent-ads".to_string());
     let companion_image = std::env::var("SAFENT_COMPANION_DIGEST")
         .ok()
-        .and_then(|digest| ImageRef::new("ghcr.io/devwspito/safent-ads", digest).ok());
+        .and_then(|digest| ImageRef::new(companion_repo, digest).ok());
 
     const GIB: u64 = 1024 * 1024 * 1024;
     Ok(DesiredState {
@@ -681,12 +705,20 @@ fn desired_machine_spec() -> Option<MachineSpec> {
     }
 }
 
-/// Resolves the bundled runtime's paths for a windowed run: `resources/
-/// runtime/<target-triple>/` is the declared bundle layout (T010, `desktop/
-/// RUNTIME-BUNDLE.md` — not yet in this worktree), read off the Tauri
-/// resource dir. Thin wrapper over `resolve_config_with_fallback` (this
-/// module's only Tauri-dependent path-resolution code) — `selftest.rs` calls
-/// that one directly, with no `AppHandle` to ask.
+/// Resolves the bundled runtime's paths for a windowed run, read off the
+/// Tauri resource dir. `desktop/RUNTIME-BUNDLE.md`'s own documented formula
+/// — verified there against the real `glob` crate, not assumed — is
+/// `resource_dir().join("runtime").join("podman")`, NO target-triple
+/// component: `bundle.resources`'s single glob pattern flattens the
+/// per-triple staged tree (`resources/runtime/<triple>/{bin,libexec,etc}/...`,
+/// what `stage-runtime.sh` produces) into `$RESOURCES/runtime/<basename>` —
+/// only one triple's files ever ship in a given build, so there is nothing
+/// left to select between at runtime. `selftest.rs`'s own fallback already
+/// gets this right (`exe.parent().join("runtime")`, no triple either); this
+/// function's extra `.join(target_triple())` was the odd one out and would
+/// have looked for the runtime one directory too deep in a real packaged
+/// app. Thin wrapper over `resolve_config_with_fallback` (this module's only
+/// Tauri-dependent path-resolution code).
 pub fn resolve_config(
     app: &AppHandle,
     engine_image: ImageRef,
@@ -695,8 +727,8 @@ pub fn resolve_config(
     let fallback = app
         .path()
         .resource_dir()
-        .map(|dir| dir.join("runtime").join(target_triple()))
-        .unwrap_or_else(|_| PathBuf::from("runtime").join(target_triple()));
+        .map(|dir| dir.join("runtime"))
+        .unwrap_or_else(|_| PathBuf::from("runtime"));
     resolve_config_with_fallback(fallback, engine_image, companion_image)
 }
 
@@ -735,32 +767,6 @@ pub fn home_dir() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
-}
-
-fn target_triple() -> &'static str {
-    // Rust's own target-triple naming (T010's declared bundle convention),
-    // for the platforms spec 028 serves (research.md "Decisión: Windows" —
-    // not yet; Mac Intel is Out of Scope).
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    {
-        "aarch64-apple-darwin"
-    }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    {
-        "x86_64-unknown-linux-gnu"
-    }
-    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-    {
-        "aarch64-unknown-linux-gnu"
-    }
-    #[cfg(not(any(
-        all(target_os = "macos", target_arch = "aarch64"),
-        all(target_os = "linux", target_arch = "x86_64"),
-        all(target_os = "linux", target_arch = "aarch64"),
-    )))]
-    {
-        "unsupported"
-    }
 }
 
 #[cfg(test)]

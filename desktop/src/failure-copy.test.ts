@@ -24,6 +24,8 @@ const ALL_CODES: readonly FailureCode[] = [
   'backup_failed',
   'restore_failed',
   'clock_skew',
+  'cancelled_by_owner',
+  'cli_porcelain_unsupported',
 ]
 
 const JARGON = /podman|contenedor|container|\bvm\b|máquina virtual|digest|daemon/i

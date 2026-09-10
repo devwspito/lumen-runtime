@@ -72,11 +72,16 @@ fn config(cli_path: PathBuf) -> EmbeddedCliConfig {
 
 #[test]
 fn observe_maps_a_valid_facts_event() {
+    // Field names/casing here are the REAL `cmd_facts` shape (camelCase,
+    // verified against the actual `safent` script — see
+    // tests/engine_adapter_real_cli_contract.rs), not a guess: this test
+    // would have stayed green with the old snake_case assumption while the
+    // real CLI silently failed every `observe()` call.
     let script = fake_cli(
         r#"
-if [ "$1" = "facts" ] && [ "$2" = "--json" ]; then
+if [ "$1" = "facts" ]; then
   cat <<'JSON'
-{"t":"facts","facts":{"os":"linux","arch":"arm64","free_disk_bytes":21474836480,"total_memory_bytes":17179869184,"runtime_staged":true,"runtime_hash_ok":true,"machines":[],"engine_container":null,"local_engine_image_digest":"sha256:engine-good","local_companion_image_digest":null,"published_port":37013,"data_volume":true,"companion_scaffold":false,"companion_containers_running":0,"companion_containers_total":0,"companion_health":"unknown","daemon_health":"healthy","app_version":"0.2.0","user_ns_allowed":true,"helper_installed":true,"another_instance_running":false}}
+{"t":"facts","facts":{"os":"linux","arch":"arm64","freeDiskBytes":21474836480,"totalMemoryBytes":17179869184,"runtimeStaged":true,"runtimeHashOk":true,"machines":[],"engineContainer":{"exists":false,"running":false,"imageDigest":null},"localEngineImageDigest":"sha256:engine-good","localCompanionImageDigest":null,"publishedPort":37013,"dataVolume":true,"companionScaffold":false,"companionContainers":{"running":0,"total":0},"companionHealth":"unknown","daemonHealth":"healthy","appVersion":"0.2.0","userNsAllowed":true,"helperInstalled":true}}
 JSON
   exit 0
 fi

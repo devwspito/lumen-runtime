@@ -61,6 +61,10 @@ case "$1" in
     fi
     [ "$FAKE_CONTAINER_EXISTS" = "true" ] && exit 0 || exit 1
     ;;
+  image)
+    [ "$2" = "exists" ] || exit 0
+    [ "$FAKE_IMAGE_LOCAL" = "true" ] && exit 0 || exit 1
+    ;;
   volume)
     case "$2" in
       exists) [ "$FAKE_VOLUME_EXISTS" = "true" ] && exit 0 || exit 1 ;;
@@ -129,6 +133,7 @@ def _base_env(
     health_active: bool = True,
     port: str = "17517",
     image_digest: str = "deadbeef",
+    image_local: bool = True,
     app_version: str = "0.8.42",
     secret: str = _SECRET_TOKEN,
     pull_fails: bool = False,
@@ -147,6 +152,7 @@ def _base_env(
     env["FAKE_HEALTH_ACTIVE"] = "true" if health_active else "false"
     env["FAKE_PORT"] = port
     env["FAKE_IMAGE_DIGEST"] = image_digest
+    env["FAKE_IMAGE_LOCAL"] = "true" if image_local else "false"
     env["FAKE_APP_VERSION"] = app_version
     env["FAKE_SECRET"] = secret
     env["FAKE_PULL_FAILS"] = "true" if pull_fails else "false"
@@ -269,6 +275,60 @@ class TestFactsIsPureObservation:
         assert facts["engineContainer"]["running"] is False
         assert facts["engineContainer"]["imageDigest"] is None
         assert facts["dataVolume"] is False
+
+    def test_local_engine_image_digest_reflects_podman_image_exists_for_a_digest_pinned_image(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """Regression test (app-desk-integration): without this field,
+        reconcile.rs's images_gap() has no way to tell "already pulled" from
+        "never pulled" independent of whether a container is running it yet
+        — it would ask to pull forever, even against an already-converged
+        engine. `localEngineImageDigest`/`localCompanionImageDigest` close
+        that gap; `podman image exists` decides them."""
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            image_local=True,
+            extra_env={
+                "SAFENT_IMAGE": "ghcr.io/devwspito/safent@sha256:engineexample",
+                "SAFENT_ADS_IMAGE": "ghcr.io/devwspito/safent-ads@sha256:adsexample",
+            },
+        )
+        result = _run_safent("facts", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        facts = json.loads(result.stdout.strip())
+        assert facts["localEngineImageDigest"] == "sha256:engineexample"
+        assert facts["localCompanionImageDigest"] == "sha256:adsexample"
+
+    def test_local_engine_image_digest_is_null_when_not_pulled_or_not_digest_pinned(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        podman_log = tmp_path / "podman.log"
+        # Not pulled yet, even though digest-pinned.
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            image_local=False,
+            extra_env={"SAFENT_IMAGE": "ghcr.io/devwspito/safent@sha256:engineexample"},
+        )
+        result = _run_safent("facts", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        assert json.loads(result.stdout.strip())["localEngineImageDigest"] is None
+
+        # Bare tag, not digest-pinned (plain terminal use) — never claims a match.
+        env2 = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home2",
+            podman_log=podman_log,
+            image_local=True,
+        )
+        result2 = _run_safent("facts", env=env2)
+        assert result2.returncode == 0
+        assert json.loads(result2.stdout.strip())["localEngineImageDigest"] is None
+        assert json.loads(result2.stdout.strip())["localCompanionImageDigest"] is None
 
 
 class TestEnsureMachineOnLinuxIsANoOp:

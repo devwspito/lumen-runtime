@@ -27,13 +27,37 @@ navegue al producto.
 Foco: al ENTRAR en Fallo o Reconectando, el foco salta al título (NFR-005);
 un re-render del mismo estado (p. ej. un `progress`) no lo roba de vuelta.
 
-## Huecos de contrato para la línea del núcleo
+## Huecos de contrato — RESUELTOS en la integración (app-desk-integration)
 
-`app-engine.md` no define: (1) el canal Tauri NDJSON→webview — asumido
-`safent://engine-event`, payload = `EngineEvent` tal cual; (2) la señal de
-reconexión — asumida `safent://reconnecting`, `{reason}`; (3) un
-`FailureCode` para «cancelado por el dueño» (§6 solo dice que SIGINT emite
-un `failed` cualquiera); (4) un flag de punto-de-no-retorno en `stage` (hoy
-asumido en cliente: `container`). `window_policy.rs` emite
-`safent://restart-engine-requested` y `safent://quit-requested` sin
-implementar el apagado real — eso es de `boot.rs`.
+`app-engine.md` no definía el canal Tauri wrapper→webview; ahora lo hace en
+§8, documentando lo que `boot.rs` (`EngineEventPayload`/`ReconnectingPayload`)
+realmente emite, verificado contra el código real de la línea del núcleo:
+
+1. **Canal y forma** — `safent://engine-event`, discriminante `kind` (NO `t`),
+   campo de etapa `stage` (NO `id`); `ready` lleva `{app_version,
+   engine_digest, companion_digest}`, no `{endpoint_ref}` — el vale nunca
+   sale de Rust, así que la ventana no necesita saberlo. `lifecycle.ts`/
+   `ipc.ts` ya consumen esta forma real, no la adivinada.
+2. **Reconexión** — confirmado `safent://reconnecting`, `{reason}`, sin tag.
+3. **`FailureCode` de cancelación** — el núcleo añadió `cancelled_by_owner` Y
+   `cli_porcelain_unsupported` como extensiones propias del envoltorio (no
+   forman parte del vocabulario de 21 códigos del CLI, §3) que SÍ viajan por
+   este canal. Añadidos a `lifecycle.ts`/`failure-copy.ts`.
+4. **Punto de no retorno** — el núcleo SÍ lo manda ahora: `stage` events
+   llevan `point_of_no_return: boolean` (`boot.rs::bootstrap_point_of_no_return`).
+   El cliente ya no lo adivina (se borró el `POINT_OF_NO_RETURN` hardcodeado).
+5. **`Failed` sin etapa** — a diferencia de lo asumido, `EngineDegraded`/
+   `Failed` NO llevan `stage` (una violación de preflight no tiene etapa
+   activa todavía — decisión deliberada del núcleo, ver `ports.rs`). El
+   reductor deriva `stageId` de la última etapa activa vista (`undefined` si
+   ninguna); la pantalla muestra «—» en ese caso.
+
+`window_policy.rs` emite `safent://restart-engine-requested` y
+`safent://quit-requested`; `boot.rs::start` ahora escucha ambos y ejecuta el
+apagado real (`stop_engine_best_effort` + reconectar / salir).
+
+**Sigue sin cablear**: `export_diagnostics` — el botón «Exportar diagnóstico»
+invoca un comando Tauri que todavía no existe en el núcleo (la CLI ya expone
+`diagnostics --out <path>`, contrato §4; falta el comando + la superficie de
+guardado/revelado del fichero — no es wiring mecánico, es una decisión de UX
+pendiente). Ver el informe de integración.

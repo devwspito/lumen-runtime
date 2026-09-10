@@ -633,7 +633,16 @@ enum WireEvent {
     Ready {},
 }
 
+// `facts`'s inner body is a SEPARATE sub-protocol from the `t`-tagged event
+// envelope above: data-model.md's `HostFacts` value object is specified in
+// camelCase (`freeDiskBytes`, `engineContainer`, ...), and `cmd_facts` in the
+// real `safent` script emits exactly that — confirmed against the actual
+// script, not assumed (see tests/engine_adapter_real_cli_contract.rs). Only
+// this struct + its two nested ones need `rename_all`; `WireEvent`'s own
+// fields (`id`, `total_bytes`, `retryable`, ...) are already snake_case on
+// the wire, per contract app-engine.md §3, and must stay that way.
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct WireHostFacts {
     os: String,
     arch: String,
@@ -644,37 +653,67 @@ struct WireHostFacts {
     #[serde(default)]
     machines: Vec<WireMachineFact>,
     engine_container: Option<WireContainerFact>,
+    // NOT in data-model.md's documented HostFacts field list — added to
+    // cmd_facts (the real CLI) alongside this struct's fix, because
+    // `reconcile.rs::images_gap`/`companion_gap` need "is the desired digest
+    // present locally" INDEPENDENT of whether a container already runs it
+    // (distinct from `engine_container.image_digest`), and nothing else on
+    // the wire carries that. Absent/non-digest-pinned image ⇒ null.
+    #[serde(default)]
     local_engine_image_digest: Option<String>,
+    #[serde(default)]
     local_companion_image_digest: Option<String>,
     published_port: Option<u16>,
     data_volume: bool,
     companion_scaffold: bool,
     #[serde(default)]
-    companion_containers_running: u32,
-    #[serde(default)]
-    companion_containers_total: u32,
+    companion_containers: WireCompanionContainers,
     companion_health: String,
     daemon_health: String,
-    app_version: String,
+    // The real CLI reports `null` whenever the engine isn't running yet or
+    // its version couldn't be read (`cmd_facts`: "app_version=null" is the
+    // ordinary fresh-install case) — NOT always present the way every other
+    // required field here is.
+    app_version: Option<String>,
     user_ns_allowed: bool,
     helper_installed: bool,
     #[serde(default)]
     another_instance_running: bool,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireCompanionContainers {
+    #[serde(default)]
+    running: u32,
+    #[serde(default)]
+    total: u32,
+}
+
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct WireMachineFact {
     name: String,
     provider: String,
     rootful: bool,
     running: bool,
     ours: bool,
+    // NOT emitted by the real CLI's `_machines_json` (macOS-only; unverifiable
+    // on this Linux host) — contract data-model.md's `MachineFact` itself only
+    // lists `name, provider, rootful, running, ours`, so these two are this
+    // struct's own extras, same category as the local-image-digest ones
+    // above. Defaulted rather than required so a real, contract-shaped
+    // `machines` entry still deserializes.
+    #[serde(default)]
     cpus: u32,
+    #[serde(default)]
     memory_bytes: u64,
+    #[serde(default)]
     os_version: String,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct WireContainerFact {
     exists: bool,
     running: bool,
@@ -682,8 +721,17 @@ struct WireContainerFact {
 }
 
 fn map_host_facts(wire: WireHostFacts) -> Result<HostFacts, EngineError> {
-    let app_version = SemVer::parse(&wire.app_version)
-        .map_err(|_| EngineError::Protocol(format!("invalid app_version: {}", wire.app_version)))?;
+    // The real CLI reports `null` whenever the engine has never run yet
+    // (the ordinary fresh-install observation) — that must not fail the
+    // WHOLE probe, since `observe()` failing is exactly what would stop
+    // preflight/reconcile from ever running in the first place. "0.0.0" is
+    // this codebase's existing "not yet known" placeholder (see
+    // `boot.rs::app_version`'s own fallback for the same reason).
+    let app_version = match wire.app_version.as_deref() {
+        Some(v) => SemVer::parse(v)
+            .map_err(|_| EngineError::Protocol(format!("invalid app_version: {v}")))?,
+        None => SemVer::parse("0.0.0").expect("\"0.0.0\" is a valid SemVer"),
+    };
     Ok(HostFacts {
         os: map_os(&wire.os),
         arch: map_arch(&wire.arch),
@@ -699,8 +747,8 @@ fn map_host_facts(wire: WireHostFacts) -> Result<HostFacts, EngineError> {
         data_volume: wire.data_volume,
         companion_scaffold: wire.companion_scaffold,
         companion_containers: CompanionContainers {
-            running: wire.companion_containers_running,
-            total: wire.companion_containers_total,
+            running: wire.companion_containers.running,
+            total: wire.companion_containers.total,
         },
         companion_health: map_companion_health(&wire.companion_health),
         daemon_health: map_daemon_health(&wire.daemon_health),
@@ -870,18 +918,51 @@ mod secret_pipe {
         write_fd: RawFd,
     }
 
+    /// A pipe with both ends close-on-exec, portably. `pipe2(2)` (atomic —
+    /// no window between creating the fds and marking them CLOEXEC) exists
+    /// on Linux only; macOS's libc has no `pipe2` at all (confirmed by the
+    /// real cross-compile failure this fixed: `E0425: cannot find function
+    /// 'pipe2' in crate 'libc'` building for aarch64-apple-darwin). Every
+    /// other Unix target this could ever run on (research.md "Decisión:
+    /// Windows" scopes this module to Unix; spec 028 itself scopes the
+    /// product to macOS + Linux) gets the same POSIX-standard fallback:
+    /// `pipe(2)` then `fcntl(F_SETFD, FD_CLOEXEC)` on each fd immediately
+    /// after — the same substitute glibc's own `pipe2` uses internally on
+    /// platforms that lack the real syscall.
+    fn cloexec_pipe() -> Result<[libc::c_int; 2], EngineError> {
+        let mut fds: [libc::c_int; 2] = [0; 2];
+        #[cfg(target_os = "linux")]
+        // SAFETY: `fds` is a valid, correctly-sized out-param for pipe2(2).
+        let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+        #[cfg(not(target_os = "linux"))]
+        // SAFETY: `fds` is a valid, correctly-sized out-param for pipe(2).
+        let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+        if rc != 0 {
+            return Err(EngineError::Io(std::io::Error::last_os_error().to_string()));
+        }
+        #[cfg(not(target_os = "linux"))]
+        for fd in fds {
+            // SAFETY: `fd` is this process's own, just opened by the
+            // successful pipe(2) above — F_SETFD/FD_CLOEXEC never blocks.
+            if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+                let err = std::io::Error::last_os_error();
+                // SAFETY: both fds are this process's own, opened above —
+                // close whichever succeeded before failing closed.
+                unsafe {
+                    libc::close(fds[0]);
+                    libc::close(fds[1]);
+                }
+                return Err(EngineError::Io(err.to_string()));
+            }
+        }
+        Ok(fds)
+    }
+
     impl SecretPipe {
         pub fn new() -> Result<Self, EngineError> {
-            let mut fds: [libc::c_int; 2] = [0; 2];
-            // SAFETY: `fds` is a valid, correctly-sized out-param for pipe2(2).
-            // O_CLOEXEC keeps both ends from leaking into any OTHER child this
-            // process spawns concurrently.
-            let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
-            if rc != 0 {
-                return Err(EngineError::Io(std::io::Error::last_os_error().to_string()));
-            }
-            // SAFETY: `fds[0]` was just returned by a successful pipe2(2) and is
-            // not owned anywhere else yet.
+            let fds = cloexec_pipe()?;
+            // SAFETY: `fds[0]` was just returned by a successful pipe(2)/
+            // pipe2(2) above and is not owned anywhere else yet.
             let read_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
             Ok(Self {
                 read_fd,
@@ -943,6 +1024,55 @@ mod secret_pipe {
             // used anywhere else after this point.
             unsafe { libc::close(self.write_fd) };
             Box::new(std::fs::File::from(self.read_fd))
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn is_cloexec(fd: libc::c_int) -> bool {
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            assert!(
+                flags >= 0,
+                "F_GETFD failed: {}",
+                std::io::Error::last_os_error()
+            );
+            flags & libc::FD_CLOEXEC != 0
+        }
+
+        #[test]
+        fn cloexec_pipe_creates_two_distinct_fds_both_marked_cloexec() {
+            let fds = cloexec_pipe().expect("pipe creation should succeed");
+            assert_ne!(fds[0], fds[1]);
+            assert!(is_cloexec(fds[0]), "read end must be close-on-exec");
+            assert!(is_cloexec(fds[1]), "write end must be close-on-exec");
+            unsafe {
+                libc::close(fds[0]);
+                libc::close(fds[1]);
+            }
+        }
+
+        #[test]
+        fn cloexec_pipe_actually_carries_bytes_from_write_end_to_read_end() {
+            let fds = cloexec_pipe().expect("pipe creation should succeed");
+            let payload = b"http://127.0.0.1:17517/?k=test-ticket";
+            let written = unsafe {
+                libc::write(
+                    fds[1],
+                    payload.as_ptr() as *const libc::c_void,
+                    payload.len(),
+                )
+            };
+            assert_eq!(written, payload.len() as isize);
+            unsafe { libc::close(fds[1]) };
+
+            let mut buf = vec![0u8; payload.len()];
+            let read =
+                unsafe { libc::read(fds[0], buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+            assert_eq!(read, payload.len() as isize);
+            assert_eq!(&buf, payload);
+            unsafe { libc::close(fds[0]) };
         }
     }
 }

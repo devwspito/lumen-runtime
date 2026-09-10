@@ -1,20 +1,15 @@
-// Ubiquitous language and event shapes come from
-// specs/028-safent-app-nativa/contracts/app-engine.md §3. This module owns
-// ZERO knowledge of Tauri, the DOM, or the CLI process — it is a pure state
-// machine so the "una pantalla de fallo" / "cancelar sin dejar el equipo a
-// medias" rules (FR-031..FR-033) are enforceable with plain unit tests.
+// Wire shape for `safent://engine-event` — the WRAPPER's own re-emission to
+// the webview (boot.rs's `EngineEventPayload`/`ReconnectingPayload`), now
+// documented at contracts/app-engine.md §8. This is NOT byte-identical to
+// §3's CLI↔wrapper NDJSON (discriminant `t`+`id` there vs `kind`+`stage`
+// here, a richer `ready` carrying digests instead of `endpoint_ref`, no
+// `facts` kind at all): boot.rs translates the CLI's raw protocol into this
+// shape before forwarding it, and this module owns ZERO knowledge of Tauri,
+// the DOM, or the CLI process beyond consuming exactly what boot.rs emits —
+// it is a pure state machine so the "una pantalla de fallo" / "cancelar sin
+// dejar el equipo a medias" rules (FR-031..FR-033) are enforceable with
+// plain unit tests.
 export const initialState = { kind: 'preparing', stages: [], cancelable: true };
-// Contract gap (see UI-STATES.md / handoff report): app-engine.md's `stage`
-// event carries no "point of no return" flag (§6 only names one example,
-// `applying_engine`, for the UPDATE flow — not bootstrap). Bootstrap itself
-// is documented as always resumable ("ninguna etapa deja el equipo a
-// medias"), so we default every stage to cancelable EXCEPT the ones that are
-// known points of no return today. The core lane should replace this with an
-// explicit signal on the wire.
-const POINT_OF_NO_RETURN = new Set(['container']);
-function isCancelable(activeStageId) {
-    return !POINT_OF_NO_RETURN.has(activeStageId);
-}
 function upsertStage(stages, next) {
     const existing = stages.findIndex((s) => s.id === next.id);
     const entry = { ...next, status: 'active' };
@@ -39,33 +34,37 @@ export function reduceLifecycle(state, action) {
         return state.kind === 'failed' ? { ...state, retrying: true } : state;
     }
     const event = action.event;
-    switch (event.t) {
+    switch (event.kind) {
         case 'stage': {
             const stages = upsertStage(stagesOf(state), {
-                id: event.id,
+                id: event.stage,
                 label: event.label,
-                totalBytes: event.total_bytes,
+                totalBytes: event.total_bytes ?? undefined,
             });
-            return { kind: 'preparing', stages, cancelable: isCancelable(event.id) };
+            return { kind: 'preparing', stages, cancelable: !event.point_of_no_return };
         }
         case 'progress': {
-            const stages = withStageUpdate(stagesOf(state), event.id, {
+            const stages = withStageUpdate(stagesOf(state), event.stage, {
                 done: event.done,
-                total: event.total,
+                total: event.total ?? undefined,
                 unit: event.unit,
             });
-            const cancelable = state.kind === 'preparing' ? state.cancelable : isCancelable(event.id);
+            // `progress` carries no point-of-no-return flag of its own (only
+            // `stage` does) — trust whatever the most recent `stage` event already
+            // established; an out-of-order `progress` before any `stage` is a
+            // contract violation this defaults open (cancelable) rather than wedges on.
+            const cancelable = state.kind === 'preparing' ? state.cancelable : true;
             return { kind: 'preparing', stages, cancelable };
         }
         case 'done': {
-            const stages = withStageUpdate(stagesOf(state), event.id, { status: 'done', ms: event.ms });
+            const stages = withStageUpdate(stagesOf(state), event.stage, { status: 'done', ms: event.ms });
             const cancelable = state.kind === 'preparing' ? state.cancelable : true;
             return { kind: 'preparing', stages, cancelable };
         }
         case 'failed':
             return {
                 kind: 'failed',
-                stageId: event.id,
+                stageId: activeStage(state)?.id,
                 code: event.code,
                 detail: event.detail,
                 retryable: event.retryable,
@@ -73,9 +72,6 @@ export function reduceLifecycle(state, action) {
             };
         case 'ready':
             return { kind: 'ready' };
-        case 'facts':
-            // Diagnostic-only payload today; no screen renders it (see UI-STATES.md).
-            return state;
         default: {
             const exhaustive = event;
             return exhaustive;

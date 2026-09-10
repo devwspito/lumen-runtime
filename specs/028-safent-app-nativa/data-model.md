@@ -124,10 +124,24 @@ aporta hechos observados y consume solicitudes.
 `os` · `arch` · `freeDiskBytes` · `totalMemoryBytes` · `runtimeStaged: bool` ·
 `runtimeHashOk: bool` · `machines: [MachineFact(name, provider, rootful, running, ours)]` ·
 `engineContainer: ContainerFact(exists, running, imageDigest)|None` ·
+`localEngineImageDigest: Digest|None` · `localCompanionImageDigest: Digest|None` ·
 `publishedPort: Port|None` · `dataVolume: bool` · `companionScaffold: bool` ·
 `companionContainers: (running, total)` · `companionHealth: CompanionHealth` ·
-`daemonHealth: DaemonHealth` · `appVersion: SemVer` · `userNsAllowed: bool` ·
+`daemonHealth: DaemonHealth` · `appVersion: SemVer|None` · `userNsAllowed: bool` ·
 `helperInstalled: bool`.
+
+**Ambiguity resolved in the app-desk-integration pass**: this list originally
+omitted `localEngineImageDigest`/`localCompanionImageDigest`, and listed
+`appVersion` as always present. Neither survived contact with the real CLI:
+`reconcile.rs`'s `images_gap`/`companion_gap` need "is the desired digest
+present locally" **independent of** whether a container already runs it
+(`engineContainer.imageDigest` alone conflates the two) — without a separate
+signal, `images_gap` would return `PullEngine` on every single observation,
+forever, even against an already-converged engine. `cmd_facts` (`safent`)
+now reports both via `podman image exists <digest-pinned ref>` — `null` for a
+non-digest-pinned image or one not yet pulled. `appVersion` is genuinely
+`null` on the wire whenever the engine has never run (the ordinary
+fresh-install observation), not only ever a string.
 
 ### RepairAction *(value object, cerrado)*
 

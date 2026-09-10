@@ -86,7 +86,7 @@ function renderFailed(state: Extract<UiState, { kind: 'failed' }>, els: ScreenEl
   els.failedHeading.textContent = copy.headline
   els.failedHint.textContent = copy.hint
   els.failedCode.textContent = state.code
-  els.failedStage.textContent = state.stageId
+  els.failedStage.textContent = state.stageId ?? '—'
   els.failedDetail.textContent = state.detail
 
   setHidden(els.retryButton, !state.retryable)

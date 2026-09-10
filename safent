@@ -157,7 +157,11 @@ _ensure_seccomp() {
   mkdir -p "$SECCOMP_DIR" 2>/dev/null || true
   # 1. Preferred: pull the profile straight out of the image — v0.8.29+ ship it baked
   #    at /usr/share/hermes/seccomp/safent.json, version-matched and with NO network.
-  if "$RTN" run --rm --entrypoint cat "$(_image)" \
+  # $RT (the resolved/pinned binary), never $RTN (its bare basename) — the
+  # latter would execve whatever "podman"/"docker" the PATH resolves to,
+  # exactly the "nunca el del PATH del usuario" rule app-engine.md §1's env
+  # table states for SAFENT_PODMAN.
+  if "$RT" run --rm --entrypoint cat "$(_image)" \
        /usr/share/hermes/seccomp/safent.json > "$SECCOMP.tmp" 2>/dev/null && [ -s "$SECCOMP.tmp" ]; then
     mv "$SECCOMP.tmp" "$SECCOMP"; return 0
   fi
@@ -186,7 +190,12 @@ _ensure_seccomp() {
 _fetch_companion_file() {
   _cf_name="$1"
   _cf_dst="$COMPANION_BIN_DIR/$_cf_name"
-  if "$RTN" run --rm --entrypoint cat "$(_image)" \
+  # $RT, never $RTN — same "pinned, not PATH" rule as _ensure_seccomp above
+  # (this was the one actual bug this fix corrects: a bare-PATH podman here
+  # meant a fresh, unpackaged host's fetch attempt silently reached whatever
+  # podman/docker happened to be on the user's PATH instead of failing
+  # closed or falling through to the curl fallback in a controlled way).
+  if "$RT" run --rm --entrypoint cat "$(_image)" \
        "/usr/share/hermes/companions/ads/$_cf_name" > "$_cf_dst.tmp" 2>/dev/null && [ -s "$_cf_dst.tmp" ]; then
     mv "$_cf_dst.tmp" "$_cf_dst"; chmod 0755 "$_cf_dst"; return 0
   fi
@@ -218,7 +227,14 @@ _provision_companion() {
       return 0
     }
   done
-  if "$COMPANION_BIN_DIR/provision.sh"; then
+  # provision.sh is fetched from OUTSIDE this script (comment above) and
+  # predates --porcelain: it narrates its own progress on stdout the way
+  # every cmd_* here used to before T004. `>&2` keeps that text off the
+  # ONE channel the porcelain contract reserves for NDJSON (app-engine.md
+  # §2) in EITHER mode — non-porcelain `up`/`url` also only ever print the
+  # final URL on stdout, never provisioning chatter. Its exit status (the
+  # only thing this `if` actually needs) is untouched by the redirect.
+  if "$COMPANION_BIN_DIR/provision.sh" >&2; then
     COMPANION_RUN_ARGS="--network safent-companions -v ${COMPANION_STATE}/companions.json:/etc/hermes/companions.json:ro -v ${COMPANION_STATE}/tls/ca.crt:/etc/hermes/companions/ads-ca.crt:ro -v ${COMPANION_STATE}/bearer:/etc/hermes/companions/ads.bearer:ro -v ${COMPANION_STATE}/sso/ads-sso.key:/etc/hermes/companions/ads-sso.key:ro"
   else
     echo "[!] Companion provisioning failed — starting Safent without it (FR-3)." >&2
@@ -1288,6 +1304,32 @@ cmd_facts() {
     d="$("$RT" inspect -f '{{.Image}}' "$NAME" 2>/dev/null || true)"
     [ -n "$d" ] && engine_digest="\"$(_json_str "$d")\""
   fi
+
+  # Whether the DESIRED digest is already present locally, independent of
+  # whether a container is running it yet (data-model.md HostFacts: distinct
+  # from engineContainer.imageDigest, which only reflects the RUNNING
+  # container). Needed so the wrapper's reconciler can tell "not pulled yet"
+  # (pull) apart from "pulled, just needs a container" (create) instead of
+  # re-pulling forever — `podman image exists` is a cheap, read-only check,
+  # the same style as the `_exists`/`volume exists` probes above. Only
+  # meaningful for a digest-pinned reference (contract app-engine.md §1: the
+  # wrapper always sets SAFENT_IMAGE/SAFENT_ADS_IMAGE as repo@sha256:...);
+  # a bare tag (plain terminal use) correctly reports null, same as before.
+  local_engine_digest=null
+  case "$IMAGE" in
+    *@sha256:*)
+      [ -n "$RT" ] && "$RT" image exists "$IMAGE" 2>/dev/null \
+        && local_engine_digest="\"$(_json_str "${IMAGE#*@}")\""
+      ;;
+  esac
+  local_companion_digest=null
+  case "${SAFENT_ADS_IMAGE:-}" in
+    *@sha256:*)
+      [ -n "$RT" ] && "$RT" image exists "$SAFENT_ADS_IMAGE" 2>/dev/null \
+        && local_companion_digest="\"$(_json_str "${SAFENT_ADS_IMAGE#*@}")\""
+      ;;
+  esac
+
   published_port=null
   [ "$engine_running" = true ] && { p="$(_port 2>/dev/null || true)"; [ -n "$p" ] && published_port="$p"; }
   data_volume=false
@@ -1330,7 +1372,7 @@ cmd_facts() {
   helper_installed=false
   [ -f /etc/apparmor.d/safent-userns ] && helper_installed=true
 
-  facts="{\"os\":\"$os_id\",\"arch\":\"$arch\",\"freeDiskBytes\":$(_free_disk_bytes),\"totalMemoryBytes\":$(_total_memory_bytes),\"runtimeStaged\":$runtime_ok,\"runtimeHashOk\":$runtime_ok,\"machines\":$(_machines_json),\"engineContainer\":{\"exists\":$engine_exists,\"running\":$engine_running,\"imageDigest\":$engine_digest},\"publishedPort\":$published_port,\"dataVolume\":$data_volume,\"companionScaffold\":$companion_scaffold,\"companionContainers\":{\"running\":$companion_running,\"total\":$companion_total},\"companionHealth\":\"$companion_health\",\"daemonHealth\":\"$daemon_health\",\"appVersion\":$app_version,\"userNsAllowed\":$userns_allowed,\"helperInstalled\":$helper_installed}"
+  facts="{\"os\":\"$os_id\",\"arch\":\"$arch\",\"freeDiskBytes\":$(_free_disk_bytes),\"totalMemoryBytes\":$(_total_memory_bytes),\"runtimeStaged\":$runtime_ok,\"runtimeHashOk\":$runtime_ok,\"machines\":$(_machines_json),\"engineContainer\":{\"exists\":$engine_exists,\"running\":$engine_running,\"imageDigest\":$engine_digest},\"localEngineImageDigest\":$local_engine_digest,\"localCompanionImageDigest\":$local_companion_digest,\"publishedPort\":$published_port,\"dataVolume\":$data_volume,\"companionScaffold\":$companion_scaffold,\"companionContainers\":{\"running\":$companion_running,\"total\":$companion_total},\"companionHealth\":\"$companion_health\",\"daemonHealth\":\"$daemon_health\",\"appVersion\":$app_version,\"userNsAllowed\":$userns_allowed,\"helperInstalled\":$helper_installed}"
 
   if [ "$PORCELAIN" -eq 1 ]; then
     printf '{"t":"facts","facts":%s}\n' "$facts"
