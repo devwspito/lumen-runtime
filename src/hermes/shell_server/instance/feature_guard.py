@@ -73,6 +73,14 @@ _ALWAYS_ALLOWED_PREFIXES: frozenset[str] = frozenset({
     "/healthz",
     "/metrics",
     "/app/",
+    # 026, FR-001/Assumption 7: Ads is a first-level, always-visible sidebar
+    # entry, not a licensed/toggleable view — the session-bridge mint route
+    # AND the same-origin proxy it gates must stay reachable in every
+    # edition, exactly like chat. Gating either behind a license "view"
+    # would silently brick the iframe for associate editions that don't
+    # carry an "ads" entry in their bundle (a name this spec does not own).
+    "/api/v1/ads",
+    "/ads",
 })
 
 # Exact paths that are always allowed (e.g. the SPA root redirect).

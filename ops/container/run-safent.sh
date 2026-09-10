@@ -51,7 +51,7 @@
 # Safent Ads (MCP campaign tools, Google/Meta) is PREINSTALLED as a companion
 # (024): this script provisions it (network + CA + bearer + compose up, see
 # ops/container/companions/ads/provision.sh) BEFORE starting Safent, then
-# joins Safent to the fixed `safent-companions` network and binds the three
+# joins Safent to the fixed `safent-companions` network and binds the four
 # read-only files under /etc/hermes/companions.json — no URL to paste. If
 # provisioning fails (subnet/port already taken — never re-chosen, see
 # provision.sh), Safent still starts, just without the companion (FR-3); the
@@ -152,6 +152,7 @@ if [ "$NO_COMPANION" -eq 0 ]; then
       -v "${COMPANION_STATE}/companions.json:/etc/hermes/companions.json:ro"
       -v "${COMPANION_STATE}/tls/ca.crt:/etc/hermes/companions/ads-ca.crt:ro"
       -v "${COMPANION_STATE}/bearer:/etc/hermes/companions/ads.bearer:ro"
+      -v "${COMPANION_STATE}/sso/ads-sso.key:/etc/hermes/companions/ads-sso.key:ro"
     )
   else
     echo "run-safent.sh: companion provisioning failed — starting Safent WITHOUT it (FR-3)" >&2

@@ -149,6 +149,18 @@ def get_companion(slug: str, *, path: Path = _COMPANIONS_PATH) -> CompanionEndpo
     return load_companions(path=path).get(slug)
 
 
+def is_companion_secret_file_trustworthy(path: Path) -> bool:
+    """Public wrapper around `_is_trustworthy_file` — the SAME ownership/
+    permission invariant this module enforces on `companions.json` also
+    guards every other secret this build mounts read-only under
+    `/etc/hermes/companions/` (the bearer today, the 026 SSO private key,
+    `/etc/hermes/companions/ads-sso.key`, T004). Exposed so those loaders
+    reuse this ONE check instead of re-implementing it (single source of
+    truth for "no unprivileged/compromised process in this container could
+    have planted or edited this file")."""
+    return _is_trustworthy_file(path)
+
+
 def read_companion_bearer(
     endpoint: CompanionEndpoint, *, prefer_runtime_copy: bool = True
 ) -> str | None:

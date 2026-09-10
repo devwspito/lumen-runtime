@@ -1547,6 +1547,80 @@ class DbusRuntimeServiceWiring:
                 entry["companion_status"] = status
         return out
 
+    # ------------------------------------------------------------------
+    # Companion SSO bridge (026, contracts/sso.md §3) — the daemon is the
+    # ONLY reader of the SSO private key and the ONLY reader of the
+    # companion's bearer for a health probe (T004). The shell-server
+    # (transport, T005) never touches either secret.
+    # ------------------------------------------------------------------
+
+    def _authorize_shell_server_caller(self, sender_uid: int, *, operation: str) -> None:
+        """Gate for verbs ONLY the shell-server transport may call — never
+        the operator's own D-Bus session (hermes-user), unlike every other
+        mutator in this class. The assertion `mint_companion_owner_assertion`
+        signs carries no human identity (its `sub` is a deterministic,
+        install-wide value, contracts/sso.md §3) — there is nothing an
+        operator_token could add, so this is a simpler, stricter check than
+        `_authorize_and_resolve`: exact match against the shell-server's own
+        resolved uid, fail-closed if that uid was never configured."""
+        if self._proxy_uid is None or sender_uid != self._proxy_uid:
+            logger.warning(
+                "hermes.dbus.authz_denied",
+                extra={"operation": operation, "sender_uid": sender_uid},
+            )
+            raise DbusAuthorizationError(
+                f"UID {sender_uid} no autorizado para '{operation}' "
+                "(solo el uid del shell-server, contracts/sso.md §3, CWE-862)"
+            )
+
+    def _require_companion_sso_authority(self):
+        """Lazy singleton — same pattern as `_scan_service_lazy()`: stateless
+        to construct, built once, reused across calls."""
+        if not hasattr(self, "_companion_sso_authority_instance"):
+            from hermes.agents_os.infrastructure.companion_sso_authority import (  # noqa: PLC0415
+                CompanionSsoAuthority,
+            )
+
+            self._companion_sso_authority_instance = CompanionSsoAuthority()
+        return self._companion_sso_authority_instance
+
+    def _require_companion_health_checker(self):
+        if not hasattr(self, "_companion_health_checker_instance"):
+            from hermes.agents_os.infrastructure.companion_health_check import (  # noqa: PLC0415
+                CompanionHealthChecker,
+            )
+
+            self._companion_health_checker_instance = CompanionHealthChecker()
+        return self._companion_health_checker_instance
+
+    def mint_companion_owner_assertion(self, *, slug: str, sender_uid: int) -> dict:
+        """Sign a fresh, single-use owner assertion for *slug* (contracts/
+        sso.md §3). authZ: `_authorize_shell_server_caller` — ONLY the
+        shell-server's own uid, 30/min rate-limited inside the authority.
+        Never returns/logs the private key; `CompanionSsoAuthorityError`
+        subclasses carry only a reason, never key material."""
+        self._authorize_shell_server_caller(
+            sender_uid, operation="mint_companion_owner_assertion"
+        )
+        authority = self._require_companion_sso_authority()
+        assertion = authority.mint_owner_assertion(slug=slug)
+        return {"assertion": assertion.assertion, "expires_at": assertion.expires_at}
+
+    async def get_companion_health(self, *, slug: str) -> dict:
+        """`/mcp/health` read-only probe (sin authZ, igual que
+        `get_kill_switch_status` — metadatos, no acción). Fail-soft: any
+        network/TLS anomaly resolves to `state="unreachable"`, never an
+        exception (FR-3: a companion is optional infrastructure)."""
+        checker = self._require_companion_health_checker()
+        report = await checker.check(slug)
+        return {
+            "state": report.state,
+            "reachable": report.reachable,
+            "http_status": report.http_status,
+            "contract_version": report.contract_version,
+            "accounts_linked": report.accounts_linked,
+        }
+
     async def add_mcp_server(self, *, draft_json: str, sender_uid: int) -> dict:
         """Configura + conecta un servidor MCP stdio. Muta → authZ operador.
 

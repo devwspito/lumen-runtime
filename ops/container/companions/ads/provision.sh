@@ -12,6 +12,13 @@
 # State lives at $SAFENT_COMPANION_STATE (default ~/.safent/companions/ads):
 #   tls/            private CA + leaf for ads.safent.internal
 #   bearer          the /mcp bearer (0400)
+#   sso/ads-sso.key private Ed25519 half of the session-bridge SSO pair (026,
+#                   contracts/sso.md §3) — 0400, generated ONCE alongside the
+#                   bearer. The public half is handed to the companion as
+#                   ADS_SSO_PUBLIC_KEY in secrets/api.env (same channel as
+#                   ADS_MCP_TOKEN — never argv, never a log line). Only
+#                   Safent's daemon reads the private half (read-only bind at
+#                   /etc/hermes/companions/ads-sso.key, T004).
 #   secrets/api.env    ads-api/ads-worker secrets — generated ONCE, edit by
 #                      hand only to uncomment TELEGRAM_BOT_TOKEN/
 #                      TELEGRAM_OWNER_CHAT_IDS once that path is optional
@@ -61,8 +68,8 @@ STATE="${SAFENT_COMPANION_STATE:-$HOME/.safent/companions/ads}"
 RUNTIME="$(command -v podman || command -v docker)"
 [ -n "$RUNTIME" ] || { echo "provision.sh: need podman or docker" >&2; exit 1; }
 
-mkdir -p "$STATE/tls" "$STATE/secrets"
-chmod 0700 "$STATE" "$STATE/secrets"
+mkdir -p "$STATE/tls" "$STATE/secrets" "$STATE/sso"
+chmod 0700 "$STATE" "$STATE/secrets" "$STATE/sso"
 
 log() { echo "[companion:ads] $*"; }
 fail() { echo "[companion:ads] FALLO: $*" >&2; exit 1; }
@@ -249,6 +256,52 @@ merge_vendor_credentials() {
   done < "$vendor"
 }
 
+# ── 7b. SSO Ed25519 keypair (026, contracts/sso.md §3) — generated ONCE,
+# alongside the bearer, with the SAME already-proven pattern as the approval
+# keypair above (`python -m safent_ads.tools.gen_keys` inside the companion
+# image, no host-side crypto dependency). The private half never leaves this
+# host: 0400 at $STATE/sso/ads-sso.key, read only by Safent's daemon via the
+# read-only bind run-safent.sh adds. The public half travels to the companion
+# through secrets/api.env — the exact same channel ADS_MCP_TOKEN already
+# uses — never argv, never a log line.
+#
+# gen_keys prints STANDARD base64 (ADS_APPROVAL_PUBLIC_KEY=<b64>); the
+# companion's Ed25519 verifier (safent_ads.iam.infrastructure.
+# ed25519_assertion_verifier.decode_ed25519_public_key) decodes ADS_SSO_
+# PUBLIC_KEY as URL-SAFE base64 (matching the assertion's own <b64url(payload)>
+# encoding, contracts/sso.md §3). `tr '+/' '-_'` converts alphabets without
+# touching the padding — cheap, host-only, no extra dependency.
+ensure_sso_keypair() {
+  [ -f "$STATE/sso/ads-sso.key" ] && return 0
+  log "generando par Ed25519 de SSO (puente de sesión, 026)…"
+  local keypair seed_std pub_std pub_urlsafe
+  keypair="$("$RUNTIME" run --rm --network none "$SAFENT_ADS_IMAGE" \
+    python -m safent_ads.tools.gen_keys)"
+  seed_std="$(printf '%s\n' "$keypair" | sed -n 's/^ADS_APPROVAL_SIGNING_KEY=//p')"
+  pub_std="$(printf '%s\n' "$keypair" | sed -n 's/^ADS_APPROVAL_PUBLIC_KEY=//p')"
+  [ -n "$seed_std" ] && [ -n "$pub_std" ] || \
+    fail "gen_keys no devolvió el par Ed25519 de SSO esperado"
+
+  umask 077
+  printf '%s\n' "$seed_std" > "$STATE/sso/ads-sso.key.tmp"
+  chmod 0400 "$STATE/sso/ads-sso.key.tmp"
+  mv -f "$STATE/sso/ads-sso.key.tmp" "$STATE/sso/ads-sso.key"
+
+  pub_urlsafe="$(printf '%s' "$pub_std" | tr '+/' '-_')"
+  _write_sso_public_key_to_api_env "$pub_urlsafe"
+  log "par Ed25519 de SSO generado (0400) en $STATE/sso/ads-sso.key"
+}
+
+# Idempotent single-line writer: appends ADS_SSO_PUBLIC_KEY=<value> to
+# secrets/api.env unless a line for that key already exists — mirrors
+# merge_vendor_credentials' own "skip if present" discipline so re-running
+# provisioning never duplicates or overwrites the line.
+_write_sso_public_key_to_api_env() {
+  local pub="$1" api_env="$STATE/secrets/api.env"
+  grep -q '^ADS_SSO_PUBLIC_KEY=' "$api_env" 2>/dev/null && return 0
+  printf 'ADS_SSO_PUBLIC_KEY=%s\n' "$pub" >> "$api_env"
+}
+
 # ── 8. caps.yaml — hard caps template, installed once, owner edits by hand ──
 ensure_caps() {
   [ -f "$STATE/caps.yaml" ] && return 0
@@ -302,6 +355,7 @@ write_companions_json
 ensure_image
 ensure_pg_password
 ensure_secrets
+ensure_sso_keypair
 ensure_caps
 start_companion
 wait_for_health

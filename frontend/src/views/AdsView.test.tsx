@@ -1,0 +1,105 @@
+import { act } from 'react-dom/test-utils'
+import { createRoot, type Root } from 'react-dom/client'
+import { MemoryRouter } from 'react-router-dom'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import React from 'react'
+
+// Same minimal-deps style as the other tests in this project (no
+// @testing-library). useAdsAvailability is mocked per-test so every FR-003
+// state renders deterministically — no timers/network involved here (that
+// is useAdsAvailability's own test file's job).
+
+const { useAdsAvailability } = vi.hoisted(() => ({
+  useAdsAvailability: vi.fn(),
+}))
+
+vi.mock('../hooks/useAdsAvailability', () => ({ useAdsAvailability }))
+
+import AdsView from './AdsView'
+import type { AdsAvailability } from '../hooks/useAdsAvailability'
+
+function noop() { /* refresh stub */ }
+
+function setAvailability(status: AdsAvailability['status'], reason: AdsAvailability['reason'] = null) {
+  useAdsAvailability.mockReturnValue({ status, reason, refresh: noop })
+}
+
+describe('AdsView', () => {
+  let container: HTMLDivElement
+  let root: Root
+
+  beforeEach(() => {
+    useAdsAvailability.mockReset()
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+  })
+
+  afterEach(() => {
+    act(() => { root.unmount() })
+    container.remove()
+  })
+
+  function render() {
+    act(() => {
+      root.render(React.createElement(MemoryRouter, null, React.createElement(AdsView)))
+    })
+  }
+
+  it('shows a loading state before the first availability response — never blank', () => {
+    setAvailability('loading')
+    render()
+
+    expect(container.querySelector('iframe')).toBeNull()
+    expect(container.textContent).toContain('Comprobando el servicio de anuncios')
+  })
+
+  it('renders the same-origin iframe (src="/ads/", no query string / secret) when ready', () => {
+    setAvailability('ready')
+    render()
+
+    const iframe = container.querySelector('iframe')
+    expect(iframe).not.toBeNull()
+    expect(iframe?.getAttribute('src')).toBe('/ads/')
+  })
+
+  it.each([
+    ['not_installed', 'El servicio de anuncios no está instalado', 'Ir a Herramientas'],
+    ['unreachable', 'El servicio de anuncios está arrancando', 'Reintentar'],
+    ['unauthorized', 'El servicio de anuncios necesita configuración', 'Ir a Herramientas'],
+  ] as const)(
+    'shows the honest blocked state (never a generic error) for %s',
+    (reason, expectedTitle, expectedAction) => {
+      setAvailability('unavailable', reason)
+      render()
+
+      expect(container.querySelector('iframe')).toBeNull()
+      expect(container.textContent).toContain(expectedTitle)
+      const button = Array.from(container.querySelectorAll('button'))
+        .find((b) => b.textContent?.includes(expectedAction))
+      expect(button).not.toBeUndefined()
+    },
+  )
+
+  it('renders the iframe (not blocked) when unavailable + no_accounts — Ads stays usable', () => {
+    setAvailability('unavailable', 'no_accounts')
+    render()
+
+    expect(container.querySelector('iframe')).not.toBeNull()
+    expect(container.textContent).toContain('Conecta tus cuentas de Google o Meta')
+  })
+
+  it('the "unreachable" retry button calls availability.refresh(), not a page reload', () => {
+    const refresh = vi.fn()
+    useAdsAvailability.mockReturnValue({ status: 'unavailable', reason: 'unreachable', refresh })
+    render()
+
+    const button = Array.from(container.querySelectorAll('button'))
+      .find((b) => b.textContent?.includes('Reintentar'))!
+    act(() => {
+      button.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+
+    expect(refresh).toHaveBeenCalledTimes(1)
+  })
+})

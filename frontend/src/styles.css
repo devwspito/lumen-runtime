@@ -5924,6 +5924,18 @@ details[open] .cv-teach-chevron {
   flex-shrink: 0;
 }
 
+/* Nav item "not ready" indicator (026) — decorative only (aria-hidden); the
+   actual reason travels as text via aria-describedby, never color alone. */
+.nav-status-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-text-dim);
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
 
 /* ═══════════════════════════════════════════════════════════════════════════
    Safent premium 2026 facelift — glass surfaces + interaction glow
