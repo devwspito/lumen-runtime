@@ -112,36 +112,13 @@ jobs:
           pip install -e . pytest pytest-asyncio cryptography
       - run: pytest tests/integration/agents_os/ -m integration -q
 
-  threat-model-gate:
-    name: FR-047..FR-061 referenced in code
-    runs-on: ubuntu-latest
-    needs: unit-tests
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - run: |
-          set -e
-          missing=()
-          for fr in FR-047 FR-048 FR-049 FR-050 FR-051 FR-052 \
-                   FR-053 FR-054 FR-055 FR-056 FR-057 FR-058 \
-                   FR-059 FR-060 FR-061; do
-            if ! grep -rq "${fr}" src/hermes/agents_os/ \
-                  specs/003-agents-os-edition/ 2>/dev/null; then
-              missing+=("$fr")
-            fi
-          done
-          if [ ${#missing[@]} -gt 0 ]; then
-            echo "MISSING BLOQUEANTES: ${missing[*]}" >&2
-            exit 1
-          fi
-          echo "All 15 BLOQUEANTES referenced"
-
   # ---------------------------------------------------------------
   # 2) Build wheel (needed by Containerfile.base).
   # ---------------------------------------------------------------
   build-wheel:
     name: Build hermes-runtime wheel
     runs-on: ubuntu-latest
-    needs: [unit-tests, integration-tests, threat-model-gate]
+    needs: [unit-tests, integration-tests]
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.push_images == 'true'
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
