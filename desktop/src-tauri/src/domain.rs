@@ -95,6 +95,12 @@ impl ImageRef {
         }
         Ok(Self { repository, digest })
     }
+
+    /// `repository@sha256:...` — the exact form `SAFENT_IMAGE`/`SAFENT_ADS_IMAGE`
+    /// take (contract app-engine.md §1): a digest reference, never a tag.
+    pub fn reference(&self) -> String {
+        format!("{}@{}", self.repository, self.digest)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -625,6 +631,12 @@ mod tests {
         assert!(ImageRef::new("repo", "sha256:abcd").is_ok());
         assert!(ImageRef::new("repo", "latest").is_err());
         assert!(ImageRef::new("", "sha256:abcd").is_err());
+    }
+
+    #[test]
+    fn image_ref_reference_is_repository_at_digest() {
+        let image = ImageRef::new("ghcr.io/devwspito/safent", "sha256:abcd").unwrap();
+        assert_eq!(image.reference(), "ghcr.io/devwspito/safent@sha256:abcd");
     }
 
     // ---- EngineLifecycle: legal transitions ----------------------------

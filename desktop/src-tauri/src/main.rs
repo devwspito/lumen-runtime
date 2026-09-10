@@ -24,6 +24,10 @@ use tauri::Manager;
 #[allow(dead_code)]
 mod domain;
 #[allow(dead_code)]
+mod engine_adapter;
+#[allow(dead_code)]
+mod ports;
+#[allow(dead_code)]
 mod reconcile;
 
 const BOOTSTRAP_URL: &str =

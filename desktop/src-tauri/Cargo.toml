@@ -11,6 +11,17 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+# NDJSON wire contract (contracts/app-engine.md) for engine_adapter.rs — kept out
+# of domain.rs on purpose (the domain stays free of serde; only the infra-layer
+# wire DTOs derive it, with an explicit mapping into domain types).
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.150"
+
+# Unix-only: engine_adapter.rs needs a raw dup2 to hand the bootstrap secret to
+# the CLI on a dedicated fd (contract app-engine.md §5, `--secret-fd`) — std has
+# no safe wrapper for landing a pipe on a SPECIFIC fd number, only libc does.
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.186"
 
 # Smaller, faster release binaries for the shipped desktop shell.
 [profile.release]
