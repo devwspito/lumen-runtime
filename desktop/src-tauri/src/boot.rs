@@ -51,7 +51,7 @@ pub enum LoopOutcome {
 /// is NOT a universal property of `Stage` (the update flow, `src-tauri/src/
 /// update/`, declares `backup` as ITS point of no return instead) — it lives
 /// here because only the bootstrap context's policy is this loop's to define.
-fn bootstrap_point_of_no_return(stage: Stage) -> bool {
+pub(crate) fn bootstrap_point_of_no_return(stage: Stage) -> bool {
     matches!(
         stage,
         Stage::Container
@@ -383,7 +383,7 @@ const QUIT_REQUESTED_EVENT: &str = "safent://quit-requested";
 /// than this module's internal `DomainEvent` names.
 #[derive(Clone, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum EngineEventPayload {
+pub(crate) enum EngineEventPayload {
     Stage {
         stage: &'static str,
         label: String,
@@ -413,7 +413,7 @@ enum EngineEventPayload {
 }
 
 #[derive(Clone, serde::Serialize)]
-struct ReconnectingPayload {
+pub(crate) struct ReconnectingPayload {
     reason: &'static str,
 }
 
@@ -503,7 +503,10 @@ impl Notifier for TauriNotifier {
     }
 }
 
-struct SystemClock;
+/// No `tauri` in this type either — `pub(crate)` so `selftest.rs` (headless,
+/// no window) can build the same real-time `BootService` this module's own
+/// `run_once` uses.
+pub(crate) struct SystemClock;
 
 impl Clock for SystemClock {
     fn now(&self) -> std::time::Instant {
@@ -640,7 +643,7 @@ fn app_version() -> SemVer {
 /// this worktree yet — `SAFENT_ENGINE_DIGEST`/`SAFENT_COMPANION_DIGEST` are
 /// the seam until it lands. Missing/malformed fails closed into `Degraded`
 /// with a message that says exactly what is missing, never a panic.
-fn desired_state_from_env() -> Result<DesiredState, String> {
+pub fn desired_state_from_env() -> Result<DesiredState, String> {
     let engine_digest = std::env::var("SAFENT_ENGINE_DIGEST").map_err(|_| {
         "SAFENT_ENGINE_DIGEST no está definido (falta el manifiesto del runtime)".to_string()
     })?;
@@ -678,25 +681,38 @@ fn desired_machine_spec() -> Option<MachineSpec> {
     }
 }
 
-/// Resolves the bundled runtime's paths. `resources/runtime/<target-triple>/`
-/// is the declared bundle layout (T010, `desktop/RUNTIME-BUNDLE.md` — not yet
-/// in this worktree); `SAFENT_CLI_PATH`/`SAFENT_PODMAN_PATH`/
-/// `SAFENT_STATE_HOME` override it, the same pattern main.rs's legacy flow
-/// already uses for `SAFENT_BIN` — needed for dev and for `--selftest` on a
-/// machine with no installed Tauri resource bundle at all.
+/// Resolves the bundled runtime's paths for a windowed run: `resources/
+/// runtime/<target-triple>/` is the declared bundle layout (T010, `desktop/
+/// RUNTIME-BUNDLE.md` — not yet in this worktree), read off the Tauri
+/// resource dir. Thin wrapper over `resolve_config_with_fallback` (this
+/// module's only Tauri-dependent path-resolution code) — `selftest.rs` calls
+/// that one directly, with no `AppHandle` to ask.
 pub fn resolve_config(
     app: &AppHandle,
     engine_image: ImageRef,
     companion_image: Option<ImageRef>,
 ) -> EmbeddedCliConfig {
+    let fallback = app
+        .path()
+        .resource_dir()
+        .map(|dir| dir.join("runtime").join(target_triple()))
+        .unwrap_or_else(|_| PathBuf::from("runtime").join(target_triple()));
+    resolve_config_with_fallback(fallback, engine_image, companion_image)
+}
+
+/// `SAFENT_RUNTIME_DIR`/`SAFENT_CLI_PATH`/`SAFENT_PODMAN_PATH`/
+/// `SAFENT_STATE_HOME` override `fallback_runtime_dir` — the same pattern
+/// main.rs's legacy flow already uses for `SAFENT_BIN`. No `tauri` import:
+/// `selftest.rs` (headless, no window, no resource bundle to ask Tauri for)
+/// calls this directly with its own fallback.
+pub fn resolve_config_with_fallback(
+    fallback_runtime_dir: PathBuf,
+    engine_image: ImageRef,
+    companion_image: Option<ImageRef>,
+) -> EmbeddedCliConfig {
     let runtime_dir = std::env::var_os("SAFENT_RUNTIME_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            app.path()
-                .resource_dir()
-                .map(|dir| dir.join("runtime").join(target_triple()))
-                .unwrap_or_else(|_| PathBuf::from("runtime").join(target_triple()))
-        });
+        .unwrap_or(fallback_runtime_dir);
     let cli_path = std::env::var_os("SAFENT_CLI_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|| runtime_dir.join("safent"));
@@ -715,7 +731,7 @@ pub fn resolve_config(
     )
 }
 
-fn home_dir() -> PathBuf {
+pub fn home_dir() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
