@@ -648,6 +648,46 @@ mod tests {
         );
     }
 
+    /// The helper is NEVER planned unconditionally: on the pinned podman
+    /// 6.1.1, the whole cage runs rootless (systemd PID1, Landlock,
+    /// netns/nftables) and the helper exists ONLY for hosts where the kernel
+    /// itself blocks unprivileged user namespaces
+    /// (`kernel.unprivileged_userns_clone=0` — Ubuntu's AppArmor userns
+    /// restriction). `user_ns_allowed: true` must mean "never install it",
+    /// regardless of `helper_installed`.
+    #[test]
+    fn userns_allowed_never_installs_the_helper_even_if_not_marked_installed() {
+        let facts = HostFacts {
+            user_ns_allowed: true,
+            helper_installed: false,
+            ..converged_linux_facts()
+        };
+        assert_eq!(
+            reconcile(&facts, &desired_linux()),
+            Vec::<RepairAction>::new()
+        );
+    }
+
+    // ---- runtime hash mismatch (re-stage, never a crash) ----------------------
+
+    #[test]
+    fn runtime_hash_mismatch_after_staging_re_stages_instead_of_crashing() {
+        // Staged once (runtime_staged: true) but the verifier now disagrees —
+        // corrupted on disk, tampered, or a manifest that moved under it.
+        // `stage-runtime` re-verifies by sha256 and re-deploys; there is no
+        // separate "recreate" action for this in the closed RepairAction
+        // vocabulary because staging is already idempotent and self-verifying.
+        let facts = HostFacts {
+            runtime_staged: true,
+            runtime_hash_ok: false,
+            ..converged_macos_facts()
+        };
+        assert_eq!(
+            reconcile(&facts, &desired_macos()),
+            vec![RepairAction::StageRuntime]
+        );
+    }
+
     // ---- preflight ------------------------------------------------------------
 
     #[test]

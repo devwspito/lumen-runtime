@@ -445,24 +445,35 @@ pub enum EnginePhase {
 }
 
 fn is_stage_phase(phase: EnginePhase) -> bool {
-    matches!(
-        phase,
-        EnginePhase::Preflight
-            | EnginePhase::RuntimeStaging
-            | EnginePhase::EngineProvisioning
-            | EnginePhase::EnginePulling
-            | EnginePhase::EngineStarting
-    )
+    stage_rank(phase).is_some()
+}
+
+/// Where a phase sits in the fixed bootstrap chain (Preflight through
+/// EngineStarting), or `None` outside it. Used to allow jumping past
+/// already-satisfied intermediate stages — e.g. reconcile's first unmet gap
+/// on a resumed boot can be `EngineStarting` directly while the lifecycle is
+/// still sitting at `Preflight`, because runtime/machine/images were already
+/// fine and never produced their own transition. What `allowed()` must still
+/// refuse is going BACKWARD or sideways to an unrelated phase.
+fn stage_rank(phase: EnginePhase) -> Option<u8> {
+    use EnginePhase::*;
+    match phase {
+        Preflight => Some(0),
+        RuntimeStaging => Some(1),
+        EngineProvisioning => Some(2),
+        EnginePulling => Some(3),
+        EngineStarting => Some(4),
+        _ => None,
+    }
 }
 
 fn allowed(from: EnginePhase, to: EnginePhase) -> bool {
     use EnginePhase::*;
+    if let (Some(f), Some(t)) = (stage_rank(from), stage_rank(to)) {
+        return t > f;
+    }
     match (from, to) {
         (Fresh, Preflight) => true,
-        (Preflight, RuntimeStaging) => true,
-        (RuntimeStaging, EngineProvisioning) => true,
-        (EngineProvisioning, EnginePulling) => true,
-        (EnginePulling, EngineStarting) => true,
         (EngineStarting, EngineReady) => true,
         // `up` completed (contract app-engine.md §5) but the secret-fd
         // closed without a line — FR-012's safety net, reachable on the
@@ -763,6 +774,28 @@ mod tests {
             lc.enter(to).unwrap();
             assert_eq!(lc.phase(), to);
         }
+    }
+
+    #[test]
+    fn a_resumed_boot_can_skip_straight_to_a_later_stage_already_satisfied() {
+        // Runtime/machine/images were already fine on a resumed boot — the
+        // FIRST unmet gap reconcile finds is EngineStarting directly, with
+        // no intermediate transition ever entered for the stages that
+        // needed no repair action at all.
+        let mut lc = EngineLifecycle::fresh();
+        lc.enter(EnginePhase::Preflight).unwrap();
+        lc.enter(EnginePhase::EngineStarting).unwrap();
+        assert_eq!(lc.phase(), EnginePhase::EngineStarting);
+    }
+
+    #[test]
+    fn stage_phases_can_never_go_backward() {
+        let mut lc = EngineLifecycle::fresh();
+        lc.enter(EnginePhase::Preflight).unwrap();
+        lc.enter(EnginePhase::RuntimeStaging).unwrap();
+        lc.enter(EnginePhase::EngineProvisioning).unwrap();
+        assert!(lc.enter(EnginePhase::RuntimeStaging).is_err());
+        assert!(lc.enter(EnginePhase::Preflight).is_err());
     }
 
     #[test]
