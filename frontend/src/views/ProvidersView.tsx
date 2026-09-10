@@ -464,12 +464,17 @@ interface ProviderRowProps {
   onConfirm: ConfirmFn
 }
 
-function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: ProviderRowProps) {
+export function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: ProviderRowProps) {
   const t = useT()
   const reduced = useReducedMotion()
   const [testing, setTesting] = useState(false)
   const [showKeyForm, setShowKeyForm] = useState(false)
   const [apiKeyInput, setApiKeyInput] = useState('')
+  // Pre-filled from the native catalogue's suggested default_model (server-side
+  // curated table) when known; always editable — the owner can type any model
+  // the provider serves. PROV-02: without a model, configureNativeProvider()
+  // saved config.yaml with no model.default and the first chat crashed.
+  const [modelInput, setModelInput] = useState(provider.default_model ?? '')
   const [addingKey, setAddingKey] = useState(false)
   const [addConnFailed, setAddConnFailed] = useState(false)
   const { connectingId, startOAuthConnect } = useProviderOAuthConnect(onRefresh)
@@ -528,6 +533,10 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
 
   async function handleAddConfirm() {
     if (!apiKeyInput.trim()) { onToast(t('providers.err.enter_key'), 'warn'); return }
+    // PROV-02: a provider saved with no model leaves config.yaml with
+    // model.provider set and no model.default — the first chat then dies
+    // with HermesModelNotConfiguredError instead of failing here, clearly.
+    if (!modelInput.trim()) { onToast(t('providers.err.enter_model'), 'warn'); return }
     setAddingKey(true)
     try {
       // Native catalogue providers go through /providers/native by their registry
@@ -536,6 +545,7 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
       const created = await configureNativeProvider({
         provider_id: provider.provider_id ?? id,
         api_key: apiKeyInput.trim(),
+        model: modelInput.trim(),
       })
       const realId = created?.provider_id || id
       setShowKeyForm(false)
@@ -686,6 +696,18 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
             placeholder={t('providers.key.label').replace('{name}', name)}
             value={apiKeyInput}
             onChange={e => setApiKeyInput(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') void handleAddConfirm() }}
+          />
+          <label className="sr-only" htmlFor={`pv-model-${id}`}>
+            {t('providers.model.label').replace('{name}', name)}
+          </label>
+          <input
+            id={`pv-model-${id}`}
+            className={css.keyInput}
+            type="text"
+            placeholder={t('providers.model.label').replace('{name}', name)}
+            value={modelInput}
+            onChange={e => setModelInput(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') void handleAddConfirm() }}
           />
           <motion.div

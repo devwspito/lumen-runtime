@@ -73,6 +73,28 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("hermes.agents_os.dbus_runtime_service")
 
+# Suggested default model per NATIVE catalogue provider_id (hermes_cli.auth.
+# PROVIDER_REGISTRY key) — surfaced by list_native_providers() so the UI's
+# "Add/Connect" card can pre-fill (and let the owner edit) a model instead of
+# configuring a provider with none at all (specs/025-safent-repaso PROV-02:
+# configureNativeProvider({provider_id, api_key}) never sent `model`, so
+# config.yaml ended up with model.provider set and NO model.default, and the
+# first chat died with HermesModelNotConfiguredError). Mirrors the same
+# per-id table the Lumen desktop compositor already uses for this exact
+# purpose (lumen/compositor/qml/desktop/ProviderGate.qml `defaultModels`).
+# Deliberately NOT exhaustive over the 37+ registry entries: an id missing
+# here just means the UI field starts empty and the owner types one — never
+# a hard requirement to keep this table in lockstep with the registry.
+_NATIVE_DEFAULT_MODEL: dict[str, str] = {
+    "anthropic": "claude-sonnet-4-6",
+    "openai-api": "gpt-5.4-nano",
+    "gemini": "gemini-2.5-flash",
+    "deepseek": "deepseek-chat",
+    "kimi-coding": "kimi-k2",
+    "xai": "grok-4",
+    "ollama-cloud": "llama3.1",
+}
+
 
 def _parse_redacted_params(raw: object) -> dict:
     """Parse the JSON-text parameters_redacted column back to a dict.
@@ -1028,6 +1050,14 @@ class DbusRuntimeServiceWiring:
         (configure_native_provider guardó su clave en .env y su último
         modelo en native_providers.json) — sin pedir de nuevo la api key.
         {ok:false, error} si el provider no existe o no tiene clave guardada.
+
+        Levanta ValueError (→ 422 en REST, ver SetActiveProvider en el
+        adapter) si nunca se recordó un modelo para este provider — activar
+        sin uno dejaría config.yaml con `model.provider` pero SIN
+        `model.default`, y el primer chat moriría con
+        HermesModelNotConfiguredError en vez de fallar aquí, claro (PROV-02:
+        la UI llamaba a configureNativeProvider({provider_id, api_key}), sin
+        `model`, y esta función lo activaba igual).
         """
         try:
             from hermes_cli.auth import PROVIDER_REGISTRY  # noqa: PLC0415
@@ -1045,6 +1075,11 @@ class DbusRuntimeServiceWiring:
                 "error": f"{provider_id} no está configurado todavía (sin api key guardada)",
             }
         model, base_url = _recall_native_provider_model(provider_id)
+        if not model:
+            raise ValueError(
+                f"{provider_id} no tiene un modelo configurado — indica uno "
+                "(configureNativeProvider con `model`) antes de activarlo"
+            )
         try:
             _write_hermes_model_config(provider_id, model, base_url)
         except Exception as exc:  # noqa: BLE001
@@ -2755,6 +2790,10 @@ class DbusRuntimeServiceWiring:
                 "auth_type": getattr(cfg, "auth_type", "api_key"),
                 "base_url": getattr(cfg, "inference_base_url", "") or "",
                 "env_vars": list(getattr(cfg, "api_key_env_vars", ()) or ()),
+                # Suggested model to pre-fill the "Add/Connect" form with — the
+                # owner can still overwrite it. "" when this id has no curated
+                # suggestion (_NATIVE_DEFAULT_MODEL is not exhaustive).
+                "default_model": _NATIVE_DEFAULT_MODEL.get(pid, ""),
             })
         return out
 

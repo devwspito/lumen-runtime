@@ -184,6 +184,33 @@ class TestConfigureNativeProviderSetActiveGating:
 
 
 # ---------------------------------------------------------------------------
+# A2. list_native_providers — curated default_model suggestion (PROV-02)
+# ---------------------------------------------------------------------------
+
+
+class TestListNativeProvidersDefaultModel:
+    def test_curated_ids_carry_a_default_model(self, tmp_path: Path, _hermes_home: Path) -> None:
+        wiring = _make_wiring(tmp_path)
+        # NOTE: MagicMock(name=...) reserves `name` for the mock's own repr —
+        # it does NOT set a `.name` attribute. Assign it after construction so
+        # list_native_providers' `getattr(cfg, "name", pid)` sees a real string.
+        anthropic_cfg = MagicMock()
+        anthropic_cfg.name = "Anthropic"
+        made_up_cfg = MagicMock()
+        made_up_cfg.name = "Made Up"
+        registry = {"anthropic": anthropic_cfg, "made-up-id": made_up_cfg}
+        with patch.dict("sys.modules", {"hermes_cli.auth": MagicMock(PROVIDER_REGISTRY=registry)}):
+            out = wiring.list_native_providers()
+
+        by_id = {row["provider_id"]: row for row in out}
+        # Curated id: the UI's "Add/Connect" form can pre-fill this.
+        assert by_id["anthropic"]["default_model"] == "claude-sonnet-4-6"
+        # Non-curated id: "" (not missing) — the field still starts empty and
+        # editable rather than absent, so the frontend never has to special-case it.
+        assert by_id["made-up-id"]["default_model"] == ""
+
+
+# ---------------------------------------------------------------------------
 # B. set_active_provider — native (non-UUID) ids
 # ---------------------------------------------------------------------------
 
@@ -245,6 +272,33 @@ class TestSetActiveProviderNativeIds:
             result = wiring.set_active_provider(provider_id="anthropic", sender_uid=1000)
         assert result["ok"] is False
         assert "anthropic" in result["error"]
+
+    def test_native_id_with_key_but_no_model_refuses_to_activate(
+        self, tmp_path: Path, _hermes_home: Path
+    ) -> None:
+        """specs/025-safent-repaso PROV-02 — the UI's Add/Connect body is
+        configureNativeProvider({provider_id, api_key}), with NO `model`.
+        Activating that provider must raise loudly (-> 422 in REST, see
+        SetActiveProvider in the adapter) instead of writing config.yaml
+        with model.provider set and no model.default, which used to crash
+        the FIRST chat turn with HermesModelNotConfiguredError instead of
+        failing here, clearly."""
+        wiring = _make_wiring(tmp_path)
+        with (
+            patch(f"{_DBUS_MODULE}._write_hermes_model_config") as mock_write_model,
+            patch.dict("sys.modules", {"hermes_cli.auth": MagicMock(PROVIDER_REGISTRY=_FAKE_REGISTRY)}),
+        ):
+            # Exactly the UI's current body: no `model` at all.
+            wiring.configure_native_provider(
+                provider_id="anthropic", api_key="sk-ant", model="",
+                base_url="", sender_uid=1000, set_active=False,
+            )
+
+            with pytest.raises(ValueError, match="anthropic.*modelo"):
+                wiring.set_active_provider(provider_id="anthropic", sender_uid=1000)
+
+        # The broken config (provider set, no default) must NEVER be written.
+        mock_write_model.assert_not_called()
 
     def test_sql_uuid_path_is_unaffected(self, tmp_path: Path, _hermes_home: Path) -> None:
         """Regression guard: the pre-existing SQL-repo UUID path (custom

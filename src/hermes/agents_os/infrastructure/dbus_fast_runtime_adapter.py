@@ -749,9 +749,16 @@ class Runtime1ServiceInterface(ServiceInterface):
     @method()
     async def SetActiveProvider(self, provider_id: "s") -> "s":  # noqa: N802,F821,UP037
         sender_uid = await self._resolve_current_sender_uid()
-        result = self._wiring.set_active_provider(
-            provider_id=provider_id, sender_uid=sender_uid
-        )
+        try:
+            result = self._wiring.set_active_provider(
+                provider_id=provider_id, sender_uid=sender_uid
+            )
+        except ValueError as exc:
+            # specs/025-safent-repaso PROV-02: activating a native provider
+            # with no model recorded (e.g. never configured with one) must
+            # reach the caller as a clear 422, not silently write a
+            # model.provider-without-model.default config.yaml.
+            raise DBusError("org.hermes.Error.InvalidInput", str(exc)) from exc
         self._schedule_byok_mcp_rewire()
         return json.dumps(result)
 
