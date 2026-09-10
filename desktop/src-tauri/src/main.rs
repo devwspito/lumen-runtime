@@ -23,6 +23,8 @@ use tauri::Manager;
 // once boot.rs (T011) calls into the full API surface.
 #[allow(dead_code)]
 mod domain;
+#[allow(dead_code)]
+mod reconcile;
 
 const BOOTSTRAP_URL: &str =
     "https://raw.githubusercontent.com/devwspito/safent-runtime/main/get-safent.sh";
