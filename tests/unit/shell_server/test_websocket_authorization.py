@@ -14,8 +14,7 @@ routes call, reusing `_bearer_is_valid` — the exact same check
   - a token via the wrong route does not bypass anything (still 1008),
   - authenticated connect (either credential) is accepted,
   - EVERY WebSocket route under /api/v1/* uses the shared authenticator
-    (structural sweep), except the one documented, untouched exception:
-    /api/v1/training/{session_id}/live (being retired by another lane).
+    (structural sweep).
 """
 
 from __future__ import annotations
@@ -31,11 +30,6 @@ import pytest
 from fastapi.routing import APIWebSocketRoute
 
 pytestmark = pytest.mark.unit
-
-# The ONE websocket route intentionally left out of this sweep — retired by
-# another lane, not part of this fix (see module docstring / task scope).
-_UNTOUCHED_TRAINING_LIVE_PATH = "/api/v1/training/{session_id}/live"
-
 
 async def _first_ws_message(
     app: Any, path: str, *, timeout_s: float = 3.0
@@ -127,7 +121,7 @@ def _stub_out_browser_bring_up(monkeypatch: pytest.MonkeyPatch) -> None:
     a REAL Playwright driver (`async_playwright().start()`), which hangs
     indefinitely in this sandbox (no browser/driver available) — that is a
     behavior this test suite has no interest in exercising; only the auth
-    gate does. `_try_ensure_browser_running` is looked up on the module at
+    gate does. `try_ensure_browser_running` is looked up on the module at
     CALL time (not closed over), so patching it here — after the `app`
     fixture already built the app — still takes effect; raising makes the
     handler's own `except Exception` short-circuit before it ever reaches
@@ -138,7 +132,7 @@ def _stub_out_browser_bring_up(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _raise(*_args: Any, **_kwargs: Any) -> None:
         raise RuntimeError("no jailed browser in this test process")
 
-    monkeypatch.setattr(watch_live_module, "_try_ensure_browser_running", _raise)
+    monkeypatch.setattr(watch_live_module, "try_ensure_browser_running", _raise)
 
 
 class TestWatchAgentLiveRequiresAuth:
@@ -222,8 +216,6 @@ class TestEveryApiV1WebsocketRouteUsesTheSharedAuthenticator:
     hand-written list) so a new WS route that forgets to call
     `authenticate_websocket()` fails this test instead of shipping unauth'd.
 
-    The ONE documented exception: /api/v1/training/{session_id}/live — being
-    retired by another lane, explicitly out of scope for this fix.
     """
 
     def test_known_websocket_routes_are_exactly_the_expected_set(
@@ -231,7 +223,6 @@ class TestEveryApiV1WebsocketRouteUsesTheSharedAuthenticator:
     ) -> None:
         routes = set(_api_v1_websocket_routes(app))
         assert routes == {
-            _UNTOUCHED_TRAINING_LIVE_PATH,
             "/api/v1/watch/agent/live",
             "/api/v1/vnc",
         }, (
@@ -239,13 +230,11 @@ class TestEveryApiV1WebsocketRouteUsesTheSharedAuthenticator:
             "this sweep (and, if added, make sure it calls authenticate_websocket())."
         )
 
-    async def test_every_route_except_the_documented_exception_rejects_unauthenticated(
+    async def test_every_route_rejects_unauthenticated(
         self, app: Any
     ) -> None:
         failures: list[str] = []
         for path in _api_v1_websocket_routes(app):
-            if path == _UNTOUCHED_TRAINING_LIVE_PATH:
-                continue
             concrete = path.replace("{session_id}", "x")
             msg = await _first_ws_message(app, concrete)
             if not (msg.get("type") == "websocket.close" and msg.get("code") == 1008):

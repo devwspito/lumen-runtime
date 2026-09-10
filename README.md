@@ -151,7 +151,7 @@ Policy travels only inside Ed25519-signed bundles, verified **before** any field
 
 ## 🧠 A note on honesty
 
-Autonomous browser control on a *novel* portal is genuinely hard — for every model, not just ours. Safent does the **human-in-the-loop** browser path (live-view, teach-a-flow-once, approve sensitive steps) really well; fully-autonomous, unattended operation of an unseen UI is where you should measure before you trust. We'd rather tell you that than sell you a demo that breaks on the first real form. Do it *really well* on the handful of systems you actually use, or don't promise it.
+Autonomous browser control on a *novel* portal is genuinely hard — for every model, not just ours. Safent does the **human-in-the-loop** browser path (live-view, approve sensitive steps) really well; fully-autonomous, unattended operation of an unseen UI is where you should measure before you trust. We'd rather tell you that than sell you a demo that breaks on the first real form. Do it *really well* on the handful of systems you actually use, or don't promise it.
 
 ---
 

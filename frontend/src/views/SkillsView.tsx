@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
 import { sileo } from 'sileo'
-import { X, Zap, Search as SearchIcon, Plus, Play, Package, AlertTriangle } from 'lucide-react'
+import { X, Zap, Search as SearchIcon, Play, Package, AlertTriangle } from 'lucide-react'
 import { useT } from '../lib/i18n'
 import { isLiveSkill } from '../lib/skills'
 import type { ChatOutletContext } from '../components/Layout'
@@ -17,7 +17,6 @@ import InstallScanModal from '../components/InstallScanModal'
 import SkillDetailsModal from '../components/SkillDetailsModal'
 import type { MfaFactors } from '../components/MfaModal'
 import { PageHeader } from '../components/ui/PageHeader'
-import { TeachModal } from '../components/TeachModal'
 import { EmptyState } from '../components/ui/EmptyState'
 import { Button } from '../components/ui/Button'
 import {
@@ -130,7 +129,6 @@ export default function SkillsView() {
   const [pendingSkillInstall, setPendingSkillInstall] = useState<PendingSkillInstall | null>(null)
   const [skillDetails, setSkillDetails] = useState<SkillDetails | null>(null)
   const [loadingDetailsId, setLoadingDetailsId] = useState<string | null>(null)
-  const [teachOpen, setTeachOpen] = useState(false)
 
   const pollHandlesRef = useRef<PollHandle[]>([])
 
@@ -368,12 +366,6 @@ export default function SkillsView() {
     <>
       {ConfirmDialogNode}
 
-      <TeachModal
-        open={teachOpen}
-        onClose={() => setTeachOpen(false)}
-        onSaved={() => { setTeachOpen(false); loadInstalled() }}
-      />
-
       {pendingSkillInstall && (
         <InstallScanModal
           scan={pendingSkillInstall.scan}
@@ -396,12 +388,6 @@ export default function SkillsView() {
       <PageHeader
         title={t('view.skills')}
         subtitle={t('skills.subtitle')}
-        actions={
-          <Button variant="primary" size="sm" onClick={() => setTeachOpen(true)}>
-            <Plus size={14} aria-hidden="true" />
-            {t('skills.teach.open')}
-          </Button>
-        }
       />
 
       <div className={s.viewBody}>
@@ -475,34 +461,13 @@ export default function SkillsView() {
                       />
                     </FadeIn>
                   )
-                  : (() => {
-                    // Split installed skills: the ones demonstrated live (teaching_origin
-                    // === 'teaching_live') get their own section above the rest.
-                    const live = state.skills.filter(sk => sk.teaching_origin === 'teaching_live')
-                    const rest = state.skills.filter(sk => sk.teaching_origin !== 'teaching_live')
-                    return (
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
-                        {live.length > 0 && (
-                          <div>
-                            <p className={s.subsectionLabel}>{t('skills.section.live')}</p>
-                            <ul className={s.list} role="list">
-                              <AnimatePresence initial={false}>
-                                {live.map(renderSkill)}
-                              </AnimatePresence>
-                            </ul>
-                          </div>
-                        )}
-                        <div>
-                          {live.length > 0 && <p className={s.subsectionLabel}>{t('skills.section.rest')}</p>}
-                          <ul className={s.list} role="list">
-                            <AnimatePresence initial={false}>
-                              {rest.map(renderSkill)}
-                            </AnimatePresence>
-                          </ul>
-                        </div>
-                      </div>
-                    )
-                  })()
+                  : (
+                    <ul className={s.list} role="list">
+                      <AnimatePresence initial={false}>
+                        {state.skills.map(renderSkill)}
+                      </AnimatePresence>
+                    </ul>
+                  )
               )}
             </section>
           </StaggerItem>

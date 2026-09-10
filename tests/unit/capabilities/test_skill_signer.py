@@ -10,15 +10,15 @@ from uuid import uuid4
 
 import pytest
 
-from hermes.training.application.skill_signer import (
+from hermes.capabilities.application.skill_signer import (
     KmsSigningKeyPort,
     SignatureVerificationError,
     SkillSigner,
     build_canonical_payload,
     verify_skill_signature,
 )
-from hermes.training.domain.skill_package import SkillPackage
-from hermes.training.domain.skill_state import SkillState
+from hermes.capabilities.domain.skill_package import SkillPackage
+from hermes.capabilities.domain.skill_state import SkillState
 
 pytestmark = pytest.mark.unit
 
@@ -34,7 +34,7 @@ class InMemoryKms:
 
     async def get_signing_key(self, *, tenant_id: object, key_id: str) -> bytes:
         if key_id not in self._keys:
-            from hermes.training.application.skill_signer import SigningKeyError
+            from hermes.capabilities.application.skill_signer import SigningKeyError
 
             raise SigningKeyError(f"key_id {key_id!r} not found")
         return self._keys[key_id]

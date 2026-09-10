@@ -1,10 +1,17 @@
-"""InputOwnershipLedger — in-memory, fail-closed poseedor único (FR-002/FR-022).
+"""InputOwnershipLedger — in-memory, fail-closed sole-owner registry.
+
+Split out of the retired teach-by-browser feature's
+``agents_os/application/teaching/`` package (retired 10-sep-2026, see
+specs/025-safent-repaso/retirada-ensenar.md) into a minimal, teaching-free
+type: ``SessionInputBridge`` (the jailed session's input server) uses it as
+a contention guard so agent input is refused while a human mirror session
+holds the input channel — a safety invariant independent of teaching.
 
 One ledger per process. Thread-safe via RLock.
 
-Invariant: at most ONE owner per context_id at any time.
-Attempting to claim an already-claimed context with a DIFFERENT owner raises
-InputOwnershipViolation immediately (fail-closed, constitución IV).
+Invariant: at most ONE owner per context_id at any time. Attempting to claim
+an already-claimed context with a DIFFERENT owner raises
+InputOwnershipViolation immediately (fail-closed).
 
 Idempotency: claiming with the SAME owner that already holds the context is
 a no-op (safe for retry paths).
@@ -13,20 +20,23 @@ a no-op (safe for retry paths).
 from __future__ import annotations
 
 import threading
+from enum import StrEnum
 from uuid import UUID
 
-from hermes.agents_os.application.teaching.teaching_context import (
-    InputOwner,
-    InputOwnershipViolation,
-)
+
+class InputOwner(StrEnum):
+    """Who holds the input channel of a context."""
+
+    AGENT = "agent"
+    OPERATOR = "operator"
+
+
+class InputOwnershipViolation(RuntimeError):
+    """Raised when input ownership invariant would be broken."""
 
 
 class InputOwnershipLedger:
-    """In-memory registry of context_id → current InputOwner.
-
-    All operations are O(1) and protected by an RLock so concurrent
-    teaching-session opens cannot race past the claim gate.
-    """
+    """In-memory registry of context_id → current InputOwner."""
 
     def __init__(self) -> None:
         self._owners: dict[UUID, InputOwner] = {}
@@ -48,7 +58,7 @@ class InputOwnershipLedger:
             if current != owner:
                 raise InputOwnershipViolation(
                     f"Context {context_id} is already owned by {current!r}; "
-                    f"cannot claim for {owner!r} (FR-002 fail-closed)."
+                    f"cannot claim for {owner!r} (fail-closed)."
                 )
             # Same owner — idempotent, no-op.
 

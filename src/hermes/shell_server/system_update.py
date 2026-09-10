@@ -75,7 +75,7 @@ def _fetch_latest() -> str | None:
 
 
 def create_system_update_router() -> APIRouter:
-    from hermes.shell_server.cowork.training_live import _verify_token  # noqa: PLC0415
+    from hermes.shell_server.cowork.live_view_support import verify_token  # noqa: PLC0415
 
     router = APIRouter()
 
@@ -83,7 +83,7 @@ def create_system_update_router() -> APIRouter:
         expected = getattr(request.app.state, "shell_webui_token", "")
         auth = request.headers.get("authorization", "")
         tok = auth[7:] if auth[:7].lower() == "bearer " else ""
-        if not _verify_token(tok, expected):
+        if not verify_token(tok, expected):
             raise HTTPException(status_code=401, detail="unauthorized")
 
     @router.get("/api/v1/system/update")

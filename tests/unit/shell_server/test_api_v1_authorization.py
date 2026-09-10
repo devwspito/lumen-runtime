@@ -13,15 +13,12 @@ ruta: las únicas superficies que quedan fuera de /api/v1/* (healthz, metrics,
 el handshake de bootstrap en `GET /`, los assets estáticos de /app/) no las
 toca este middleware porque viven fuera del prefijo por diseño.
 
-Excepción documentada: las 3 rutas WebSocket bajo /api/v1/* (training/{id}/
-live, watch/agent/live, vnc) NO pasan por este middleware — Starlette sólo
-aplica `@app.middleware("http")` al scope "http", nunca a "websocket" — y
-quedan FUERA de este test a propósito. watch/agent/live y vnc SÍ están
-cubiertas por su propio gate por-conexión (`authenticate_websocket`, mismo
-`_bearer_is_valid` que este middleware) — ver
-tests/unit/shell_server/test_websocket_authorization.py. training/{id}/live
-sigue sin autenticador compartido (se está retirando en otro carril, fuera de
-alcance aquí).
+Excepción documentada: las 2 rutas WebSocket bajo /api/v1/* (watch/agent/live,
+vnc) NO pasan por este middleware — Starlette sólo aplica
+`@app.middleware("http")` al scope "http", nunca a "websocket" — y quedan
+FUERA de este test a propósito. Ambas están cubiertas por su propio gate
+por-conexión (`authenticate_websocket`, mismo `_bearer_is_valid` que este
+middleware) — ver tests/unit/shell_server/test_websocket_authorization.py.
 """
 
 from __future__ import annotations
@@ -112,7 +109,7 @@ def _api_v1_routes(app: Any) -> Iterator[tuple[str, str]]:
     """(método, path concreto) para cada ruta HTTP bajo /api/v1/*."""
     for route in app.routes:
         if not isinstance(route, APIRoute):
-            continue  # excluye las 3 rutas WebSocket — ver docstring del módulo
+            continue  # excluye las 2 rutas WebSocket — ver docstring del módulo
         if not route.path.startswith("/api/v1/"):
             continue
         path = _concrete_path(route.path)

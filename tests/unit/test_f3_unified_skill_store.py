@@ -8,8 +8,11 @@ Covers the mandatory test cases:
 
 (c) — skill_compiler (teaching path) parity — removed with the dead
 ``hermes.training`` GEPA subtree (unreachable from every real entrypoint;
-oleada 1 lane L1c). The live teaching path is
-``hermes.agents_os.application.skill_compiler``, unrelated to this module.
+oleada 1 lane L1c). ``hermes.agents_os.application.skill_compiler``, the
+former teaching-path compiler, lost its ``.compile()`` when teach-by-browser
+was retired 10-sep-2026 (specs/025-safent-repaso/retirada-ensenar.md); its
+``SkillPackage``/``.verify()`` survive for skill_replay, unrelated to this
+module's own ``SkillPackage`` (capabilities.domain.skill_package).
 """
 
 from __future__ import annotations
@@ -30,19 +33,23 @@ from hermes.shell_server.skills.skill_governance_service import (
     SkillGovernanceService,
     SkillSignatureVerificationFailed,
 )
-from hermes.training.application.skill_signer import (
+from hermes.capabilities.application.skill_signer import (
     KmsSigningKeyPort,
     SignatureVerificationError,
     SkillSigner,
     verify_skill_signature,
 )
-from hermes.training.domain.skill_md_document import (
+from hermes.capabilities.domain.skill_md_document import (
     SkillMdDocument,
     SkillMdParseError,
-    parse_skill_md,
 )
-from hermes.training.domain.skill_package import SkillPackage
-from hermes.training.domain.skill_state import SkillState
+from hermes.capabilities.domain.skill_package import SkillPackage
+from hermes.capabilities.domain.skill_state import SkillState
+from hermes.capabilities.infrastructure.skill_md_codec import (
+    parse_skill_md,
+    serialize_skill_md,
+    skill_md_content_bytes,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -606,7 +613,7 @@ class TestSkillMdDocumentParseSerialize:
     def test_roundtrip(self) -> None:
         original = _make_skill_md_content("my-skill")
         doc = parse_skill_md(original)
-        reserialized = doc.serialize()
+        reserialized = serialize_skill_md(doc)
         reparsed = parse_skill_md(reserialized)
         assert reparsed.name == doc.name
         assert reparsed.description == doc.description
@@ -648,11 +655,11 @@ class TestSkillMdDocumentParseSerialize:
 
     def test_content_bytes_is_deterministic(self) -> None:
         doc = parse_skill_md(_make_skill_md_content("det-skill"))
-        assert doc.content_bytes() == doc.content_bytes()
+        assert skill_md_content_bytes(doc) == skill_md_content_bytes(doc)
 
     def test_different_content_produces_different_hash(self) -> None:
         doc_a = parse_skill_md(_make_skill_md_content("skill-a"))
         doc_b = parse_skill_md(_make_skill_md_content("skill-b"))
-        hash_a = hashlib.sha256(doc_a.content_bytes()).hexdigest()
-        hash_b = hashlib.sha256(doc_b.content_bytes()).hexdigest()
+        hash_a = hashlib.sha256(skill_md_content_bytes(doc_a)).hexdigest()
+        hash_b = hashlib.sha256(skill_md_content_bytes(doc_b)).hexdigest()
         assert hash_a != hash_b

@@ -59,8 +59,8 @@ def _resolve_session_name(raw: str | None) -> str | None:
 
 
 def create_vnc_proxy_router() -> APIRouter:
-    from hermes.shell_server.cowork.training_live import (  # noqa: PLC0415
-        _try_ensure_browser_running,
+    from hermes.shell_server.cowork.live_view_support import (  # noqa: PLC0415
+        try_ensure_browser_running,
     )
 
     router = APIRouter()
@@ -84,7 +84,7 @@ def create_vnc_proxy_router() -> APIRouter:
         sub = "binary" if "binary" in subs else None
         await websocket.accept(subprotocol=sub)
 
-        await _try_ensure_browser_running(session_name)  # bring this session's headful browser up
+        await try_ensure_browser_running(session_name)  # bring this session's headful browser up
 
         rfb_port = session_ports(session_name).rfb_port
         try:
