@@ -3660,21 +3660,33 @@ class DbusRuntimeServiceWiring:
 
         Read-only supervision — no authZ required (CTRL-P1-5).
         instruction_truncated capped at 120 chars; no full payload exposed.
+
+        Merges two sources, same split as list_configured_tasks (BUG-7):
+        Safent's own agent_tasks queue (chat/manual/self_enqueue work) AND
+        Neus cron's own last-run bookkeeping (jobs.json last_run_at/
+        last_status) — cron jobs fire through Neus's OWN scheduler loop,
+        which never enqueues into agent_tasks, so the SQL-only read always
+        answered [] for every cron-fired run even when the journal showed
+        triggers.timer.fired (spec 025 hallazgo #6: "/tasks/recent siempre
+        []"). Sorted newest-first so the two sources interleave sanely.
         """
-        if self._cp_service is None:
-            return []
-        rows = await self._cp_service.list_recent_tasks(limit=limit)
-        return [
-            {
-                "task_id": r.task_id,
-                "label": r.label,
-                "status": r.status,
-                "trigger_kind": r.trigger_kind,
-                "enqueued_at": r.enqueued_at,
-                "claimed_at": r.claimed_at,
-            }
-            for r in rows
-        ]
+        rows: list[dict] = []
+        if self._cp_service is not None:
+            cp_rows = await self._cp_service.list_recent_tasks(limit=limit)
+            rows.extend(
+                {
+                    "task_id": r.task_id,
+                    "label": r.label,
+                    "status": r.status,
+                    "trigger_kind": r.trigger_kind,
+                    "enqueued_at": r.enqueued_at,
+                    "claimed_at": r.claimed_at,
+                }
+                for r in cp_rows
+            )
+        rows.extend(_neus_cron_recent_runs(limit=limit))
+        rows.sort(key=lambda r: r["enqueued_at"] or "", reverse=True)
+        return rows[:limit]
 
     async def get_scheduled_task(self, *, trigger_id: str) -> dict:
         """Return detail for one scheduled task trigger (read-only, no authZ).
@@ -7498,6 +7510,20 @@ def _neus_job_to_task_dict(job: dict) -> dict:
     the return value — only the title/label (same as CTRL-P1-5 on the
     trigger_repo path which capped task_instruction at 120 chars in the
     label derivation). We truncate prompt to 120 chars max for the label.
+
+    trigger_id: for jobs created through Safent (create_scheduled_task writes
+    origin.trigger_instance_id — the authorized_trigger UUID — onto the Neus
+    job precisely so it can be recovered here), this MUST be that UUID, not
+    the raw Neus job id. get_scheduled_task/set_scheduled_task_enabled/
+    delete_scheduled_task all do `UUID(trigger_id)` against the Safent trigger
+    table — feeding them the short Neus id (e.g. "c2217361b797") raised
+    ValueError -> {"ok": false, "error": "trigger_id inválido"} on every
+    toggle/delete, and a 404 on detail (spec 025 hallazgo #6: "ids
+    incompatibles lista/detalle"). Jobs the AGENT created directly via its own
+    `cronjob` tool have no origin (never went through the authorization gate)
+    — for those the raw Neus id is the only id that exists, so it's kept as
+    the honest fallback (toggle/delete on those rows is a separate, pre-
+    existing gap — see specs/025-safent-repaso follow-ups).
     """
     from datetime import UTC, datetime  # noqa: PLC0415
 
@@ -7506,7 +7532,9 @@ def _neus_job_to_task_dict(job: dict) -> dict:
         _cron_recurrence_human,
     )
 
-    job_id = str(job.get("id") or "")
+    origin = job.get("origin") or {}
+    safent_trigger_id = str(origin.get("trigger_instance_id") or "").strip() if isinstance(origin, dict) else ""
+    job_id = safent_trigger_id or str(job.get("id") or "")
     name = str(job.get("name") or "").strip()
     prompt = str(job.get("prompt") or "").strip()
     label = name or prompt[:120] or job_id or "cron job"
@@ -7560,6 +7588,39 @@ def _neus_job_to_task_dict(job: dict) -> dict:
         "one_shot": bool(job.get("repeat", {}).get("times") == 1 if isinstance(job.get("repeat"), dict) else False),
         "title": name,
     }
+
+
+def _neus_cron_recent_runs(*, limit: int) -> list[dict]:
+    """RecentTaskView-shaped rows synthesized from Neus cron jobs' own
+    last_run_at/last_status (cron/jobs.py mark_job_run — the SAME fields
+    _neus_job_to_task_dict already reads for the dashboard's last-run
+    columns). One row per job that has actually run at least once; jobs
+    never fired (last_run_at still null) contribute nothing. Fail-soft: []
+    on any error, same contract as _neus_cron_list_jobs.
+    """
+    jobs = _neus_cron_list_jobs(include_disabled=True)
+    rows: list[dict] = []
+    for job in jobs:
+        last_run_at = str(job.get("last_run_at") or "").strip()
+        if not last_run_at:
+            continue
+        origin = job.get("origin") or {}
+        safent_trigger_id = (
+            str(origin.get("trigger_instance_id") or "").strip() if isinstance(origin, dict) else ""
+        )
+        task_id = safent_trigger_id or str(job.get("id") or "")
+        name = str(job.get("name") or "").strip()
+        prompt = str(job.get("prompt") or "").strip()
+        label = name or (prompt[:120] if prompt else "") or task_id or "cron job"
+        rows.append({
+            "task_id": task_id,
+            "label": label,
+            "status": str(job.get("last_status") or "unknown"),
+            "trigger_kind": "timer",
+            "enqueued_at": last_run_at,
+            "claimed_at": last_run_at,
+        })
+    return rows[:limit]
 
 
 def _mcp_id(server_id: str):
