@@ -109,6 +109,19 @@ describe('render(failed) — the ONE failure screen', () => {
     expect(els.retryButton.disabled).toBe(false)
   })
 
+  it('shows an honest placeholder for Etapa when the failure has no associated stage (e.g. preflight)', () => {
+    const state: UiState = {
+      kind: 'failed',
+      stageId: undefined,
+      code: 'insufficient_disk',
+      detail: 'x',
+      retryable: false,
+      retrying: false,
+    }
+    render(state, els)
+    expect(els.failedStage.textContent).toBe('—')
+  })
+
   it('hides Reintentar when the backend says this failure is not retryable', () => {
     const state: UiState = {
       kind: 'failed',

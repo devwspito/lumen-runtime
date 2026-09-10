@@ -371,6 +371,8 @@ use tauri::{AppHandle, Emitter, Listener, Manager};
 
 use crate::domain::{Bytes, ImageRef, MachineSpec};
 use crate::engine_adapter::{EmbeddedCliConfig, EmbeddedCliDriver};
+use crate::start_update_checker;
+use crate::window_policy::WindowPolicy;
 
 /// The UI lane already codes against these exact channel names.
 pub const ENGINE_EVENT_CHANNEL: &str = "safent://engine-event";
@@ -627,12 +629,23 @@ fn navigate_to_ticket(app: &AppHandle, ticket: &BootstrapTicket) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
-    if let Ok(url) = ticket.expose().parse::<tauri::Url>() {
-        let _ = window.navigate(url);
+    let Ok(url) = ticket.expose().parse::<tauri::Url>() else {
+        // A malformed ticket URL leaves the loader screen up rather than
+        // navigating anywhere unsafe — reconcile/EngineLifecycle already
+        // treat "ready without a usable ticket" as reconnecting, not as
+        // this path.
+        return;
+    };
+    // window_policy's on_navigation denies any http(s) target that was never
+    // declared authorized (contract app-engine.md §7/§8) — this MUST run
+    // before `navigate`, exactly like the legacy install_podman flow already
+    // did for its own navigation, or the engine's own ticketed URL gets
+    // rejected by the policy that exists to protect it.
+    if let Some(policy) = app.try_state::<WindowPolicy>() {
+        policy.set_authorized_origin(url.clone());
     }
-    // A malformed ticket URL leaves the loader screen up rather than
-    // navigating anywhere unsafe — reconcile/EngineLifecycle already treat
-    // "ready without a usable ticket" as reconnecting, not as this path.
+    let _ = window.navigate(url);
+    start_update_checker(&window);
 }
 
 fn app_version() -> SemVer {

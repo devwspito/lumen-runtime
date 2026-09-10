@@ -52,7 +52,7 @@ function renderFailed(state, els) {
     els.failedHeading.textContent = copy.headline;
     els.failedHint.textContent = copy.hint;
     els.failedCode.textContent = state.code;
-    els.failedStage.textContent = state.stageId;
+    els.failedStage.textContent = state.stageId ?? '—';
     els.failedDetail.textContent = state.detail;
     setHidden(els.retryButton, !state.retryable);
     els.retryButton.disabled = state.retrying;

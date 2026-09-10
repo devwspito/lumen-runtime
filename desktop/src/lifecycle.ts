@@ -1,8 +1,14 @@
-// Ubiquitous language and event shapes come from
-// specs/028-safent-app-nativa/contracts/app-engine.md §3. This module owns
-// ZERO knowledge of Tauri, the DOM, or the CLI process — it is a pure state
-// machine so the "una pantalla de fallo" / "cancelar sin dejar el equipo a
-// medias" rules (FR-031..FR-033) are enforceable with plain unit tests.
+// Wire shape for `safent://engine-event` — the WRAPPER's own re-emission to
+// the webview (boot.rs's `EngineEventPayload`/`ReconnectingPayload`), now
+// documented at contracts/app-engine.md §8. This is NOT byte-identical to
+// §3's CLI↔wrapper NDJSON (discriminant `t`+`id` there vs `kind`+`stage`
+// here, a richer `ready` carrying digests instead of `endpoint_ref`, no
+// `facts` kind at all): boot.rs translates the CLI's raw protocol into this
+// shape before forwarding it, and this module owns ZERO knowledge of Tauri,
+// the DOM, or the CLI process beyond consuming exactly what boot.rs emits —
+// it is a pure state machine so the "una pantalla de fallo" / "cancelar sin
+// dejar el equipo a medias" rules (FR-031..FR-033) are enforceable with
+// plain unit tests.
 
 export type StageId =
   | 'preflight'
@@ -21,8 +27,12 @@ export type StageId =
 
 export type ProgressUnit = 'bytes' | 'layers' | 'steps'
 
-// Closed, stable set (contract §3). Anything else arriving on the wire is a
-// contract violation, not a reason to crash the UI — see failure-copy.ts.
+// Closed, stable set (contract §3's 21 CLI codes) PLUS two wrapper-only
+// extensions boot.rs/domain.rs's `FailureCode` synthesizes locally and can
+// still emit on this same channel (`cancelled_by_owner`,
+// `cli_porcelain_unsupported` — see contracts/app-engine.md §8). Anything
+// else arriving on the wire is a contract violation, not a reason to crash
+// the UI — see failure-copy.ts's fallback.
 export type FailureCode =
   | 'unsupported_os'
   | 'unsupported_arch'
@@ -45,22 +55,27 @@ export type FailureCode =
   | 'backup_failed'
   | 'restore_failed'
   | 'clock_skew'
+  | 'cancelled_by_owner'
+  | 'cli_porcelain_unsupported'
 
-/** One NDJSON line from `safent <verb> --porcelain`, forwarded verbatim. */
+/** One line from `safent://engine-event`, exactly `boot.rs`'s `EngineEventPayload`. */
 export type EngineEvent =
-  | { t: 'stage'; id: StageId; label: string; total_bytes?: number }
-  | { t: 'progress'; id: StageId; done: number; total?: number; unit: ProgressUnit }
-  | { t: 'done'; id: StageId; ms: number }
-  | { t: 'failed'; id: StageId; code: FailureCode; detail: string; retryable: boolean }
-  | { t: 'facts'; facts: unknown }
-  | { t: 'ready'; endpoint_ref: 'stdout-secret' }
+  | {
+      kind: 'stage'
+      stage: StageId
+      label: string
+      total_bytes: number | null
+      point_of_no_return: boolean
+    }
+  | { kind: 'progress'; stage: StageId; done: number; total: number | null; unit: ProgressUnit }
+  | { kind: 'done'; stage: StageId; ms: number }
+  | { kind: 'failed'; code: FailureCode; detail: string; retryable: boolean }
+  | { kind: 'ready'; app_version: string; engine_digest: string; companion_digest: string | null }
 
 /**
  * Inputs to the state machine beyond the CLI's own NDJSON: the wrapper's own
- * FR-012 safety net (no valid ticket to navigate to) and the owner clicking
- * "Reintentar". Both are ASSUMED integration points — see the handoff notes
- * in UI-STATES.md — because the module that would emit them (boot.rs) does
- * not exist in this worktree yet.
+ * FR-012 safety net (no valid ticket to navigate to, `safent://reconnecting`
+ * — boot.rs's `ReconnectingPayload`) and the owner clicking "Reintentar".
  */
 export type LifecycleAction =
   | { source: 'engine'; event: EngineEvent }
@@ -88,7 +103,11 @@ export type UiState =
   | { readonly kind: 'ready' }
   | {
       readonly kind: 'failed'
-      readonly stageId: StageId
+      /** Undefined when the failure arrived before any stage started (e.g. a
+       *  preflight check) — `Failed` carries no stage of its own on the wire
+       *  (boot.rs's `FailureCause` is stage-agnostic by design), so this is
+       *  the last stage this state machine itself saw active. */
+      readonly stageId: StageId | undefined
       readonly code: FailureCode
       readonly detail: string
       readonly retryable: boolean
@@ -97,19 +116,6 @@ export type UiState =
   | { readonly kind: 'reconnecting'; readonly reason: 'token_missing' | 'engine_restarted' }
 
 export const initialState: UiState = { kind: 'preparing', stages: [], cancelable: true }
-
-// Contract gap (see UI-STATES.md / handoff report): app-engine.md's `stage`
-// event carries no "point of no return" flag (§6 only names one example,
-// `applying_engine`, for the UPDATE flow — not bootstrap). Bootstrap itself
-// is documented as always resumable ("ninguna etapa deja el equipo a
-// medias"), so we default every stage to cancelable EXCEPT the ones that are
-// known points of no return today. The core lane should replace this with an
-// explicit signal on the wire.
-const POINT_OF_NO_RETURN: ReadonlySet<StageId> = new Set<StageId>(['container'])
-
-function isCancelable(activeStageId: StageId): boolean {
-  return !POINT_OF_NO_RETURN.has(activeStageId)
-}
 
 function upsertStage(
   stages: readonly StageProgress[],
@@ -146,33 +152,37 @@ export function reduceLifecycle(state: UiState, action: LifecycleAction): UiStat
   }
 
   const event = action.event
-  switch (event.t) {
+  switch (event.kind) {
     case 'stage': {
       const stages = upsertStage(stagesOf(state), {
-        id: event.id,
+        id: event.stage,
         label: event.label,
-        totalBytes: event.total_bytes,
+        totalBytes: event.total_bytes ?? undefined,
       })
-      return { kind: 'preparing', stages, cancelable: isCancelable(event.id) }
+      return { kind: 'preparing', stages, cancelable: !event.point_of_no_return }
     }
     case 'progress': {
-      const stages = withStageUpdate(stagesOf(state), event.id, {
+      const stages = withStageUpdate(stagesOf(state), event.stage, {
         done: event.done,
-        total: event.total,
+        total: event.total ?? undefined,
         unit: event.unit,
       })
-      const cancelable = state.kind === 'preparing' ? state.cancelable : isCancelable(event.id)
+      // `progress` carries no point-of-no-return flag of its own (only
+      // `stage` does) — trust whatever the most recent `stage` event already
+      // established; an out-of-order `progress` before any `stage` is a
+      // contract violation this defaults open (cancelable) rather than wedges on.
+      const cancelable = state.kind === 'preparing' ? state.cancelable : true
       return { kind: 'preparing', stages, cancelable }
     }
     case 'done': {
-      const stages = withStageUpdate(stagesOf(state), event.id, { status: 'done', ms: event.ms })
+      const stages = withStageUpdate(stagesOf(state), event.stage, { status: 'done', ms: event.ms })
       const cancelable = state.kind === 'preparing' ? state.cancelable : true
       return { kind: 'preparing', stages, cancelable }
     }
     case 'failed':
       return {
         kind: 'failed',
-        stageId: event.id,
+        stageId: activeStage(state)?.id,
         code: event.code,
         detail: event.detail,
         retryable: event.retryable,
@@ -180,9 +190,6 @@ export function reduceLifecycle(state: UiState, action: LifecycleAction): UiStat
       }
     case 'ready':
       return { kind: 'ready' }
-    case 'facts':
-      // Diagnostic-only payload today; no screen renders it (see UI-STATES.md).
-      return state
     default: {
       const exhaustive: never = event
       return exhaustive

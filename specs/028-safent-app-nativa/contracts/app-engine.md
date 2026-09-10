@@ -128,3 +128,60 @@ declare function safentAppStatus(): Promise<{
 abrir en el navegador, leer ficheros o ejecutar procesos. Esas acciones se
 disparan por el camino de la marca (`install-request.md`), que tiene vocabulario
 cerrado y las cumple el agente anfitrión.
+
+## 8. Canal wrapper → webview (loader local, `desktop/src`)
+
+**Distinto de §3.** El protocolo de §1-§6 es CLI↔envoltorio (`safent`
+--porcelain → `desktop/src-tauri`). Esta sección documenta el segundo salto,
+envoltorio→ventana, que §1 ya avisaba que nadie más habla — hasta ahora no
+estaba escrito, y la línea UI y la línea del núcleo habían asumido formas
+distintas (ver `desktop/UI-STATES.md`). Esta es la forma real que
+`desktop/src-tauri/src/boot.rs` emite y que `desktop/src/lifecycle.ts` consume.
+
+Dos canales Tauri, ambos sólo hacia la ventana **local** (`index.html`, nunca
+el origen remoto del producto):
+
+- **`safent://engine-event`** — un evento por cada `DomainEvent` relevante,
+  discriminante **`kind`** (no `t`), campo de etapa **`stage`** (no `id`):
+
+```ts
+type EngineEvent =
+  | { kind: 'stage'; stage: StageId; label: string; total_bytes: number | null; point_of_no_return: boolean }
+  | { kind: 'progress'; stage: StageId; done: number; total: number | null; unit: 'bytes' | 'layers' | 'steps' }
+  | { kind: 'done'; stage: StageId; ms: number }
+  | { kind: 'failed'; code: FailureCode; detail: string; retryable: boolean }
+  | { kind: 'ready'; app_version: string; engine_digest: string; companion_digest: string | null }
+```
+
+  - `point_of_no_return` viaja **en cada `stage`** (`boot.rs::bootstrap_point_of_no_return`)
+    — el cliente ya no adivina qué etapas son irreversibles; NFR-003 ("lo
+    declara antes, nunca después") se cumple con este campo, no con una lista
+    hardcodeada en el cliente.
+  - `ready` lleva el `VersionSet` aplicado (`app_version`/`engine_digest`/
+    `companion_digest`), **nunca** `endpoint_ref` ni el vale: el vale vive y
+    muere dentro de Rust (`boot.rs::navigate_to_ticket` llama
+    `window.navigate` directamente) — la ventana no necesita saberlo para
+    pintar la transición a «Listo».
+  - `failed` **no** lleva `stage`: `FailureCause` (data-model.md) es
+    deliberadamente agnóstica de etapa (una violación de `preflight` no tiene
+    ninguna etapa activa todavía). El cliente deriva la etapa que muestra en
+    «Detalles» de la última `stage` que vio activa; puede ser indefinida.
+  - `code` es el vocabulario cerrado de §3 (21 valores) **más dos extensiones
+    del envoltorio**, sintetizadas fuera del CLI y nunca presentes en su
+    NDJSON: `cancelled_by_owner` (SIGINT/cancelación honrada antes del punto
+    de no retorno) y `cli_porcelain_unsupported` (el binario embebido no
+    habla `--porcelain`/`facts --json` todavía, o violó una invariante del
+    protocolo). Ambas son parte del vocabulario **cerrado** de este canal
+    igualmente — un `FailureCode` fuera de las 23 sigue siendo un fallo de
+    contrato, nunca una razón para que la pantalla se caiga.
+  - No existe un `kind: 'facts'` en este canal — `facts` es un resultado de
+    observación puramente interno al envoltorio (`reconcile`); nunca cruza a
+    la ventana.
+
+- **`safent://reconnecting`** — `{ reason: 'token_missing' | 'engine_restarted' }`,
+  sin discriminante propio (el nombre del canal ya lo es). FR-012: sustituye
+  a cualquier navegación cuando `up` no entrega vale, o cuando la bandeja
+  pide «Reiniciar el motor» — cero peticiones en bucle.
+
+Comandos Tauri que la ventana local invoca (capabilities/default.json):
+`cancel_bootstrap`, `retry_bootstrap` — exactamente esos nombres, sin prefijo.

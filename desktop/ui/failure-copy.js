@@ -83,6 +83,14 @@ const COPY = {
         headline: 'La fecha y hora de este equipo no están sincronizadas.',
         hint: 'Ajusta la fecha y hora del sistema y vuelve a intentarlo.',
     },
+    cancelled_by_owner: {
+        headline: 'Cancelaste la preparación.',
+        hint: 'Puedes volver a intentarlo cuando quieras.',
+    },
+    cli_porcelain_unsupported: {
+        headline: 'Safent no pudo entenderse con lo que hay instalado en este equipo.',
+        hint: 'Vuelve a intentarlo. Si sigue fallando, descarga Safent de nuevo desde la página oficial.',
+    },
 };
 const FALLBACK = {
     headline: 'Algo detuvo la preparación.',
