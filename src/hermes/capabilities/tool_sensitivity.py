@@ -85,6 +85,15 @@ _SAFENT_ADS_WRITE_TOOLS: frozenset[str] = frozenset({
     "propose_creative_publication",
     "withdraw_proposal",
     "apply_defensive_action",
+    # ToolClass.PROPOSAL fuera de `_WRITE_CATALOG` del companion: crean una
+    # propuesta/trabajo pendiente de aprobacion humana (nunca dinero directo),
+    # pero son escrituras del companion y se auditan como SPEND igual que
+    # propose_*. La paridad la vigila el propio ads
+    # (tests/unit/bundle/test_mcp_registry_matches_overlay_and_contract.py).
+    "propose_campaign",
+    "propose_experiment",
+    "propose_reallocation_plan",
+    "generate_creative_assets",
 })
 
 _SPEND_TOOLS: frozenset[str] = frozenset({
