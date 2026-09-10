@@ -431,6 +431,19 @@ def _cached_resolve_hermes_runtime(engine_id: int, model_config: "ModelConfig") 
     return value
 
 
+def clear_runtime_provider_cache() -> None:
+    """Invalida _RUNTIME_PROVIDER_CACHE — llamar tras cualquier mutación de
+    provider (configure_native_provider, set_active_provider, add/update con
+    set_active) para que el PRÓXIMO chat resuelva el provider fresco en vez de
+    servir hasta 30s el runtime (api_key/base_url/provider) del switch
+    anterior. Sin esto, un cambio de proveedor hecho más rápido que el TTL
+    parece "no surtir efecto" — el motor sigue completando contra el provider
+    viejo aunque config.yaml ya esté actualizado (bug real: ver
+    specs/025-safent-repaso, hallazgo #1)."""
+    with _CACHE_LOCK:
+        _RUNTIME_PROVIDER_CACHE.clear()
+
+
 # ---------------------------------------------------------------------------
 # FIX E — detect file-writing tool invocations from CycleOutput
 # ---------------------------------------------------------------------------

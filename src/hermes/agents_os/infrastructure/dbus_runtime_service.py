@@ -817,8 +817,10 @@ class DbusRuntimeServiceWiring:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("hermes.dbus.native_sync_env_load_failed: %s", exc)
 
-            if set_active and self._active_provider_svc is not None:
-                self._active_provider_svc.force_refresh()
+            if set_active:
+                if self._active_provider_svc is not None:
+                    self._active_provider_svc.force_refresh()
+                _clear_engine_runtime_cache()
 
             logger.info(
                 "hermes.dbus.native_sync_ok",
@@ -952,10 +954,23 @@ class DbusRuntimeServiceWiring:
         return True
 
     def set_active_provider(self, *, provider_id: str, sender_uid: int) -> dict:
+        """Activa un provider — endpoint ÚNICO que la UI llama para CUALQUIER
+        fila (custom/SQL o catálogo nativo, ver ProviderRow.handleActivate).
+
+        provider_id UUID → fila del repo SQL (comportamiento original).
+        provider_id no-UUID → id del catálogo nativo (p.ej. "gemini"): antes
+        esto reventaba con ValueError (_UUID lo rechaza) y la UI nunca podía
+        reactivar un provider nativo ya configurado sin volver a pegar la
+        api key — ver specs/025-safent-repaso hallazgo #1.
+        """
         self._authorize_and_resolve(sender_uid, operation="set_active_provider")
         from uuid import UUID as _UUID  # noqa: PLC0415
 
-        pid = _UUID(provider_id)
+        try:
+            pid = _UUID(provider_id)
+        except ValueError:
+            return self._set_active_native_provider(provider_id=provider_id)
+
         self._provider_repo.set_active(provider_id=pid)
         p = self._provider_repo.get(provider_id=pid)
         # Reveal the stored api_key so _sync_to_native_provider can forward it.
@@ -970,7 +985,47 @@ class DbusRuntimeServiceWiring:
         # the case where _sync_to_native fails (fail-soft path leaves svc stale).
         if self._active_provider_svc is not None:
             self._active_provider_svc.force_refresh()
+        _clear_engine_runtime_cache()
         return self._provider_to_dict(p)
+
+    def _set_active_native_provider(self, *, provider_id: str) -> dict:
+        """Reactiva un provider del catálogo NATIVO ya configurado antes
+        (configure_native_provider guardó su clave en .env y su último
+        modelo en native_providers.json) — sin pedir de nuevo la api key.
+        {ok:false, error} si el provider no existe o no tiene clave guardada.
+        """
+        try:
+            from hermes_cli.auth import PROVIDER_REGISTRY  # noqa: PLC0415
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.native_activate_unavailable: %s", exc)
+            return {"ok": False, "error": "hermes_cli no disponible"}
+        cfg = PROVIDER_REGISTRY.get(provider_id)
+        if cfg is None:
+            return {"ok": False, "error": f"provider desconocido: {provider_id}"}
+        env_vars = getattr(cfg, "api_key_env_vars", ()) or ()
+        key = next((v for v in (_read_hermes_env(ev) for ev in env_vars) if v), None) if env_vars else None
+        if env_vars and not key:
+            return {
+                "ok": False,
+                "error": f"{provider_id} no está configurado todavía (sin api key guardada)",
+            }
+        model, base_url = _recall_native_provider_model(provider_id)
+        try:
+            _write_hermes_model_config(provider_id, model, base_url)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.native_activate_write_failed: %s", exc)
+            return {"ok": False, "error": f"no se pudo escribir config: {exc}"}
+        if key:
+            try:
+                import os as _os  # noqa: PLC0415
+                _os.environ[env_vars[0]] = key
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("hermes.dbus.native_activate_env_load_failed: %s", exc)
+        if self._active_provider_svc is not None:
+            self._active_provider_svc.force_refresh()
+        _clear_engine_runtime_cache()
+        logger.info("hermes.dbus.native_provider_reactivated id=%s", provider_id)
+        return _read_native_active() or {"ok": True, "provider_id": provider_id}
 
     async def test_provider(self, *, provider_id: str, sender_uid: int) -> dict:
         """Valida el provider a través del runtime REAL (Nous), no de un dialecto
@@ -2355,17 +2410,30 @@ class DbusRuntimeServiceWiring:
 
     def configure_native_provider(
         self, *, provider_id: str, api_key: str, model: str,
-        base_url: str, sender_uid: int,
+        base_url: str, sender_uid: int, set_active: bool = False,
     ) -> dict:
         """Configura un provider NATIVO de hermes_cli por su id real (api-key).
 
         Camino NATIVO (no la abstracción shell_server/kinds): escribe la clave en
         HERMES_HOME/.env bajo la env var REAL del provider (p.ej. OPENAI_API_KEY
-        para `openai-api`) + fija model.{provider,default} en config.yaml. El
-        motor (resolve_runtime_provider) lo lee directo — igual que
-        `hermes auth add` + `hermes --provider <id>`. Soporta CUALQUIER provider
-        api-key de la tabla (openai-api directo, gemini, deepseek, groq, mistral,
-        copilot…). Para OAuth/suscripción → start_provider_oauth.
+        para `openai-api`) — persistida siempre, para poder reactivar luego sin
+        repetirla (ver set_active_provider → _set_active_native_provider).
+
+        set_active=False (guardar sin activar) NO toca config.yaml ni el
+        os.environ del proceso vivo — activar es un paso aparte
+        (set_active_provider), exactamente como en el camino SQL
+        (_sync_to_native_provider). Antes esto se ignoraba y CUALQUIER
+        configure (incluso guardar una clave de prueba) pisaba el provider
+        activo del motor sin pasar por "Activar" — ver specs/025-safent-repaso
+        hallazgo #1 ("el activo de la UI no gobierna el motor").
+
+        set_active=True fija model.{provider,default,base_url} en config.yaml
+        y expone SÓLO la clave de ESTE provider al proceso vivo (least-
+        privilege: los demás quedan en .env pero no en os.environ hasta que
+        se activen). El motor (resolve_runtime_provider) lo lee directo —
+        igual que `hermes auth add` + `hermes --provider <id>`. Soporta
+        CUALQUIER provider api-key de la tabla (openai-api, gemini, deepseek,
+        groq, mistral, copilot…). Para OAuth/suscripción → start_provider_oauth.
         """
         self._authorize_and_resolve(sender_uid, operation="configure_native_provider")
         try:
@@ -2385,30 +2453,44 @@ class DbusRuntimeServiceWiring:
         env_vars = getattr(cfg, "api_key_env_vars", ()) or ()
         if not env_vars:
             return {"ok": False, "error": f"{provider_id} no declara env var de clave"}
+        bare_model = (model or "").strip()
+        if set_active and not bare_model:
+            # Sin esta guarda, _write_hermes_model_config conserva el `default`
+            # del provider ANTERIOR (p.ej. "claude-sonnet-4-5" heredado de
+            # Anthropic) bajo el provider NUEVO — falla en runtime con un
+            # modelo que ese provider no sirve en vez de fallar aquí, claro.
+            return {"ok": False, "error": "model requerido para activar"}
         try:
             _write_hermes_env(env_vars[0], key)
             bu = (base_url or "").strip()
             if bu and getattr(cfg, "base_url_env_var", ""):
                 _write_hermes_env(cfg.base_url_env_var, bu)
-            _write_hermes_model_config(provider_id, (model or "").strip(), bu)
+            _remember_native_provider_model(provider_id, bare_model, bu)
+            if set_active:
+                _write_hermes_model_config(provider_id, bare_model, bu)
         except Exception as exc:  # noqa: BLE001
             logger.warning("hermes.dbus.native_cfg_write_failed: %s", exc)
             return {"ok": False, "error": f"no se pudo escribir config: {exc}"}
-        # Carga la API-key recién escrita al os.environ del proceso vivo. El
-        # resolver POR CICLO (provider_config_source._load_native_model_config)
-        # lee la key de PROVIDER_REGISTRY[pid].api_key_env_vars; sin esta línea,
-        # esa env-var no existe en el daemon ya arrancado y el primer chat tras
-        # "Configurar" iría sin key (401). El model/provider los lee del
-        # config.yaml directo (no necesita reload).
-        try:
-            import os as _os  # noqa: PLC0415
-            _os.environ[env_vars[0]] = key
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("hermes.dbus.env_load_failed: %s", exc)
-        logger.info("hermes.dbus.native_provider_configured id=%s", provider_id)
-        if self._active_provider_svc is not None:
-            self._active_provider_svc.force_refresh()
-        return {"ok": True}
+        if set_active:
+            # Carga la API-key recién escrita al os.environ del proceso vivo. El
+            # resolver POR CICLO (provider_config_source._load_native_model_config)
+            # lee la key de PROVIDER_REGISTRY[pid].api_key_env_vars; sin esta línea,
+            # esa env-var no existe en el daemon ya arrancado y el primer chat tras
+            # "Activar" iría sin key (401). El model/provider los lee del
+            # config.yaml directo (no necesita reload).
+            try:
+                import os as _os  # noqa: PLC0415
+                _os.environ[env_vars[0]] = key
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("hermes.dbus.env_load_failed: %s", exc)
+            if self._active_provider_svc is not None:
+                self._active_provider_svc.force_refresh()
+            _clear_engine_runtime_cache()
+        logger.info(
+            "hermes.dbus.native_provider_configured id=%s set_active=%s",
+            provider_id, set_active,
+        )
+        return {"ok": True, "provider_id": provider_id}
 
     def get_native_active(self) -> dict:
         """Provider nativo activo según config.yaml ({} si ninguno). Read-only."""
@@ -3578,21 +3660,33 @@ class DbusRuntimeServiceWiring:
 
         Read-only supervision — no authZ required (CTRL-P1-5).
         instruction_truncated capped at 120 chars; no full payload exposed.
+
+        Merges two sources, same split as list_configured_tasks (BUG-7):
+        Safent's own agent_tasks queue (chat/manual/self_enqueue work) AND
+        Neus cron's own last-run bookkeeping (jobs.json last_run_at/
+        last_status) — cron jobs fire through Neus's OWN scheduler loop,
+        which never enqueues into agent_tasks, so the SQL-only read always
+        answered [] for every cron-fired run even when the journal showed
+        triggers.timer.fired (spec 025 hallazgo #6: "/tasks/recent siempre
+        []"). Sorted newest-first so the two sources interleave sanely.
         """
-        if self._cp_service is None:
-            return []
-        rows = await self._cp_service.list_recent_tasks(limit=limit)
-        return [
-            {
-                "task_id": r.task_id,
-                "label": r.label,
-                "status": r.status,
-                "trigger_kind": r.trigger_kind,
-                "enqueued_at": r.enqueued_at,
-                "claimed_at": r.claimed_at,
-            }
-            for r in rows
-        ]
+        rows: list[dict] = []
+        if self._cp_service is not None:
+            cp_rows = await self._cp_service.list_recent_tasks(limit=limit)
+            rows.extend(
+                {
+                    "task_id": r.task_id,
+                    "label": r.label,
+                    "status": r.status,
+                    "trigger_kind": r.trigger_kind,
+                    "enqueued_at": r.enqueued_at,
+                    "claimed_at": r.claimed_at,
+                }
+                for r in cp_rows
+            )
+        rows.extend(_neus_cron_recent_runs(limit=limit))
+        rows.sort(key=lambda r: r["enqueued_at"] or "", reverse=True)
+        return rows[:limit]
 
     async def get_scheduled_task(self, *, trigger_id: str) -> dict:
         """Return detail for one scheduled task trigger (read-only, no authZ).
@@ -6198,6 +6292,73 @@ def _write_hermes_model_config(provider_id: str, model: str, base_url: str = "")
     save_config(cfg)
 
 
+def _read_hermes_env(var: str) -> str | None:
+    """Lee VAR= de HERMES_HOME/.env directamente del fichero (no de os.environ:
+    otro provider pudo escribir la clave sin cargarla en el proceso vivo —
+    least-privilege, ver _clear_engine_runtime_cache). None si no existe."""
+    env_path = _hermes_home() / ".env"
+    if not env_path.exists():
+        return None
+    for ln in env_path.read_text(encoding="utf-8").splitlines():
+        if ln.strip().startswith(f"{var}="):
+            return ln.split("=", 1)[1].strip()
+    return None
+
+
+def _clear_engine_runtime_cache() -> None:
+    """Invalida la caché de 30s del motor (nous_engine._RUNTIME_PROVIDER_CACHE)
+    tras cualquier switch de provider, para que el PRÓXIMO chat use el
+    provider nuevo sin esperar el TTL ni reiniciar el daemon. Fail-soft: el
+    motor puede no estar cargado (tests, TUI standalone) sin romper el switch."""
+    try:
+        from hermes.runtime.nous_engine import clear_runtime_provider_cache  # noqa: PLC0415
+        clear_runtime_provider_cache()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("hermes.dbus.engine_cache_clear_skip: %s", exc)
+
+
+def _native_provider_models_path() -> "Path":
+    from pathlib import Path as _Path  # noqa: PLC0415
+    return _hermes_home() / "native_providers.json"
+
+
+def _remember_native_provider_model(provider_id: str, model: str, base_url: str) -> None:
+    """Recuerda el último model/base_url elegido PARA ESTE provider nativo.
+
+    config.yaml sólo guarda un `model.default` GLOBAL (no por provider), así
+    que reactivar un provider nativo ya configurado (switch A→B→A) perdería
+    su modelo si no se recuerda aparte. Fail-soft: nunca rompe el configure.
+    """
+    if not model:
+        return
+    try:
+        import json as _json  # noqa: PLC0415
+        path = _native_provider_models_path()
+        state: dict = {}
+        if path.exists():
+            state = _json.loads(path.read_text(encoding="utf-8") or "{}")
+        state[provider_id] = {"model": model, "base_url": base_url}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_json.dumps(state), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("hermes.dbus.native_model_memory_write_failed: %s", exc)
+
+
+def _recall_native_provider_model(provider_id: str) -> "tuple[str, str]":
+    """(model, base_url) recordados para este provider nativo, o ("", "")."""
+    try:
+        import json as _json  # noqa: PLC0415
+        path = _native_provider_models_path()
+        if not path.exists():
+            return "", ""
+        state = _json.loads(path.read_text(encoding="utf-8") or "{}")
+        entry = state.get(provider_id) or {}
+        return str(entry.get("model") or ""), str(entry.get("base_url") or "")
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("hermes.dbus.native_model_memory_read_failed: %s", exc)
+        return "", ""
+
+
 def _read_native_active() -> dict:
     """Provider nativo activo según config.yaml ({} si no hay model.provider)."""
     try:
@@ -7349,6 +7510,20 @@ def _neus_job_to_task_dict(job: dict) -> dict:
     the return value — only the title/label (same as CTRL-P1-5 on the
     trigger_repo path which capped task_instruction at 120 chars in the
     label derivation). We truncate prompt to 120 chars max for the label.
+
+    trigger_id: for jobs created through Safent (create_scheduled_task writes
+    origin.trigger_instance_id — the authorized_trigger UUID — onto the Neus
+    job precisely so it can be recovered here), this MUST be that UUID, not
+    the raw Neus job id. get_scheduled_task/set_scheduled_task_enabled/
+    delete_scheduled_task all do `UUID(trigger_id)` against the Safent trigger
+    table — feeding them the short Neus id (e.g. "c2217361b797") raised
+    ValueError -> {"ok": false, "error": "trigger_id inválido"} on every
+    toggle/delete, and a 404 on detail (spec 025 hallazgo #6: "ids
+    incompatibles lista/detalle"). Jobs the AGENT created directly via its own
+    `cronjob` tool have no origin (never went through the authorization gate)
+    — for those the raw Neus id is the only id that exists, so it's kept as
+    the honest fallback (toggle/delete on those rows is a separate, pre-
+    existing gap — see specs/025-safent-repaso follow-ups).
     """
     from datetime import UTC, datetime  # noqa: PLC0415
 
@@ -7357,7 +7532,9 @@ def _neus_job_to_task_dict(job: dict) -> dict:
         _cron_recurrence_human,
     )
 
-    job_id = str(job.get("id") or "")
+    origin = job.get("origin") or {}
+    safent_trigger_id = str(origin.get("trigger_instance_id") or "").strip() if isinstance(origin, dict) else ""
+    job_id = safent_trigger_id or str(job.get("id") or "")
     name = str(job.get("name") or "").strip()
     prompt = str(job.get("prompt") or "").strip()
     label = name or prompt[:120] or job_id or "cron job"
@@ -7411,6 +7588,39 @@ def _neus_job_to_task_dict(job: dict) -> dict:
         "one_shot": bool(job.get("repeat", {}).get("times") == 1 if isinstance(job.get("repeat"), dict) else False),
         "title": name,
     }
+
+
+def _neus_cron_recent_runs(*, limit: int) -> list[dict]:
+    """RecentTaskView-shaped rows synthesized from Neus cron jobs' own
+    last_run_at/last_status (cron/jobs.py mark_job_run — the SAME fields
+    _neus_job_to_task_dict already reads for the dashboard's last-run
+    columns). One row per job that has actually run at least once; jobs
+    never fired (last_run_at still null) contribute nothing. Fail-soft: []
+    on any error, same contract as _neus_cron_list_jobs.
+    """
+    jobs = _neus_cron_list_jobs(include_disabled=True)
+    rows: list[dict] = []
+    for job in jobs:
+        last_run_at = str(job.get("last_run_at") or "").strip()
+        if not last_run_at:
+            continue
+        origin = job.get("origin") or {}
+        safent_trigger_id = (
+            str(origin.get("trigger_instance_id") or "").strip() if isinstance(origin, dict) else ""
+        )
+        task_id = safent_trigger_id or str(job.get("id") or "")
+        name = str(job.get("name") or "").strip()
+        prompt = str(job.get("prompt") or "").strip()
+        label = name or (prompt[:120] if prompt else "") or task_id or "cron job"
+        rows.append({
+            "task_id": task_id,
+            "label": label,
+            "status": str(job.get("last_status") or "unknown"),
+            "trigger_kind": "timer",
+            "enqueued_at": last_run_at,
+            "claimed_at": last_run_at,
+        })
+    return rows[:limit]
 
 
 def _mcp_id(server_id: str):

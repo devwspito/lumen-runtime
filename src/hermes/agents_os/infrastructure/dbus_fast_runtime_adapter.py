@@ -811,8 +811,11 @@ class Runtime1ServiceInterface(ServiceInterface):
     async def ConfigureNativeProvider(self, draft_json: "s") -> "s":  # noqa: N802,F821,UP037
         """Configura un provider NATIVO de hermes_cli (api-key) por su id real.
 
-        draft: {provider_id, api_key, model, base_url}. Escribe .env + config.yaml
-        del HERMES_HOME — el motor lo resuelve directo. authZ operador.
+        draft: {provider_id, api_key, model, base_url, set_active}. Escribe
+        .env siempre; config.yaml del HERMES_HOME (lo que el motor resuelve
+        directo) SÓLO si set_active — antes este flag se perdía aquí y
+        CUALQUIER configure activaba el provider sin pasar por "Activar"
+        (specs/025-safent-repaso hallazgo #1). authZ operador.
         """
         import asyncio as _asyncio  # noqa: PLC0415
         from functools import partial  # noqa: PLC0415
@@ -828,6 +831,7 @@ class Runtime1ServiceInterface(ServiceInterface):
                 model=str(d.get("model", "")),
                 base_url=str(d.get("base_url", "")),
                 sender_uid=sender_uid,
+                set_active=bool(d.get("set_active", False)),
             ),
         )
         if isinstance(result, dict) and result.get("ok"):

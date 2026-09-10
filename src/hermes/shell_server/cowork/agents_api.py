@@ -192,6 +192,23 @@ def create_agents_router() -> APIRouter:
         """
         return {"ok": True, "active_agent_id": agent_id, "deprecated": True}
 
+    @router.get("/active")
+    async def get_active_agent(request: Request) -> dict:
+        """Read side of the deprecated no-op above — was simply never
+        implemented (spec 025 hallazgo #3): with no GET handler registered
+        for this literal path, Starlette matched the request against
+        PUT/PATCH/DELETE /{agent_id} (agent_id="active", a path match) and
+        answered 405 instead of ever reaching a handler. Same static
+        "deprecated" shape as POST .../activate — there is no global active
+        agent to read since binding moved per-conversation; this exists so
+        callers get a clean 200 instead of a 405. Shape matches
+        ActiveAgentResponse (frontend/src/api/types.ts) — the same
+        {active_agent_id: ''} the client's own .catch() fallback already
+        used for the 405 case, so getActiveAgent() now succeeds instead of
+        silently swallowing an error.
+        """
+        return {"active_agent_id": "", "deprecated": True}
+
     # ------------------------------------------------------------------
     # Per-agent capabilities
     # D-Bus positional order: (agent_id) / (agent_id, kind, cap_id, version)
