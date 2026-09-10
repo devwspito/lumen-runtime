@@ -296,3 +296,103 @@ previo, intacto al terminar).
 | ENT-02 | **[DUEÑO]** | requiere código de tenant + control plane alcanzable | `safent pair` con código falso da error de red claro (CLI-14) |
 | ENT-03 | **[DUEÑO]** | depende de ENT-02 | — |
 | ENT-04 | **PASS** (camino inerte) | `./safent unpair` sin emparejar | `[ok] Not associated — nothing to unpair`; sigue `community` |
+
+## §1 Actualización / Desinstalación (UPD)
+
+| id | resultado | cómo | evidencia |
+|---|---|---|---|
+| UPD-01 | **PASS** | `POST /api/v1/system/update` | 200 `{"ok":true,"updating":true}`; `ls /var/lib/hermes/instance/` muestra `.update-requested` (17:13) |
+| UPD-02 | **[DUEÑO]** | `safent agent` consumiendo el marcador | no ejecutado: haría `podman pull` de la imagen publicada y recrearía el contenedor; además esta máquina ya tiene un `safent-agent.service` de usuario ajeno a esta pasada |
+| UPD-03 | **PASS** | `GET /api/v1/system/update` cada 2 min durante 18 min | `updating:true` a las 17:19/17:21/17:23/17:25/17:27 y **`updating:false` a las 17:29** — exactamente el `_FLAG_STALE_S = 15*60` de `system_update.py:37`, se limpia solo sin agente |
+| UPD-04 | **PASS** | `POST /api/v1/system/uninstall` | 200 `{"ok":true}` y aparece `.uninstall-requested` junto al marcador de update |
+| UPD-05 | **[DUEÑO]** | `safent update` | no ejecutado a propósito: hace `_self_update` desde GitHub, `podman pull` de `ghcr.io/devwspito/safent:latest` **y `_reclaim_space` (rmi de imágenes safent viejas del host)** — tocaría imágenes que no son de esta pasada |
+| UPD-06 | **[DUEÑO]** | `safent uninstall` | **no ejecutado, y es un hallazgo en sí**: el verbo no está acotado a la instancia. Con `SAFENT_NAME=matriz-final-1` seguiría haciendo `systemctl --user disable --now safent-agent.service` (esta máquina tiene uno **preexistente**, de agosto, ajeno a esta prueba), `rm -rf $HOME/.safent` y borraría `/usr/local/bin/safent`, `$HOME/.local/bin/safent`… El desmontaje equivalente se hizo a mano (`podman rm -f` + `volume rm`) |
+
+## §Destructivo (orden exacto de la matriz)
+
+| paso | resultado | evidencia |
+|---|---|---|
+| SEG-02..05 (freno) | **PASS** (ver §8) | probado y liberado antes de continuar; ninguna fila posterior corrió con el freno echado |
+| CLI-11 `companion remove` | **PASS** | `[ok] Companion removed. State kept at …`; 0 contenedores `ads-*`; el estado (`bearer caps.yaml companions.json pg_password secrets sso tls`) intacto |
+| CLI-12 `companion remove --purge` | **PASS con matiz** | `[ok] Companion removed and state purged`; el directorio de estado queda vacío. **Matiz**: deja atrás los tres volúmenes del companion (`safent-ads-companion-{db-data,broker-sock,credential-store}` — incluida la base de datos con las campañas) y la red `safent-companions`; los quitamos a mano en el desmontaje |
+| SKL-05 desinstalar skill | **PASS** | `DELETE /skills/hub/gitnexus-explorer` → 202 `op_id`; `GET /skills` baja a `['native:git']` |
+| MCP-10 eliminar MCP | **PASS** | `DELETE /mcp/memory` y `/mcp/gh-test` → 204 (§6) |
+| AGT-05 eliminar agente | **PASS** | `DELETE /agents/{id}` → 204; el roster vuelve a `['CEO']` |
+| AGT-13 eliminar tarea | **PASS** | `DELETE /tasks/scheduled/{uuid}` → 204; `GET /tasks/configured` → `[]` |
+| ENT-04 unpair | **PASS** | inerte, sigue `community` |
+| UPD-04 / UPD-06 | ver §1 | marcador creado; `safent uninstall` no ejecutado por invadir estado ajeno |
+| destruir la instancia | **PASS** | `podman rm -f matriz-final-1` + `podman volume rm matriz-final-1-data` |
+
+**Comportamiento observado durante el destructivo (menor, pero engañoso):** con el companion
+**eliminado**, `GET /api/v1/mcp` siguió listando `safent-ads` como `healthy`, `tool_count: 61`,
+`companion_status: "listo"` durante minutos. La verdad sí está disponible por el camino nuevo:
+`GetCompanionHealth` devolvió `{"state":"unreachable","reachable":false}` y
+`POST /api/v1/ads/bridge/session` respondió `{"status":"unavailable","reason":"unreachable"}`.
+Es la vista de Herramientas la que se queda mintiendo.
+
+## §Recreación final — INST-07, INST-08 y ADS-01
+
+Con la instancia principal ya destruida se relanzó **el mismo nombre** (nunca dos contenedores a la vez):
+
+```sh
+SAFENT_NAME=matriz-final-1 SAFENT_VOLUME=matriz-final-1-data \
+./ops/container/run-safent.sh localhost/safent-runtime:latest 18090 --no-companion --codex-auth $SCRATCH/out/auth.json
+```
+
+| id | resultado | evidencia |
+|---|---|---|
+| INST-07 | **PASS** | sin línea de provisioning en la salida; `/healthz` 200 a los **3 s**; `GET /mcp` = `excel 25 / word 54 / powerpoint 37` y **sin `safent-ads`** |
+| INST-08 | **PASS** | `podman exec … cat /var/lib/hermes/hermes-home/.codex/auth.json` **idéntico** al fichero del host (`diff` vacío) y `CODEX_HOME=/var/lib/hermes/hermes-home/.codex`; con una cuenta real de Codex sería `[DUEÑO]` |
+| ADS-01 | **PASS** | `POST /api/v1/ads/bridge/session` → `{"status":"unavailable","reason":"not_installed"}` y `GetCompanionHealth` → `{"state":"not_installed","reachable":false}`; `/app/anuncios` sirve la SPA con el estado honesto (`ads.state.not_installed.*` + CTA), no una pantalla vacía. Junto con el `listo`/`ready` de la instancia con companion, queda verificada la transición de estados **not_installed → ready** de la entrada "Ads" del sidebar |
+
+## §Desmontaje
+
+`podman rm -f matriz-final-1` · `podman volume rm matriz-final-1-data` · `podman network rm
+safent-companions` · `podman volume rm safent-ads-companion-{db-data,broker-sock,credential-store}`
+· `podman rmi ghcr.io/devwspito/safent-ads:latest` (imagen que **descargó el propio CLI** en CLI-10;
+no estaba en el host antes de esta pasada).
+
+Estado final verificado: `podman ps -a` → sólo los tres `safent-*` preexistentes y apagados
+(`safent-diag`, `safent-v839`, `safent-audit`); `podman network ls` → sólo `podman`;
+`podman volume ls` → ningún volumen `matriz-*`/`safent-ads-*`; `~/.safent/` → sólo su
+`safent-seccomp.json` del 23-ago, intacto; ninguna credencial real usada ni escrita.
+
+---
+
+## Resumen
+
+**168 filas · 114 PASS · 11 FALLA · 29 [DUEÑO] · 12 NO-APLICA-DGX · 2 NO-APLICA (capacidad retirada).**
+Más 6 filas extra fuera de la numeración de la matriz (superficies nuevas de 022/026): 3 PASS
+(flujo de UI de `force` con UN solo TOTP, WebSockets con token, entrada "Ads" del sidebar) y 3 FALLA
+(las tres, la misma causa raíz de ADS-02).
+
+### Los 11 FALLA
+
+1. **MCP-04 — `uvx` con paquete no cacheado sigue muriendo con EXDEV.** El hallazgo #5 de la 1ª pasada **no está arreglado**: ningún MCP de Python nuevo es instalable.
+2. **MCP-05 — el ejemplo del propio formulario de env es rechazado.** `BRAVE_API_KEY=…` (placeholder de `McpView.tsx:1148`) no está en `_MCP_BYOK_ENV_KEYS`; el usuario recibe un 400 crudo del backend.
+3. **SEG-15 — desactivar "verificación en acciones sensibles" deja Seguridad rota.** Con `mfa_on_dangers:false` la UI manda `totp:""` y el backend sigue devolviendo 401 en presets, lote de permisos **y en el propio interruptor**: no se puede volver a activarlo desde la UI.
+4. **PROV-02 — conectar un proveedor nativo desde la UI no deja modelo.** `config.yaml` queda con `model.provider` y sin `model.default` → el primer turno muere con `HermesModelNotConfiguredError`.
+5. **PROV-03 — `POST /providers/{id-nativo}/test` responde 200 `{"ok":false,"error":"daemon_unavailable"}`** (parsea el id como UUID) → la tarjeta **siempre** marca "conexión fallida" y nunca activa.
+6. **PROV-05 — el cambio de proveedor tarda ~30 s en aplicarse** (turno a +2 s con el proveedor viejo, a +35 s con el nuevo): regresión parcial del "efectivo en el turno siguiente" que R5 daba por cerrado.
+7. **MEM-06 — `DELETE /memory/{id}` de una entrada inexistente devuelve 200** (GET da 404, PUT 400).
+8. **ADS-02 (+ las dos filas 026) — la clave SSO del companion es ilegible para el daemon** (`ads-sso.key` 0400 root vs `User=hermes`) → `MintCompanionOwnerAssertion` PermissionError → `/ads/*` 503, panel de Ads inalcanzable, SC-002 sin cumplir. Al bearer sí se le hizo stage-in root; a la clave SSO de 026 no.
+9. **CLI-08 — `safent companion status` dice `0/0 running` con el companion sano** (llama a compose sin `_companion_env`).
+10. **CLI-10 — `safent companion rotate` rompe el companion**: recrea con `ghcr.io/devwspito/safent-ads:latest` (hardcodeado en `_companion_env`) mezclando imágenes → `ads-migrate` exit 255 y `ads-api` caído.
+11. **BKP-01 — `safent restore` dice `[ok] Restored` sin crear el contenedor**: `_exists()` (`podman inspect $NAME`) casa con el **volumen** importado. Los datos del backup sí están íntegros (verificado arrancando el volumen a mano).
+
+### Frente a la reejecución anterior (25 PASS / 5 FALLA)
+
+- **Cerrados:** R11 (el `force` de skills ya es alcanzable desde la UI con UN solo TOTP, vía `reauth_grant`), R14 (`/tasks/recent` y `last_run_at` poblados tras disparar el cron), R26 (`POST /tailnet/connect` con clave falsa ya deja `configured:false` + `last_attempt.ok:false`).
+- **Cerrados además:** los dos GAP de SSH — `tailnet_ssh`/`tailnet_file_get`/`tailnet_file_put` **están** en el esquema de tools del LLM (24 capacidades) y en el catálogo de políticas (88), y `GET`/`DELETE /api/v1/tailnet/ssh-hosts` existen con TOTP y UI.
+- **A medias:** R17 (freno sin MFA) — ya hay ruta REST con contraseña de dispositivo vía el helper PAM, pero en una instalación nueva **no hay contraseña de dispositivo** y el gate falla cerrado (403); la única salida sigue siendo enrolar MFA con el freno echado.
+- **Regresiones nuevas:** PROV-02/03/05 (conectar y cambiar de proveedor desde la UI), y todo el carril de companion/CLI que la pasada anterior no ejercitó (CLI-08/CLI-10/BKP-01) más el bloqueante de 026 (ADS-02).
+
+### Menores anotados
+
+`tool_count` del alta de MCP (9) ≠ el de la lista (11) · `POST /providers/native` con `set_active`
+sin `model` devuelve `{ok:false}` bajo **201** · el error del proveedor se entrega como respuesta del
+modelo con `outcome: completed` · `GET /usage/summary?period=day` se coerciona a `30d` sin avisar ·
+`last_status` del cron se queda en `pending` aunque el bucle reporte `task_failed` · `GET /mcp`
+sigue diciendo `healthy/listo` con el companion eliminado · `POST /mfa/enroll` enrola en la primera
+llamada sin que nadie confirme que el dueño escaneó el QR · `safent companion remove --purge` deja
+tres volúmenes y la red · `safent uninstall` no está acotado a la instancia.
