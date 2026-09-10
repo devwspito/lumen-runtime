@@ -73,6 +73,28 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("hermes.agents_os.dbus_runtime_service")
 
+# Suggested default model per NATIVE catalogue provider_id (hermes_cli.auth.
+# PROVIDER_REGISTRY key) — surfaced by list_native_providers() so the UI's
+# "Add/Connect" card can pre-fill (and let the owner edit) a model instead of
+# configuring a provider with none at all (specs/025-safent-repaso PROV-02:
+# configureNativeProvider({provider_id, api_key}) never sent `model`, so
+# config.yaml ended up with model.provider set and NO model.default, and the
+# first chat died with HermesModelNotConfiguredError). Mirrors the same
+# per-id table the Lumen desktop compositor already uses for this exact
+# purpose (lumen/compositor/qml/desktop/ProviderGate.qml `defaultModels`).
+# Deliberately NOT exhaustive over the 37+ registry entries: an id missing
+# here just means the UI field starts empty and the owner types one — never
+# a hard requirement to keep this table in lockstep with the registry.
+_NATIVE_DEFAULT_MODEL: dict[str, str] = {
+    "anthropic": "claude-sonnet-4-6",
+    "openai-api": "gpt-5.4-nano",
+    "gemini": "gemini-2.5-flash",
+    "deepseek": "deepseek-chat",
+    "kimi-coding": "kimi-k2",
+    "xai": "grok-4",
+    "ollama-cloud": "llama3.1",
+}
+
 
 def _parse_redacted_params(raw: object) -> dict:
     """Parse the JSON-text parameters_redacted column back to a dict.
@@ -487,10 +509,18 @@ class DbusRuntimeServiceWiring:
         *,
         sender_uid: int,
         operator_token: str | None = None,
+        reason: str = "",
     ) -> None:
         """Reanuda el agente. sender_uid resuelto por el bus (CWE-862).
 
         operator_token required when sender_uid == proxy_uid.
+
+        reason: audit-only provenance marker (security review 2026-09-10,
+        MEDIUM finding) — "host_cli" from `safent brake release`, empty for
+        the normal TOTP-gated UI release via the REST proxy. Never used for
+        authorization, only threaded into the signed AGENT_RESUMED entry
+        (AgentStatePort.resume's own docstring) so the two are no longer
+        indistinguishable on the audit chain.
 
         Raises:
             DbusAuthorizationError: UID del sender no está autorizado o token inválido.
@@ -498,10 +528,10 @@ class DbusRuntimeServiceWiring:
         operator_id = self._authorize_and_resolve(
             sender_uid, operation="request_resume", operator_token=operator_token
         )
-        await self._state.resume(by=operator_id)
+        await self._state.resume(by=operator_id, reason=reason)
         logger.info(
             "hermes.dbus.agent_resumed",
-            extra={"by_uid": sender_uid},
+            extra={"by_uid": sender_uid, "reason": reason or None},
         )
 
     # ------------------------------------------------------------------
@@ -1028,6 +1058,14 @@ class DbusRuntimeServiceWiring:
         (configure_native_provider guardó su clave en .env y su último
         modelo en native_providers.json) — sin pedir de nuevo la api key.
         {ok:false, error} si el provider no existe o no tiene clave guardada.
+
+        Levanta ValueError (→ 422 en REST, ver SetActiveProvider en el
+        adapter) si nunca se recordó un modelo para este provider — activar
+        sin uno dejaría config.yaml con `model.provider` pero SIN
+        `model.default`, y el primer chat moriría con
+        HermesModelNotConfiguredError en vez de fallar aquí, claro (PROV-02:
+        la UI llamaba a configureNativeProvider({provider_id, api_key}), sin
+        `model`, y esta función lo activaba igual).
         """
         try:
             from hermes_cli.auth import PROVIDER_REGISTRY  # noqa: PLC0415
@@ -1045,6 +1083,11 @@ class DbusRuntimeServiceWiring:
                 "error": f"{provider_id} no está configurado todavía (sin api key guardada)",
             }
         model, base_url = _recall_native_provider_model(provider_id)
+        if not model:
+            raise ValueError(
+                f"{provider_id} no tiene un modelo configurado — indica uno "
+                "(configureNativeProvider con `model`) antes de activarlo"
+            )
         try:
             _write_hermes_model_config(provider_id, model, base_url)
         except Exception as exc:  # noqa: BLE001
@@ -1062,20 +1105,75 @@ class DbusRuntimeServiceWiring:
         logger.info("hermes.dbus.native_provider_reactivated id=%s", provider_id)
         return _read_native_active() or {"ok": True, "provider_id": provider_id}
 
+    async def _test_native_provider(self, *, provider_id: str) -> dict:
+        """Prueba un provider del catálogo NATIVO (sin fila en el repo SQL)
+        contra el runtime real — misma clave/modelo que _set_active_native_provider
+        recuerda de configure_native_provider. {ok, error}; {ok:false, error}
+        si el provider es desconocido o aún no tiene clave/modelo guardados
+        (mismo patrón fail-soft que _set_active_native_provider).
+        """
+        try:
+            from hermes_cli.auth import PROVIDER_REGISTRY  # noqa: PLC0415
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.native_test_unavailable: %s", exc)
+            return {"ok": False, "error": "hermes_cli no disponible"}
+        cfg = PROVIDER_REGISTRY.get(provider_id)
+        if cfg is None:
+            return {"ok": False, "error": f"provider desconocido: {provider_id}"}
+        env_vars = getattr(cfg, "api_key_env_vars", ()) or ()
+        key = next((v for v in (_read_hermes_env(ev) for ev in env_vars) if v), None) if env_vars else None
+        if env_vars and not key:
+            return {
+                "ok": False,
+                "error": f"{provider_id} no está configurado todavía (sin api key guardada)",
+            }
+        model, base_url = _recall_native_provider_model(provider_id)
+        if not model:
+            return {"ok": False, "error": f"{provider_id} no tiene modelo configurado"}
+        try:
+            ok, err, code = await _nous_validate_model_string(f"{provider_id}/{model}", key, base_url)
+        except Exception as exc:  # noqa: BLE001
+            ok, err, code = False, f"{type(exc).__name__}: {str(exc)[:300]}", None
+        return {"ok": ok, "error": err, "code": code}
+
     async def test_provider(self, *, provider_id: str, sender_uid: int) -> dict:
         """Valida el provider a través del runtime REAL (Nous), no de un dialecto
         paralelo: resuelve el ModelConfig como el daemon + una completion mínima
-        por hermes-agent. {ok, error}. Mantiene 'idioma de Hermes'."""
+        por hermes-agent. {ok, error, code}. Mantiene 'idioma de Hermes'.
+
+        provider_id UUID → fila del repo SQL (comportamiento original).
+        provider_id no-UUID → id del catálogo nativo (p.ej. "anthropic",
+        "gemini"): antes esto reventaba _UUID() con ValueError, que dbus-fast
+        entrega como un error genérico — el proxy REST lo traducía a
+        AgentUnavailable y la tarjeta SIEMPRE veía 200 {"ok":false,
+        "error":"daemon_unavailable"}, aunque la clave fuese válida (nunca
+        activaba). Mismo bug/mismo arreglo que set_active_provider — ver
+        specs/025-safent-repaso PROV-03.
+
+        `code` (PROV-03, matriz-final-39eeb8e — "cambia la causa, no el
+        síntoma"): la sonda de anthropic salía a `POST
+        api.anthropic.com/chat/completions` (forma OpenAI) → 404 SIEMPRE, con
+        clave válida o no, porque Anthropic nunca ha servido esa ruta (la
+        suya es `/v1/messages`). Clasifica honestamente en vez de un `{ok:
+        false}` plano: None en éxito, "invalid_key" si el endpoint respondió
+        pero rechazó la credencial (401/403), "endpoint_error" si la ruta no
+        existe (404 — base_url mal configurada), None para cualquier otro
+        fallo (se conserva el mensaje real del proveedor en `error`).
+        """
         self._authorize_and_resolve(sender_uid, operation="test_provider")
         from uuid import UUID as _UUID  # noqa: PLC0415
 
-        pid = _UUID(provider_id)
+        try:
+            pid = _UUID(provider_id)
+        except ValueError:
+            return await self._test_native_provider(provider_id=provider_id)
+
         provider = self._provider_repo.get(provider_id=pid)
         api_key = self._provider_repo.reveal_api_key(provider_id=pid)
         try:
-            ok, err = await _nous_validate_provider(provider, api_key)
+            ok, err, code = await _nous_validate_provider(provider, api_key)
         except Exception as exc:  # noqa: BLE001
-            ok, err = False, f"{type(exc).__name__}: {str(exc)[:300]}"
+            ok, err, code = False, f"{type(exc).__name__}: {str(exc)[:300]}", None
         from hermes.shell_server.providers.domain import ProviderConnectivity  # noqa: PLC0415
         from datetime import datetime, timezone  # noqa: PLC0415
 
@@ -1084,7 +1182,7 @@ class DbusRuntimeServiceWiring:
         )
         provider.last_checked_at = datetime.now(tz=timezone.utc)
         self._provider_repo.update(provider=provider)
-        return {"ok": ok, "error": err}
+        return {"ok": ok, "error": err, "code": code}
 
     # ------------------------------------------------------------------
     # Egress (config-sync path) — soberanía daemon-side.
@@ -1621,6 +1719,66 @@ class DbusRuntimeServiceWiring:
             "accounts_linked": report.accounts_linked,
         }
 
+    async def reload_companion_presence(self, *, slug: str, sender_uid: int) -> dict:
+        """Re-read companions.json/bearer for *slug* and re-seed + reconnect
+        its MCP entry WITHOUT restarting the daemon (028 T017).
+
+        authZ: `_authorize_shell_server_caller` — the SAME shell-server-uid-
+        only gate as `mint_companion_owner_assertion` (contracts/sso.md
+        §3): this is a system reconciliation step tied to the install-
+        request lifecycle (T016), never something the operator's own D-Bus
+        session should be able to trigger directly.
+
+        Closes the gap `_import_seed_companion_servers` cannot close on its
+        own: that importer only ever runs once, at boot
+        (`reconnect_persisted_mcp_servers`). If the companion becomes ready
+        AFTER boot (`safent companion install|repair`, T016), the daemon
+        has already passed its one-time reconnect attempt — re-running the
+        SAME seed step here (idempotent: a slug already marked imported is
+        a no-op) plus an explicit reconnect is what makes "ready" appear in
+        the sidebar with zero restart (029 CL-002: hot-reload preferred
+        over a transparent restart).
+
+        The companion's fixed-IP nftables egress rule is deliberately NOT
+        re-triggered here: it is generated by a ROOT-only oneshot from this
+        SAME companions.json, and — since T015 makes that file valid from
+        Safent's very first boot, before any install ever runs — the rule
+        is already correct by the time this verb is ever called. This
+        method only touches what genuinely requires the daemon's own
+        process/uid: the in-memory MCP registry.
+        """
+        self._authorize_shell_server_caller(sender_uid, operation="reload_companion_presence")
+        from hermes.shell_server.companions import get_companion  # noqa: PLC0415
+
+        endpoint = get_companion(slug)
+        if endpoint is None:
+            return {"ok": False, "reason": "not_installed"}
+
+        _import_seed_companion_servers()
+        await self._reconnect_companion_mcp(slug, endpoint)
+
+        checker = self._require_companion_health_checker()
+        report = await checker.check(slug)
+        return {"ok": True, "state": report.state, "reachable": report.reachable}
+
+    async def _reconnect_companion_mcp(self, slug: str, endpoint) -> None:
+        """Best-effort: a reconnect failure must never fail the whole
+        reload — GetCompanionHealth (called right after, by the caller)
+        remains the source of truth for whether the companion is actually
+        reachable."""
+        if self._mcp_manager is None:
+            return
+        try:
+            await _mcp_connect(
+                self._mcp_manager, slug, endpoint.argv,
+                env={"ADS_BEARER": "", "NODE_EXTRA_CA_CERTS": ""},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "hermes.dbus.companion_reload_connect_failed",
+                extra={"slug": slug, "reason": type(exc).__name__},
+            )
+
     async def add_mcp_server(self, *, draft_json: str, sender_uid: int) -> dict:
         """Configura + conecta un servidor MCP stdio. Muta → authZ operador.
 
@@ -1631,13 +1789,18 @@ class DbusRuntimeServiceWiring:
         D-Bus (nunca del LLM — Transport docstring lo exige).
 
         env (BYOK): diccionario opcional de variables de entorno BYOK para el
-        servidor. Solo se permiten claves en _MCP_BYOK_ENV_KEYS; claves
-        arbitrarias son rechazadas (no silenciadas) para evitar inyección.
-        OD_DAEMON_URL se valida como URL http(s). El token OD_API_TOKEN se
-        persiste cifrado en la config y nunca se registra en claro en logs.
-        HOME/MCP_REMOTE_CONFIG_DIR/XDG_CONFIG_HOME pasan la validación (R16)
-        pero el LAUNCHER decide el HOME real del hijo MCP — ver el comentario
-        de _MCP_BYOK_ENV_KEYS.
+        servidor. Cada clave debe cumplir _MCP_ENV_KEY_PATTERN y no estar en
+        el deny-list (_MCP_ENV_DENY_EXACT/_MCP_ENV_DENY_PREFIXES) — ver
+        _validate_mcp_env; una clave que no cumpla es rechazada (no
+        silenciada) para evitar inyección. OD_DAEMON_URL se valida como URL
+        http(s). Los valores nunca se registran en claro en logs (solo los
+        NOMBRES de clave, p.ej. byok_keys=[...]). HOME SÍ pasa esta
+        validación (R16: rechazarla aquí tumbaría todo el draft de un
+        servidor OAuth-bridge cuyo McpSpec.env la incluya) pero el LAUNCHER
+        decide siempre el HOME real del hijo MCP y nunca reenvía el que el
+        caller haya puesto aquí — mismo patrón para
+        MCP_REMOTE_CONFIG_DIR/XDG_CONFIG_HOME (validadas aquí, nunca
+        reenviadas por el launcher).
         """
         self._authorize_and_resolve(sender_uid, operation="add_mcp_server")
         if self._mcp_manager is None:
@@ -2710,6 +2873,10 @@ class DbusRuntimeServiceWiring:
                 "auth_type": getattr(cfg, "auth_type", "api_key"),
                 "base_url": getattr(cfg, "inference_base_url", "") or "",
                 "env_vars": list(getattr(cfg, "api_key_env_vars", ()) or ()),
+                # Suggested model to pre-fill the "Add/Connect" form with — the
+                # owner can still overwrite it. "" when this id has no curated
+                # suggestion (_NATIVE_DEFAULT_MODEL is not exhaustive).
+                "default_model": _NATIVE_DEFAULT_MODEL.get(pid, ""),
             })
         return out
 
@@ -4765,8 +4932,10 @@ class DbusRuntimeServiceWiring:
     def delete_memory_entry(self, *, entry_id: str, sender_uid: int) -> dict:
         """Olvida (borra) una entrada de memoria por su id compuesto '{target}:{index}'.
 
-        Operación idempotente: si la entrada ya no existe devuelve {ok: true}
-        (sin lanzar) para que el frontend pueda hacer DELETE seguro.
+        Si la entrada no existe (nunca existió o ya se borró — no hay
+        tombstone, es el mismo estado) devuelve {ok:false, code:"not_found"}
+        para que la capa REST responda 404, igual que GET/PUT sobre el mismo
+        id (specs/025-safent-repaso MEM-06).
         PII: el contenido NUNCA se loguea, sólo el target e índice (metadatos).
         authZ: operador (sender_uid).
         """
@@ -4806,8 +4975,14 @@ class DbusRuntimeServiceWiring:
             return {"ok": False, "error": f"cannot read target {target!r}: {exc}"}
 
         if entry_index >= len(entries):
-            # Idempotent: already gone.
-            return {"ok": True, "deleted": False, "reason": "entry not found (already removed)"}
+            # specs/025-safent-repaso MEM-06: this used to be treated as
+            # idempotent-success ({ok:true, deleted:false}) — but there is no
+            # tombstone here (removal just shrinks the list), so "never
+            # existed" and "already removed" are the SAME state and both must
+            # read as not-found, matching GET (404) and PUT (400) for the
+            # same id instead of silently reporting a delete that never
+            # happened as a success.
+            return {"ok": False, "code": "not_found", "error": "memory entry not found"}
 
         old_text = entries[entry_index]
         result = store.remove(target, old_text)
@@ -5600,32 +5775,121 @@ class DbusRuntimeServiceWiring:
         return json.dumps({"auto_mode": load_auto_mode()})
 
 
-async def _nous_validate_provider(provider: Any, api_key: str | None) -> "tuple[bool, str | None]":
-    """Valida un provider EJECUTANDO el runtime real (hermes-agent) en el daemon.
+async def _nous_validate_provider(provider: Any, api_key: str | None) -> "tuple[bool, str | None, str | None]":
+    """Valida un provider SQL (shell_server.providers.domain.Provider) EJECUTANDO
+    el runtime real (hermes-agent) en el daemon. Ver _nous_validate_model_string
+    para el camino compartido con el catálogo NATIVO (test_provider, id no-UUID).
+    """
+    from hermes.shell_server.providers.domain import litellm_model_string  # noqa: PLC0415
 
-    Mismo camino que el chat: resolve_runtime_provider (idioma de Hermes) + una
-    completion mínima sin tools. NO litellm, NO shell-server. Corre en el daemon
-    (6G, sin OOM). Devuelve (ok, error_real_del_proveedor).
+    model = litellm_model_string(provider, provider.default_model)
+    return await _nous_validate_model_string(model, api_key, provider.base_url)
+
+
+def _classify_probe_http_status(status: int | None) -> str | None:
+    """Maps an HTTP status from a provider reachability+auth probe to
+    test_provider's `code` (specs/025-safent-repaso PROV-03, matriz-final-
+    39eeb8e): "invalid_key" for a REACHABLE endpoint that rejected the
+    credential, "endpoint_error" for a 404 (wrong base_url/path — the exact
+    shape of the anthropic bug: routing through the OpenAI Chat Completions
+    client always 404s against api.anthropic.com, valid key or not). None
+    for anything else — the caller keeps the raw provider error message.
+    """
+    if status in (401, 403):
+        return "invalid_key"
+    if status == 404:
+        return "endpoint_error"
+    return None
+
+
+_ANTHROPIC_MESSAGES_PATH = "/v1/messages"
+_ANTHROPIC_DEFAULT_BASE_URL = "https://api.anthropic.com"
+_ANTHROPIC_API_VERSION = "2023-06-01"
+
+
+async def _probe_anthropic_messages_api(
+    *, bare_model: str, api_key: str | None, base_url: str | None
+) -> "tuple[bool, str | None, str | None]":
+    """Honest reachability+auth probe against Anthropic's REAL wire format —
+    the Messages API (`x-api-key` + `anthropic-version`, POST /v1/messages) —
+    instead of the OpenAI Chat Completions shape `_nous_validate_model_string`
+    sends every other provider. `api.anthropic.com` has never implemented
+    `/chat/completions`; routing anthropic through the OpenAI-shaped client
+    404s unconditionally, valid key or not, so the Anthropic card never
+    auto-activated (PROV-03, specs/025-safent-repaso matriz-final-39eeb8e).
+
+    Returns (ok, error, code) — same contract as _nous_validate_model_string.
+    """
+    import aiohttp  # noqa: PLC0415
+
+    url = f"{(base_url or _ANTHROPIC_DEFAULT_BASE_URL).rstrip('/')}{_ANTHROPIC_MESSAGES_PATH}"
+    headers = {
+        "x-api-key": api_key or "",
+        "anthropic-version": _ANTHROPIC_API_VERSION,
+        "content-type": "application/json",
+    }
+    body = {
+        "model": bare_model,
+        "max_tokens": 1,
+        "messages": [{"role": "user", "content": "OK"}],
+    }
+    try:
+        async with aiohttp.ClientSession() as session, session.post(
+            url, headers=headers, json=body, timeout=aiohttp.ClientTimeout(total=20.0)
+        ) as resp:
+            status = resp.status
+            text = (await resp.text())[:300]
+    except Exception as exc:  # noqa: BLE001 — surface the REAL network error
+        raw = str(exc).strip()
+        return False, (raw[:300] if raw else type(exc).__name__), None
+
+    if status == 200:
+        return True, None, None
+    return False, (text or f"HTTP {status}"), _classify_probe_http_status(status)
+
+
+async def _nous_validate_model_string(
+    model: str, api_key: str | None, base_url: str | None
+) -> "tuple[bool, str | None, str | None]":
+    """Valida un `<provider_id>/<model>' EJECUTANDO el runtime real (hermes-agent)
+    en el daemon — mismo camino que el chat: resolve_runtime_provider (idioma de
+    Hermes) + una completion mínima sin tools. NO litellm, NO shell-server. Corre
+    en el daemon (6G, sin OOM). Devuelve (ok, error_real_del_proveedor, code).
 
     Migrado (spec 016): usa el catálogo unificado vía nous_request_from_model_config
     en lugar del antiguo _HERMES_SLUG_BY_PREFIX (que tenía 'openai'→'openai-api',
     slug inválido que causaba AuthError).
+
+    Extraído de _nous_validate_provider (specs/025-safent-repaso PROV-03) para que
+    el catálogo NATIVO (ids que no son UUID: "anthropic", "gemini"…) pueda probarse
+    sin construir un Provider SQL falso — ambos caminos ya producían el MISMO
+    '<provider_id>/<model>' vía litellm_model_string, así que el string es la
+    única entrada real que este helper necesita.
+
+    anthropic (`model` con prefijo "anthropic/", el MISMO que litellm_model_string
+    produce tanto para el catálogo nativo como para una fila SQL kind=anthropic)
+    se enruta a _probe_anthropic_messages_api en vez del cliente OpenAI de abajo
+    — ver esa función para la causa raíz (PROV-03, matriz-final-39eeb8e).
     """
+    provider_prefix, _sep, bare_model = model.partition("/")
+    if provider_prefix == "anthropic":
+        return await _probe_anthropic_messages_api(
+            bare_model=bare_model, api_key=api_key, base_url=base_url
+        )
+
     import asyncio  # noqa: PLC0415
 
-    from hermes.shell_server.providers.domain import litellm_model_string  # noqa: PLC0415
     from hermes.runtime.model_config import ModelConfig  # noqa: PLC0415
     from hermes.providers.infrastructure.nous_provider_adapter import (  # noqa: PLC0415
         nous_request_from_model_config,
     )
 
-    model = litellm_model_string(provider, provider.default_model)
     # Build a temporary ModelConfig to reuse nous_request_from_model_config.
-    # api_key comes from the caller (already decrypted by the D-Bus handler).
+    # api_key comes from the caller (already decrypted/looked-up by the D-Bus handler).
     temp_config = ModelConfig.from_provider(
         model=model,
         api_key=api_key,
-        base_url=provider.base_url or None,
+        base_url=base_url or None,
     )
     req, bare = nous_request_from_model_config(temp_config)
 
@@ -5670,8 +5934,9 @@ async def _nous_validate_provider(provider: Any, api_key: str | None) -> "tuple[
         ok, err = await loop.run_in_executor(None, _run)
     except Exception as exc:  # noqa: BLE001 — surface the REAL provider error
         raw = str(exc).strip()
-        return False, (raw[:300] if raw else type(exc).__name__)
-    return ok, err
+        code = _classify_probe_http_status(getattr(exc, "status_code", None))
+        return False, (raw[:300] if raw else type(exc).__name__), code
+    return ok, err, None
 
 
 def _uid_to_uuid(uid: int) -> UUID:
@@ -7118,72 +7383,148 @@ def _prefetch_git_mcp(server_id: str, git_spec: str) -> None:
     )
 
 
-# BYOK env keys permitted in MCP server entries. Mirrors _ALLOWED_ENV_KEYS in
-# hermes-mcp-launcher — both gates must stay in sync; a key allowed here but
-# not in the launcher will be silently discarded at spawn time.
-# Expanding this set is a security-posture decision: add only named, bounded
-# variables for specific published MCP servers; never allow arbitrary keys.
+# MCP-05 root cause (spec 025 matriz, fixed): the fixed frozenset below WAS
+# the allowlist ("BYOK env keys permitted in MCP server entries") — the
+# form's OWN placeholder (McpView.tsx, `mcp.env.label`: "BRAVE_API_KEY=br-
+# xxx") named a key that was never IN it, so anyone who followed the UI's own
+# example got a raw 400 back. A hand-curated per-server allowlist can never
+# keep up with "any published MCP server that needs one bounded secret" — the
+# fix is a VALIDATED PATTERN (any plausible env-var name) plus a DENY-list of
+# names that are actually dangerous to hand an MCP child, not a per-service
+# allowlist that must be edited (in TWO files, this one and hermes-mcp-
+# launcher's _ALLOWED_ENV_KEYS, "both gates must stay in sync") every time a
+# new server ships.
+_MCP_ENV_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{2,63}$")
+
+# Security review 2026-09-10 (H-1, verdict SHIP WITH FIXES on 4030b54..f7a3a2d):
+# a reimplementation of both BYOK gates enumerated ~70 dangerous env names and
+# found ~50 passing both — TLS-trust overrides for every runtime OTHER than
+# OpenSSL (NODE_EXTRA_CA_CERTS, NODE_TLS_REJECT_UNAUTHORIZED, REQUESTS_CA_
+# BUNDLE, CURL_CA_BUNDLE), interpreter/shell hijack knobs the PYTHON*/LD_*
+# entries never generalised to (BASH_ENV, PERL5OPT, RUBYOPT, NODE_PATH,
+# ELECTRON_RUN_AS_NODE, JAVA_TOOL_OPTIONS, GODEBUG, ...), and this product's
+# own package-manager/registry knobs (GIT_*, UV_*, PIP_*, NPM_CONFIG_*).
 #
-# 2026-07-07 (R16) — HOME/MCP_REMOTE_CONFIG_DIR/XDG_CONFIG_HOME: OAuth-bridge
-# servers (mcp-remote, used by the managed-remote "safent-control" MCP) write a
-# local token cache and need a writable HOME. These are validated HERE (so a
-# bundle/BYOK draft carrying them does not hard-fail add_mcp_server wholesale —
-# see _validate_mcp_env, which rejects the ENTIRE draft on any unrecognised
-# key) but are DELIBERATELY NOT mirrored into the launcher's
-# _ALLOWED_ENV_KEYS for HOME: the launcher's own unit env already pins a
-# writable, group-writable HOME (/var/lib/hermes/mcp-home) for every MCP
-# child, and letting a caller (even a signed cloud bundle) override it risks
-# repointing HOME at a path the jailed MCP child cannot write (exactly the
-# EACCES this class of bug produces — see hermes-mcp-launcher's own comment
-# on _ALLOWED_ENV_KEYS). MCP_REMOTE_CONFIG_DIR/XDG_CONFIG_HOME are validated
-# here but likewise not forwarded by the launcher: they fall back to
-# $HOME/.mcp-auth / $HOME/.config, both writable once HOME is launcher-pinned.
-_MCP_BYOK_ENV_KEYS: frozenset[str] = frozenset({
-    "OD_DAEMON_URL",
-    "OD_API_TOKEN",
-    "OD_AUTH_MODE",
-    "OD_BASIC_USER",
-    "OD_BASIC_PASS",
-    # Curated pack (published servers, named/bounded BYOK secrets — mirror in
-    # hermes-mcp-launcher._ALLOWED_ENV_KEYS):
-    # REPLICATE_API_TOKEN — Replicate MCP (replicate-mcp): imagen + vídeo.
-    # CONTEXT7_API_KEY    — Context7 MCP: docs de librerías al día para código.
-    "REPLICATE_API_TOKEN",
-    "CONTEXT7_API_KEY",
-    # Ruflo MCP (ruflo): endpoint OpenAI-compatible → enruta a nuestro LLM nativo.
-    "OPENAI_BASE_URL",
-    "OPENAI_API_KEY",
-    # OAuth-bridge servers (mcp-remote / safent-control). NOT mirrored into the
-    # launcher's _ALLOWED_ENV_KEYS — see the block comment above.
-    "HOME",
-    "MCP_REMOTE_CONFIG_DIR",
-    "XDG_CONFIG_HOME",
-    # safent-ads companion (024): declared-empty placeholders in the seeded
-    # entry, filled at connect time from hermes.shell_server.companions (see
-    # _mcp_connect) — never from a caller-supplied value (ADS_BEARER can only
-    # ever be FILLED here, the same fill-only discipline as OPENAI_API_KEY
-    # above; a caller passing a non-empty value would be ignored, not trusted).
-    "ADS_BEARER",
-    "NODE_EXTRA_CA_CERTS",
+# _MCP_ENV_DENY_EXACT_CORE / _MCP_ENV_DENY_PREFIXES_CORE are the SHARED
+# source of truth — hermes-mcp-launcher's own _BYOK_ENV_DENY_EXACT_CORE /
+# _BYOK_ENV_DENY_PREFIXES MUST stay byte-identical (duplicated on purpose,
+# no runtime cross-import across that root-privilege boundary — see that
+# script's own note); tests/unit/agents_os/test_validate_mcp_env.py::
+# TestDenyListParityWithTheLauncher parses both literals and asserts they
+# match, so the two can never silently drift again the way the original
+# fixed allowlist did (MCP-05).
+#
+# Exact names — each one either re-points a resource the launcher/daemon
+# ALREADY pins correctly for every MCP child (PATH, NODE_OPTIONS — see
+# hermes-mcp-launcher's own _ALWAYS_FORWARDED_ENV_KEYS comment), defeats a
+# defense-in-depth layer (UV_OFFLINE — MEDIUM finding, forces uv/uvx's
+# OWN internal resolution back online even though the --offline argv
+# injection still covers argv[0]), is a TLS-trust override (the NODE_*/
+# REQUESTS_CA_BUNDLE/CURL_CA_BUNDLE family — MITM of the MCP child's own
+# outbound TLS), an interpreter/shell startup hijack (BASH_ENV, ENV,
+# SHELLOPTS, PS4, IFS, PERL5OPT/PERL5LIB, RUBYOPT/RUBYLIB, GODEBUG/GOFLAGS,
+# CLASSPATH, NIX_LD, MALLOC_CONF, GCONV_PATH, LOCPATH), or a network
+# interception knob (the http(s)_proxy family).
+#
+# TERMINFO/TERMINFO_DIRS/TMPDIR/TEMP/TMP: no legitimate BYOK secret is ANY
+# of these; TMPDIR doubles as defense-in-depth for the launcher's own
+# _INTERNAL_ENV_KEYS (that daemon-set exact match is checked BEFORE this
+# deny-list there, so it is unaffected).
+_MCP_ENV_DENY_EXACT_CORE: frozenset[str] = frozenset({
+    "PATH", "NODE_OPTIONS", "NODE_PATH", "ELECTRON_RUN_AS_NODE",
+    "UV_OFFLINE",
+    "NODE_TLS_REJECT_UNAUTHORIZED", "NODE_EXTRA_CA_CERTS",
+    "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+    "BASH_ENV", "ENV", "SHELLOPTS", "PS4", "IFS",
+    "PERL5OPT", "PERL5LIB", "RUBYOPT", "RUBYLIB",
+    "GODEBUG", "GOFLAGS", "CLASSPATH", "JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS",
+    "NIX_LD", "MALLOC_CONF", "GCONV_PATH", "LOCPATH",
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "FTP_PROXY",
+    "TERMINFO", "TERMINFO_DIRS", "TMPDIR", "TEMP", "TMP",
 })
+# Prefixes — LD_* (dynamic linker — library injection/preload into whatever
+# the launcher execs), PYTHON* (interpreter path/startup hijack), HERMES_*
+# (impersonates the daemon's OWN config surface — every Environment= this
+# product's units set is HERMES_* or one of the exact names above),
+# SSL_CERT_* (OpenSSL trust store override), NODE_*/GIT_*/UV_*/PIP_*/
+# NPM_CONFIG_*/JAVA_*/JDK_*/_JAVA/DOTNET_ (the same class of runtime/package-
+# manager hijack as the exact names above, generalised to every variable a
+# given tool family recognises — e.g. GIT_SSH_COMMAND, PIP_INDEX_URL,
+# NPM_CONFIG_REGISTRY), XDG_*/DYLD_* (loader/base-dir redirection),
+# SAFENT_* (this product's own CLI/provisioning surface, never BYOK input).
+_MCP_ENV_DENY_PREFIXES_CORE: tuple[str, ...] = (
+    "LD_", "PYTHON", "HERMES_", "SSL_CERT_",
+    "NODE_", "GIT_", "UV_", "PIP_", "NPM_CONFIG_", "XDG_", "DYLD_",
+    "JAVA_", "JDK_", "_JAVA", "SAFENT_", "DOTNET_",
+)
+
+# HOME is deliberately NOT in the core deny set (R16, test_r16_mcp_bridge_
+# handshake.py::TestByokEnvKeysAcceptOAuthBridgeVars): the cloud's
+# McpSpec.env for a MANAGED_REMOTE/OAuth-bridge server (mcp-remote)
+# legitimately carries HOME — rejecting it HERE would hard-fail the entire
+# add_mcp_server draft before it ever reaches scan/prefetch/connect (R16's
+# original root cause #1), not just leave HOME unused. It is still NEVER
+# honoured as an override: the launcher (hermes-mcp-launcher._is_allowed_
+# env_key) denies it independently and always forwards its OWN HOME instead
+# (_ALWAYS_FORWARDED_ENV_KEYS).
+#
+# ADS_BEARER is the daemon-only inverse of that same split (H-1 follow-up,
+# "make NODE_EXTRA_CA_CERTS fill-only like ADS_BEARER" — this module's own
+# prior comment claimed ADS_BEARER was already ignored-if-caller-supplied,
+# which _autowire_companion_env's `if not resolved_env.get(...)` fill-only-
+# when-EMPTY check does not actually enforce; denying both HERE makes that
+# claim true instead of just documented): _autowire_companion_env fills
+# ADS_BEARER/NODE_EXTRA_CA_CERTS from hermes.shell_server.companions at
+# CONNECT time (trusted, daemon-controlled, never persisted — INV-4).
+# Denying them at THIS caller-facing gate means the only way either key ever
+# gets a value is that fill step, never a caller-supplied add_mcp_server
+# draft. NODE_EXTRA_CA_CERTS is already covered by the shared NODE_ prefix
+# above; ADS_BEARER needs its own entry (no shared prefix covers it) and is
+# intentionally NOT added to the launcher's deny-list — the launcher MUST
+# still forward the daemon-injected value once autowire has filled it (see
+# hermes-mcp-launcher's own _LAUNCHER_ALLOW_DESPITE_DENY for the NODE_
+# prefix's own equivalent carve-out).
+_MCP_ENV_DENY_EXACT: frozenset[str] = _MCP_ENV_DENY_EXACT_CORE | frozenset({"ADS_BEARER"})
+_MCP_ENV_DENY_PREFIXES: tuple[str, ...] = _MCP_ENV_DENY_PREFIXES_CORE
+
+# The new XDG_ deny prefix would otherwise ALSO catch XDG_CONFIG_HOME, which
+# R16 (test_r16_mcp_bridge_handshake.py::TestByokEnvKeysAcceptOAuthBridgeVars)
+# already accepts here for the exact same reason HOME does: a MANAGED_REMOTE/
+# OAuth-bridge draft's McpSpec.env legitimately carries it and rejecting it
+# would hard-fail add_mcp_server before scan/prefetch/connect. Same asymmetry
+# as HOME — the launcher still never forwards it (_NEVER_FORWARDED_KEYS).
+_MCP_ENV_ALLOW_DESPITE_DENY: frozenset[str] = frozenset({"XDG_CONFIG_HOME"})
+
+
+def _is_denied_mcp_env_key(key: str) -> bool:
+    """Case-insensitive on purpose: the allow PATTERN only ever matches
+    upper-case names, but the deny-list must not be dodged by a caller
+    exploiting some future loosening of that pattern (defense in depth —
+    matches this module's own fail-closed-on-both-sides style)."""
+    upper = key.upper()
+    if upper in _MCP_ENV_ALLOW_DESPITE_DENY:
+        return False
+    return upper in _MCP_ENV_DENY_EXACT or upper.startswith(_MCP_ENV_DENY_PREFIXES)
 
 
 def _validate_mcp_env(raw: object) -> dict[str, str]:
     """Validate and sanitise a caller-supplied BYOK env dict.
 
-    Returns a clean dict whose keys are a subset of _MCP_BYOK_ENV_KEYS and
-    whose values are non-empty strings. Raises ValueError on any violation.
+    Returns a clean dict of str->non-empty-str. Raises ValueError on any
+    violation — the message never echoes a VALUE, only key names and the
+    rule that rejected them (values are secrets; never logged in clear).
 
     Security invariants:
-      - Only explicitly allowlisted keys pass through; arbitrary keys are
-        rejected, not silently dropped — fail-loud on unknown keys so
-        callers notice misconfiguration rather than silently missing env.
+      - A key must match _MCP_ENV_KEY_PATTERN (`^[A-Z][A-Z0-9_]{2,63}$` —
+        the shape of every real env-var name a published MCP server's docs
+        ever ask for) AND must not be on the deny-list
+        (_MCP_ENV_DENY_EXACT / _MCP_ENV_DENY_PREFIXES) — fail-loud on
+        anything else so callers notice misconfiguration rather than
+        silently missing env.
       - Values must be strings; empty strings are rejected (would confuse the
         MCP server just as much as missing env vars).
       - OD_DAEMON_URL must parse as an http(s) URL (scheme + netloc present).
         This prevents open-design-mcp from being pointed at file://, data://, etc.
-      - OD_API_TOKEN is passed through opaquely; it MUST NOT be logged in
-        clear — callers must use the masked helpers below.
     """
     if not isinstance(raw, dict):
         raise ValueError("env debe ser un diccionario str→str")
@@ -7191,11 +7532,13 @@ def _validate_mcp_env(raw: object) -> dict[str, str]:
     for key, val in raw.items():
         if not isinstance(key, str):
             raise ValueError(f"clave de env no es string: {key!r}")
-        if key not in _MCP_BYOK_ENV_KEYS:
+        if not _MCP_ENV_KEY_PATTERN.match(key):
             raise ValueError(
                 f"clave de env no permitida: {key!r} "
-                f"(allowlist: {sorted(_MCP_BYOK_ENV_KEYS)})"
+                f"(debe cumplir {_MCP_ENV_KEY_PATTERN.pattern!r})"
             )
+        if _is_denied_mcp_env_key(key):
+            raise ValueError(f"clave de env no permitida: {key!r} (reservada por el sistema)")
         if not isinstance(val, str) or not val:
             raise ValueError(f"valor de env para {key!r} debe ser string no vacío")
         if key == "OD_DAEMON_URL":

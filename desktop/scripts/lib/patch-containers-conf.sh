@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# patch-containers-conf.sh — one function, `patch_containers_conf_for_bundled_helpers`,
-# the exact transformation stage-runtime.sh applies to the upstream
-# podman-static containers.conf so the bundled podman finds ITS OWN bundled
-# netavark/aardvark-dns/rootlessport (and uses pasta) instead of silently
-# falling back to whatever happens to already be installed on the host.
-# Sourced, never executed directly — kept separate from stage-runtime.sh so
-# this transformation is testable on its own (tests/test-patch-containers-conf.sh).
-#
+# patch-containers-conf.sh — two composable transformations stage-runtime.sh
+# applies to the upstream podman-static containers.conf, both merged from
+# independent lanes finding independent, real, complementary bugs against
+# the SAME file. Sourced, never executed directly — kept separate from
+# stage-runtime.sh so each transformation is testable on its own
+# (tests/test-patch-containers-conf.sh).
+set -uo pipefail
+
 # Confirmed on this DGX (2026-09-10, see runtime-manifest.lock's
 # containers_conf_patch note and research.md for the full investigation):
 # WITHOUT helper_binaries_dir, a bundled podman on a host that happens to
@@ -14,8 +14,6 @@
 # bundled one (observed: fell back to system netavark 1.4.0 instead of the
 # bundled 2.1.0). This is exactly the "depends on what's already on the
 # machine" failure the whole point of bundling exists to avoid.
-set -uo pipefail
-
 patch_containers_conf_for_bundled_helpers() {
   local conf="$1"
   [ -f "$conf" ] || { echo "[x] patch_containers_conf_for_bundled_helpers: not a file: $conf" >&2; return 1; }
@@ -33,4 +31,22 @@ patch_containers_conf_for_bundled_helpers() {
 [network]
 default_rootless_network_cmd = "pasta"
 EOF
+}
+
+# Reproduced live on this same DGX by another lane (specs/028-safent-app-nativa/
+# verificacion-paquete-linux.md, "Pasada 1"): "failed to open 2048 locks in
+# /libpod_rootless_lock_1000: numerical result out of range" — a bundled
+# static/musl podman and the host's own glibc podman/docker, run as the same
+# uid, collide on ONE shared /dev/shm rootless-lock segment that each libc's
+# pthread_mutex_t layout sizes differently. `lock_type = "file"` switches to
+# per-storage-tree file locks instead of a segment shared by uid alone — no
+# collision possible, regardless of what else is installed on the host.
+# Idempotent: a second call on an already-patched file is a no-op.
+patch_containers_conf_for_isolated_locks() {
+  local conf="$1"
+  [ -f "$conf" ] || { echo "[x] patch_containers_conf_for_isolated_locks: not a file: $conf" >&2; return 1; }
+  grep -q '^\[engine\]$' "$conf" || { echo "[x] patch_containers_conf_for_isolated_locks: no [engine] section in $conf" >&2; return 1; }
+  grep -q '^lock_type' "$conf" && return 0
+
+  sed -i '/^\[engine\]$/a lock_type = "file"' "$conf"
 }

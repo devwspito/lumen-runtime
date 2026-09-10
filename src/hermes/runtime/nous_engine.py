@@ -303,6 +303,15 @@ _MEMORY_PROMPT_TTL_S: float = 20.0
 # ActiveProviderService TTL so a provider switch takes effect within one period.
 _RUNTIME_PROVIDER_CACHE: dict[int, tuple[float, tuple]] = {}  # key → (expires_at, (rt, bare))
 _RUNTIME_PROVIDER_TTL_S: float = 30.0
+# Bumped by clear_runtime_provider_cache() on every provider switch. Guards a
+# write-after-clear race (specs/025-safent-repaso PROV-05): _resolve_hermes_
+# runtime() runs OUTSIDE _CACHE_LOCK (it's a blocking disk+SDK read, must not
+# hold the lock), so a cycle that started resolving BEFORE a switch can still
+# be mid-flight when clear_runtime_provider_cache() empties the dict, and
+# then write its STALE result back in AFTER the clear — re-poisoning the
+# cache with the OLD provider for a full new TTL window even though the
+# switch already landed. See _cached_resolve_hermes_runtime.
+_RUNTIME_PROVIDER_EPOCH: int = 0
 
 
 def _resolve_local_tz():
@@ -419,15 +428,27 @@ def _cached_resolve_hermes_runtime(engine_id: int, model_config: "ModelConfig") 
     FIX D: resolving the provider reads disk / an in-memory registry. Caching
     for 30s avoids re-reading per-message while still reacting to provider
     changes within one TTL window (same as ActiveProviderService).
+
+    PROV-05: the write-back is guarded by _RUNTIME_PROVIDER_EPOCH so a slow
+    resolve that started BEFORE a concurrent provider switch cannot clobber a
+    fresher post-switch cache entry once it finally finishes — see the epoch
+    comment above _RUNTIME_PROVIDER_EPOCH for the exact race.
     """
     now = _time.monotonic()
     with _CACHE_LOCK:
         entry = _RUNTIME_PROVIDER_CACHE.get(engine_id)
+        epoch_at_read = _RUNTIME_PROVIDER_EPOCH
     if entry is not None and now < entry[0]:
         return entry[1]  # type: ignore[return-value]
     value = _resolve_hermes_runtime(model_config)
     with _CACHE_LOCK:
-        _RUNTIME_PROVIDER_CACHE[engine_id] = (now + _RUNTIME_PROVIDER_TTL_S, value)
+        if _RUNTIME_PROVIDER_EPOCH == epoch_at_read:
+            _RUNTIME_PROVIDER_CACHE[engine_id] = (now + _RUNTIME_PROVIDER_TTL_S, value)
+        # else: a switch landed while this resolve was in flight — `value` is
+        # still the RIGHT answer for THIS turn (it reflects whatever config
+        # was on disk when we started), but caching it would serve the OLD
+        # provider to the NEXT turn for up to another TTL window. Let the
+        # next call re-resolve fresh instead of trusting this stale write.
     return value
 
 
@@ -439,9 +460,16 @@ def clear_runtime_provider_cache() -> None:
     anterior. Sin esto, un cambio de proveedor hecho más rápido que el TTL
     parece "no surtir efecto" — el motor sigue completando contra el provider
     viejo aunque config.yaml ya esté actualizado (bug real: ver
-    specs/025-safent-repaso, hallazgo #1)."""
+    specs/025-safent-repaso, hallazgo #1).
+
+    Also bumps _RUNTIME_PROVIDER_EPOCH (PROV-05) so a resolve that was
+    already in flight when this clear happens can't re-poison the cache with
+    its stale result once it completes — see _cached_resolve_hermes_runtime.
+    """
+    global _RUNTIME_PROVIDER_EPOCH
     with _CACHE_LOCK:
         _RUNTIME_PROVIDER_CACHE.clear()
+        _RUNTIME_PROVIDER_EPOCH += 1
 
 
 # ---------------------------------------------------------------------------

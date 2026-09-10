@@ -43,6 +43,21 @@ def _channel() -> AuthenticatedChannel:
     return AuthenticatedChannel(sender_uid=_OPERATOR_UID)
 
 
+def _audit_deps(tmp_path: Path):
+    """Real signer+audit_repo for SqliteAgentState — mandatory since CLI-N4
+    (specs/025-safent-repaso matriz-final-39eeb8e): these tests only care
+    about status() persistence, not the audit chain content, but the state
+    object now refuses to construct without them."""
+    import os
+
+    from hermes.agents_os.application.audit_hash_chain import AuditHashChainSigner
+    from hermes.agents_os.infrastructure.sqlite_audit_repository import SqliteAuditRepository
+
+    signer = AuditHashChainSigner(signing_key=os.urandom(32))
+    audit_repo = SqliteAuditRepository(db_path=tmp_path / "audit.db")
+    return signer, audit_repo
+
+
 def _make_service(state) -> ControlPlaneService:
     return ControlPlaneService(
         queue=InMemoryWorkQueue(),
@@ -88,12 +103,13 @@ class TestSqliteAgentStateStatusPersistsAcrossRestart:
     @pytest.mark.asyncio
     async def test_engaged_state_survives_new_instance_same_db_path(self, tmp_path: Path) -> None:
         db_path = tmp_path / "shell-state.db"
-        first = SqliteAgentState(db_path=db_path)
+        signer, audit_repo = _audit_deps(tmp_path)
+        first = SqliteAgentState(db_path=db_path, signer=signer, audit_repo=audit_repo)
         await first.pause(by=_OPERATOR, reason="restart test")
 
         # A restart re-constructs the state object pointed at the SAME file —
         # nothing carries over in-process (no singleton), only the file does.
-        second = SqliteAgentState(db_path=db_path)
+        second = SqliteAgentState(db_path=db_path, signer=signer, audit_repo=audit_repo)
         status = await second.status()
 
         assert status["engaged"] is True
@@ -103,11 +119,12 @@ class TestSqliteAgentStateStatusPersistsAcrossRestart:
     @pytest.mark.asyncio
     async def test_released_state_also_survives_restart(self, tmp_path: Path) -> None:
         db_path = tmp_path / "shell-state.db"
-        first = SqliteAgentState(db_path=db_path)
+        signer, audit_repo = _audit_deps(tmp_path)
+        first = SqliteAgentState(db_path=db_path, signer=signer, audit_repo=audit_repo)
         await first.pause(by=_OPERATOR, reason="temporary")
         await first.resume(by=_OPERATOR)
 
-        second = SqliteAgentState(db_path=db_path)
+        second = SqliteAgentState(db_path=db_path, signer=signer, audit_repo=audit_repo)
         status = await second.status()
 
         assert status["engaged"] is False

@@ -29,12 +29,12 @@ class InMemoryAgentState:
         self._changed_at = datetime.now(tz=UTC).isoformat()
         self.pause_calls.append({"by": by, "reason": reason})
 
-    async def resume(self, *, by: UUID | None) -> None:
+    async def resume(self, *, by: UUID | None, reason: str = "") -> None:
         self._paused = False
         self._reason = None
         self._changed_by = by
         self._changed_at = datetime.now(tz=UTC).isoformat()
-        self.resume_calls.append({"by": by})
+        self.resume_calls.append({"by": by, "reason": reason})
 
     async def status(self) -> dict:
         return {

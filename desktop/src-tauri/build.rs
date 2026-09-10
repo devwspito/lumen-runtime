@@ -8,6 +8,8 @@ fn main() {
             "install_podman",
             "read_host_clipboard",
             "write_host_clipboard",
+            "cancel_bootstrap",
+            "retry_bootstrap",
         ]),
     ))
     .expect("failed to run tauri-build");

@@ -317,3 +317,37 @@ class TestRejectedAccessIsAudited:
             "5 rechazos consecutivos del MISMO cliente deben producir 1 sola "
             f"línea de log (rate-limit), no {len(hits)} — riesgo de flood."
         )
+
+
+class TestApiSurfaceListingRequiresAuth:
+    """A-07 (specs/025-safent-repaso matriz-final-39eeb8e): /openapi.json was
+    served 200 with NO bearer while every /api/v1/* route it describes gave
+    401 — handing the full API surface (71 GET routes + the rest) to anyone
+    who reaches the port. Structural, not a hardcoded path: walks every doc
+    route FastAPI itself knows about (`app.openapi_url`/`docs_url`/
+    `redoc_url`) so a future re-enable of /docs or /redoc can't reopen the
+    same hole silently.
+    """
+
+    def test_no_doc_route_is_reachable_unauthenticated(
+        self, app: Any, client: TestClient
+    ) -> None:
+        doc_paths = [p for p in (app.openapi_url, app.docs_url, app.redoc_url) if p]
+        assert doc_paths, "openapi_url must be set — nothing to protect otherwise"
+        failures = [
+            f"{path} -> {resp.status_code}"
+            for path in doc_paths
+            if (resp := client.get(path)).status_code not in (401, 403)
+        ]
+        assert not failures, (
+            "Doc/schema routes served WITHOUT a bearer — they hand the API "
+            "surface to anyone who reaches the port:\n" + "\n".join(failures)
+        )
+
+    def test_openapi_json_reaches_the_handler_with_a_valid_bearer(
+        self, app: Any, client: TestClient
+    ) -> None:
+        token = app.state.mint_session_token()
+        resp = client.get(app.openapi_url, headers={"Authorization": f"Bearer {token}"})
+        assert resp.status_code == 200
+        assert resp.json()["info"]["title"]

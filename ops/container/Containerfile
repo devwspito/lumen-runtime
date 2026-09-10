@@ -248,6 +248,12 @@ COPY ops/container/seccomp/safent.json /usr/share/hermes/seccomp/safent.json
 # raw.githubusercontent.com.
 COPY ops/container/companions/ads/ /usr/share/hermes/companions/ads/
 
+# runtime-manifest.json's trusted minisign public key (contracts/update.md
+# §2, T005/T006) — baked so the daemon verifies without a network fetch.
+# ops/keys/runtime-manifest.pub is a PLACEHOLDER until the agents-autonomy
+# publish pipeline (T023) commits the real one; see that file's own comment.
+COPY ops/keys/runtime-manifest.pub /usr/share/hermes/keys/runtime-manifest.pub
+
 # ── Egress blocklist (hagezi "light" — bundled at build time) ─────────────────
 # Proxy reads /usr/share/hermes/egress-blocklist.txt at boot and applies it as an
 # immutable system-level blocklist in OPEN_LOGGED (ALLOW) mode. The file is plain

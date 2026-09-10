@@ -8,9 +8,14 @@
  *
  * "no_accounts" is NOT treated as blocked: the companion's own panel
  * guides account connection, so Ads stays fully usable either way.
+ *
+ * `not_installed` additionally renders the SAME "Instalar" affordance as the
+ * Herramientas Ads card (CompanionInstallAction) — one flow, two entry
+ * points (029 FR-001).
  */
 import { NavLink } from 'react-router-dom'
 import { useT } from '../lib/i18n'
+import { CompanionInstallAction } from './CompanionInstallAction'
 import type { AdsAvailability } from '../hooks/useAdsAvailability'
 
 function AdsIcon() {
@@ -54,6 +59,9 @@ export function AdsNavItem({ availability }: AdsNavItemProps) {
         <span id="ads-nav-status" className="sr-only">
           {t(`ads.state.${reason}.title`)}
         </span>
+      )}
+      {reason === 'not_installed' && (
+        <CompanionInstallAction availability={availability} compact />
       )}
     </li>
   )

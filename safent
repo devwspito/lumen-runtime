@@ -31,8 +31,15 @@ PORT_PIN="${SAFENT_PORT:-}"
 # the tenant's cloud instead of the default https://cloud.safent.run.
 CLOUD_ENDPOINT="${SAFENT_CLOUD_ENDPOINT:-}"
 # Named volume that holds the persistent state (config, identity, skills, memory).
-# Override SAFENT_DATA_VOLUME to run more than one isolated instance on one host.
-DATA_VOLUME="${SAFENT_DATA_VOLUME:-safent-data}"
+# Derived from NAME (matches ops/container/run-safent.sh:110's own
+# VOLUME="${NAME}-data") so a second instance with its own SAFENT_NAME gets
+# its own volume automatically — the old hardcoded "safent-data" default
+# meant ANY differently-named instance silently mounted the FIRST instance's
+# volume (verificacion-paquete-linux.md §6: reproduced live, an unrelated
+# volume already existed under that exact name on a real host). Override
+# SAFENT_DATA_VOLUME directly for the rare case a name-derived default isn't
+# wanted.
+DATA_VOLUME="${SAFENT_DATA_VOLUME:-${NAME}-data}"
 # Graceful stop (item #2, spec 025 matriz): PID1 is systemd, which needs
 # SIGRTMIN+3 (not SIGTERM) to begin an orderly shutdown of every unit —
 # STOPSIGNAL SIGRTMIN+3 is baked into the image, but pinning it here too
@@ -43,7 +50,12 @@ DATA_VOLUME="${SAFENT_DATA_VOLUME:-safent-data}"
 STOP_SIGNAL="SIGRTMIN+3"
 STOP_TIMEOUT_S="${SAFENT_STOP_TIMEOUT_S:-30}"
 SECCOMP_URL="${SAFENT_SECCOMP_URL:-https://raw.githubusercontent.com/devwspito/safent-runtime/main/ops/container/seccomp/safent.json}"
-SECCOMP_DIR="${HOME:-/tmp}/.safent"
+# Root of ALL local Safent state (contracts/app-engine.md §1: "un solo arbol
+# de estado"). The desktop app pins this to its own sandboxed profile dir so
+# a bundled install never touches a terminal user's ~/.safent; a bare
+# terminal install keeps today's default unchanged.
+SAFENT_STATE_HOME="${SAFENT_STATE_HOME:-${HOME:-/tmp}/.safent}"
+SECCOMP_DIR="$SAFENT_STATE_HOME"
 SECCOMP="$SECCOMP_DIR/safent-seccomp.json"
 # Where `safent update` fetches the newest CLI from (same source the installer uses).
 CLI_URL="${SAFENT_CLI_URL:-https://raw.githubusercontent.com/devwspito/safent-runtime/main/safent}"
@@ -54,11 +66,25 @@ CLI_URL="${SAFENT_CLI_URL:-https://raw.githubusercontent.com/devwspito/safent-ru
 # $COMPANION_BIN_DIR the same three-tier way _ensure_seccomp gets the
 # seccomp profile below (image > raw GitHub > cache), so there is exactly
 # ONE implementation of provisioning, never a copy embedded in this CLI.
-COMPANION_STATE="${SAFENT_COMPANION_STATE:-$HOME/.safent/companions/ads}"
-COMPANION_BIN_DIR="${HOME:-/tmp}/.safent/companions/ads/bin"
+COMPANION_STATE="${SAFENT_COMPANION_STATE:-$SAFENT_STATE_HOME/companions/ads}"
+# Exported (not just a local shell var): provision.sh runs as a SEPARATE
+# process and only ever reads SAFENT_COMPANION_STATE itself — it has no idea
+# SAFENT_STATE_HOME exists. Without this export, a caller that sets
+# SAFENT_STATE_HOME but not SAFENT_COMPANION_STATE (the desktop app's own
+# sandboxed profile dir, app-engine.md §1) gets a silent split-brain: this
+# CLI computes COMPANION_STATE/the bind-mount paths from SAFENT_STATE_HOME,
+# while provision.sh independently falls back to $HOME/.safent/companions/ads
+# and writes there instead — the binds then point at a directory nothing
+# ever populated.
+export SAFENT_COMPANION_STATE="$COMPANION_STATE"
+COMPANION_BIN_DIR="$SAFENT_STATE_HOME/companions/ads/bin"
 COMPANION_RAW_BASE="${SAFENT_COMPANION_URL_BASE:-https://raw.githubusercontent.com/devwspito/safent-runtime/main/ops/container/companions/ads}"
 COMPANION_RUN_ARGS=""
 NO_COMPANION=0
+# --porcelain (contracts/app-engine.md): NDJSON events on stdout instead of
+# human text. Parsed from anywhere in argv near the bottom of this script
+# (it trails the verb per the contract, unlike --no-companion above).
+PORCELAIN=0
 # Product constants (provision.sh §"Product constants") — mirrored here (never
 # re-derived at runtime) so `safent companion status|rotate` can reach the
 # companion WITHOUT re-running provision.sh.
@@ -67,9 +93,12 @@ COMPANION_HOST="ads.safent.internal"
 COMPANION_PORT="8443"
 COMPANION_IP="10.201.0.10"
 COMPANION_COMPOSE="$COMPANION_BIN_DIR/compose.yaml"
-case "${1:-}" in
-  --no-companion) NO_COMPANION=1; shift ;;
-esac
+# --no-companion itself is recognized from ANY position, not only $1 — see
+# the --porcelain filter loop below, which now also catches this flag.
+# (Previously position-locked to $1 only: the Tauri adapter always invokes
+# `<cli_path> <verb> [args] --porcelain`, verb first, so it had no way to
+# request --no-companion at all — packaging review item 4/
+# verificacion-paquete-linux.md §6.)
 
 # GUI-launched contexts hand this script a MINIMAL PATH: a launchd LaunchAgent (the
 # `safent agent` update watcher) and a Finder-launched .app both run with roughly
@@ -84,15 +113,74 @@ for _d in /opt/homebrew/bin /usr/local/bin /opt/podman/bin "${HOME:-}/.local/bin
 done
 export PATH
 
-RT="$(command -v podman 2>/dev/null || command -v docker 2>/dev/null || true)"
+# SAFENT_PODMAN wins over PATH resolution: the desktop app ships its OWN
+# pinned podman binary (contracts/app-engine.md §1) and must never fall back
+# to whatever a terminal user happens to have on PATH.
+if [ -n "${SAFENT_PODMAN:-}" ]; then
+  RT="$SAFENT_PODMAN"
+else
+  RT="$(command -v podman 2>/dev/null || command -v docker 2>/dev/null || true)"
+fi
 [ -n "$RT" ] || { echo "[x] You need podman or docker.  ->  https://podman.io/get-started" >&2; exit 1; }
 RTN="$(basename "$RT")"
 OS="$(uname -s 2>/dev/null || echo unknown)"
 
+# A bundled STATIC (musl) podman and the host's own (glibc) podman/docker,
+# run as the same uid, collide on ONE shared /dev/shm lock segment sized
+# differently by each libc's pthread_mutex_t layout — reproduced live:
+# "failed to open 2048 locks in /libpod_rootless_lock_1000: numerical
+# result out of range" (specs/028-safent-app-nativa/
+# verificacion-paquete-linux.md §"Pasada 1"). Only when the WRAPPER pins
+# its OWN podman (never for a bare terminal `podman`/`docker` a dev/owner
+# already has on PATH, whose existing storage this must never redirect):
+# point CONTAINERS_CONF at the BUNDLED, already-patched containers.conf
+# (lock_type = "file" — file locks, no shared-by-uid segment at all; see
+# stage-runtime.sh's _patch_bundled_containers_conf) sitting right beside
+# $SAFENT_PODMAN, and give the bundled podman its OWN graphroot/runroot
+# under $SAFENT_STATE_HOME — generated HERE, not baked into the bundle,
+# because that path is only known at runtime. An existing
+# CONTAINERS_CONF/CONTAINERS_STORAGE_CONF from the caller always wins.
+if [ -n "${SAFENT_PODMAN:-}" ]; then
+  _podman_bundle_dir="$(CDPATH='' cd -- "$(dirname "$SAFENT_PODMAN")" 2>/dev/null && pwd)"
+  if [ -z "${CONTAINERS_CONF:-}" ] && [ -f "$_podman_bundle_dir/containers.conf" ]; then
+    CONTAINERS_CONF="$_podman_bundle_dir/containers.conf"
+    export CONTAINERS_CONF
+  fi
+  PODMAN_STATE="$SAFENT_STATE_HOME/podman"
+  if [ -z "${CONTAINERS_STORAGE_CONF:-}" ]; then
+    mkdir -p "$PODMAN_STATE/storage" "$PODMAN_STATE/runroot" 2>/dev/null || true
+    if [ ! -f "$PODMAN_STATE/storage.conf" ]; then
+      cat > "$PODMAN_STATE/storage.conf" <<EOF
+[storage]
+driver = "overlay"
+graphroot = "$PODMAN_STATE/storage"
+runroot = "$PODMAN_STATE/runroot"
+EOF
+    fi
+    CONTAINERS_STORAGE_CONF="$PODMAN_STATE/storage.conf"
+    export CONTAINERS_STORAGE_CONF
+  fi
+  if [ -z "${TMPDIR:-}" ]; then
+    mkdir -p "$PODMAN_STATE/tmp" 2>/dev/null || true
+    TMPDIR="$PODMAN_STATE/tmp"
+    export TMPDIR
+  fi
+fi
+
 # ---- helpers ----------------------------------------------------------------
 
-_exists()  { "$RT" inspect "$NAME" >/dev/null 2>&1; }
-_running() { [ "$("$RT" inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null || echo false)" = true ]; }
+# --type container (BKP-01): a bare `podman/docker inspect $NAME`, with no
+# type pinned, can match a DIFFERENT resource that happens to share (part of)
+# the name — reproduced live: after `restore` imports ONLY a volume named
+# "$NAME-data" (no container), `podman inspect $NAME` still returned an
+# object (the volume's own record), so `_exists` reported true, `cmd_start`
+# took the "already exists, just start it" branch, `podman start $NAME`
+# failed against a nonexistent container (silenced by `|| true`), and the
+# CLI printed "[ok] Restored"/"[ok] Safent started" with NO container ever
+# created. Pinning the type makes the volume unmatchable here, so `_exists`
+# means exactly "a container by this name exists" everywhere it's used.
+_exists()  { "$RT" inspect --type container "$NAME" >/dev/null 2>&1; }
+_running() { [ "$("$RT" inspect --type container -f '{{.State.Running}}' "$NAME" 2>/dev/null || echo false)" = true ]; }
 
 # Pairing marker — written to the persistent volume on pair, removed on unpair.
 # Stored inside the volume so it survives container recreates. config-sync's
@@ -104,6 +192,22 @@ _ENTERPRISE_MARKER="/var/lib/hermes/instance/.enterprise"
 # untouched and a future per-instance image override stays a one-line change.
 _image() {
   echo "$IMAGE"
+}
+
+# Per-instance host-agent identifiers (T003, matrix 025 UPD-06). The
+# DEFAULT instance (SAFENT_NAME=safent, what get-safent.sh installs) keeps
+# today's EXACT label/unit name unchanged — zero migration for the common
+# single-instance case. Any OTHER named instance (multi-instance testing,
+# a second paired tenant on the same host) gets its OWN suffixed
+# identifier, so a scoped `safent uninstall` for one instance can never
+# disable or delete ANOTHER instance's agent — the bug UPD-06 reproduced
+# live (uninstalling a test instance would have torn down a real,
+# unrelated agent from a prior install on the same host).
+_agent_label() {
+  [ "$NAME" = "safent" ] && echo "run.safent.agent" || echo "run.safent.agent.$NAME"
+}
+_agent_unit() {
+  [ "$NAME" = "safent" ] && echo "safent-agent.service" || echo "safent-agent-$NAME.service"
 }
 
 # macOS: the cage runs inside a podman machine, which MUST be rootful.
@@ -131,7 +235,11 @@ _ensure_seccomp() {
   mkdir -p "$SECCOMP_DIR" 2>/dev/null || true
   # 1. Preferred: pull the profile straight out of the image — v0.8.29+ ship it baked
   #    at /usr/share/hermes/seccomp/safent.json, version-matched and with NO network.
-  if "$RTN" run --rm --entrypoint cat "$(_image)" \
+  # $RT (the resolved/pinned binary), never $RTN (its bare basename) — the
+  # latter would execve whatever "podman"/"docker" the PATH resolves to,
+  # exactly the "nunca el del PATH del usuario" rule app-engine.md §1's env
+  # table states for SAFENT_PODMAN.
+  if "$RT" run --rm --entrypoint cat "$(_image)" \
        /usr/share/hermes/seccomp/safent.json > "$SECCOMP.tmp" 2>/dev/null && [ -s "$SECCOMP.tmp" ]; then
     mv "$SECCOMP.tmp" "$SECCOMP"; return 0
   fi
@@ -160,7 +268,12 @@ _ensure_seccomp() {
 _fetch_companion_file() {
   _cf_name="$1"
   _cf_dst="$COMPANION_BIN_DIR/$_cf_name"
-  if "$RTN" run --rm --entrypoint cat "$(_image)" \
+  # $RT, never $RTN — same "pinned, not PATH" rule as _ensure_seccomp above
+  # (this was the one actual bug this fix corrects: a bare-PATH podman here
+  # meant a fresh, unpackaged host's fetch attempt silently reached whatever
+  # podman/docker happened to be on the user's PATH instead of failing
+  # closed or falling through to the curl fallback in a controlled way).
+  if "$RT" run --rm --entrypoint cat "$(_image)" \
        "/usr/share/hermes/companions/ads/$_cf_name" > "$_cf_dst.tmp" 2>/dev/null && [ -s "$_cf_dst.tmp" ]; then
     mv "$_cf_dst.tmp" "$_cf_dst"; chmod 0755 "$_cf_dst"; return 0
   fi
@@ -176,12 +289,19 @@ _fetch_companion_file() {
   return 1
 }
 
-# Provision the safent-ads companion (024) BEFORE _run: companions.json has
+# Scaffold the safent-ads companion (024) BEFORE _run: companions.json has
 # to exist for the read-only bind _run adds. Mirrors run-safent.sh's own
 # companion phase exactly — same provision.sh, fetched rather than shipped a
 # second time in this CLI. NEVER fatal to Safent's own boot (FR-3): any
 # failure here just leaves COMPANION_RUN_ARGS empty and _run starts without
 # --network/the companion binds, same as --no-companion.
+#
+# --scaffold (028 T015): network + TLS + bearer + companions.json only —
+# local, image-independent, always fast. The companion's actual SERVICE
+# (image pull, secrets, compose up) is now a SEPARATE, explicit step
+# (`safent companion install|repair`, T016), never bundled into every
+# Safent start — so installing Anuncios later never has to recreate this
+# container: the bind-mount sources scaffolded here already exist.
 _provision_companion() {
   COMPANION_RUN_ARGS=""
   [ "$NO_COMPANION" -eq 0 ] || return 0
@@ -192,10 +312,17 @@ _provision_companion() {
       return 0
     }
   done
-  if "$COMPANION_BIN_DIR/provision.sh"; then
+  # provision.sh is fetched from OUTSIDE this script (comment above) and
+  # predates --porcelain: it narrates its own progress on stdout the way
+  # every cmd_* here used to before T004. `>&2` keeps that text off the
+  # ONE channel the porcelain contract reserves for NDJSON (app-engine.md
+  # §2) in EITHER mode — non-porcelain `up`/`url` also only ever print the
+  # final URL on stdout, never provisioning chatter. Its exit status (the
+  # only thing this `if` actually needs) is untouched by the redirect.
+  if "$COMPANION_BIN_DIR/provision.sh" --scaffold >&2; then
     COMPANION_RUN_ARGS="--network safent-companions -v ${COMPANION_STATE}/companions.json:/etc/hermes/companions.json:ro -v ${COMPANION_STATE}/tls/ca.crt:/etc/hermes/companions/ads-ca.crt:ro -v ${COMPANION_STATE}/bearer:/etc/hermes/companions/ads.bearer:ro -v ${COMPANION_STATE}/sso/ads-sso.key:/etc/hermes/companions/ads-sso.key:ro"
   else
-    echo "[!] Companion provisioning failed — starting Safent without it (FR-3)." >&2
+    echo "[!] Companion scaffolding failed — starting Safent without it (FR-3)." >&2
   fi
 }
 
@@ -318,7 +445,20 @@ cmd_url() {
   echo "Esperando a que Safent esté listo…" >&2
   url="$(_url)" || url=""
   [ -n "$url" ] || { echo "Safent arrancó pero aún no hay token — prueba: safent logs" >&2; exit 1; }
-  printf '%s\n' "$url"
+  # CLI-N2 (specs/025-safent-repaso matriz-final-39eeb8e): under --porcelain,
+  # stdout is NDJSON-only (app-engine.md §2) and the bootstrap ticket must
+  # NEVER reach it (§5) — this command is not in the closed verb table of §4
+  # (only `up --secret-fd` is), so there is no dedicated descriptor to hand
+  # it through here. Deliver the same line this command has always printed
+  # via stderr instead (uninterpreted diagnostics, same channel every other
+  # porcelain helper below already uses), and mark stdout with a secret-free
+  # completion event so a caller parsing NDJSON still gets a clean signal.
+  if [ "$PORCELAIN" -eq 1 ]; then
+    printf '%s\n' "$url" >&2
+    printf '{"t":"url","delivered_via":"stderr"}\n'
+  else
+    printf '%s\n' "$url"
+  fi
 }
 
 cmd_start() {
@@ -407,14 +547,14 @@ _ensure_agent() {
   mkdir -p "$HOME/.safent" 2>/dev/null || true
   case "$OS" in
     Darwin)
-      _pl="$HOME/Library/LaunchAgents/run.safent.agent.plist"
+      _pl="$HOME/Library/LaunchAgents/$(_agent_label).plist"
       if [ ! -f "$_pl" ] || ! grep -q "$self" "$_pl" 2>/dev/null; then
         mkdir -p "$HOME/Library/LaunchAgents" 2>/dev/null || return 0
         cat > "$_pl" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>Label</key><string>run.safent.agent</string>
+  <key>Label</key><string>$(_agent_label)</string>
   <key>ProgramArguments</key><array><string>$self</string><string>agent</string></array>
   <key>EnvironmentVariables</key>
   <dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/opt/podman/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
@@ -432,9 +572,10 @@ PLIST
     Linux)
       if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
         _u="$HOME/.config/systemd/user"
-        if [ ! -f "$_u/safent-agent.service" ]; then
+        _unit="$_u/$(_agent_unit)"
+        if [ ! -f "$_unit" ]; then
           mkdir -p "$_u" 2>/dev/null || true
-          cat > "$_u/safent-agent.service" <<UNIT
+          cat > "$_unit" <<UNIT
 [Unit]
 Description=Safent UI-triggered update agent
 [Service]
@@ -445,7 +586,7 @@ RestartSec=10
 WantedBy=default.target
 UNIT
           systemctl --user daemon-reload >/dev/null 2>&1 || true
-          systemctl --user enable --now safent-agent.service >/dev/null 2>&1 \
+          systemctl --user enable --now "$(_agent_unit)" >/dev/null 2>&1 \
             && echo "[ok] UI-triggered updates enabled (systemd --user)." || true
         fi
       fi
@@ -485,7 +626,7 @@ cmd_update() {
 #                                   checksums, import the volume + state
 #                                   (refuses to overwrite an EXISTING volume
 #                                   without --force), then restart.
-_BACKUP_DEFAULT_DIR="$HOME/.safent/backups"
+_BACKUP_DEFAULT_DIR="$SAFENT_STATE_HOME/backups"
 # Companion state (~/.safent/companions/ads) and the seccomp cache
 # ($SECCOMP_DIR/safent-seccomp.json) are both already under $SECCOMP_DIR —
 # one root to archive.
@@ -501,6 +642,13 @@ _sha256() {
 # below (fixed, known shape — no general JSON parser needed in POSIX sh).
 _manifest_field() {
   sed -n "s/.*\"$2\": *\"\([^\"]*\)\".*/\1/p" "$1" | head -1
+}
+
+# Same idea for an unquoted JSON boolean (true/false) — used to read
+# machine.json's own "adopted" field (data-model.md, written by the desktop
+# app's bootstrap service, RT-DESK — never by this CLI).
+_json_bool_field() {
+  sed -n "s/.*\"$2\": *\(true\|false\).*/\1/p" "$1" | head -1
 }
 
 cmd_backup() {
@@ -619,6 +767,17 @@ cmd_restore() {
 
   echo "[*] Starting Safent..."
   cmd_start >/dev/null 2>&1 || true
+
+  # BKP-01: cmd_start's own result was never checked — a silent `podman
+  # start` failure against a nonexistent container (see _exists's own note)
+  # still printed "[ok] Restored" with no container running anywhere. Verify
+  # the postcondition explicitly instead of trusting cmd_start's exit code
+  # (which is itself `|| true`d by callers throughout this CLI).
+  if ! _exists || ! _running; then
+    echo "[x] The archive's data was imported, but no Safent container is running." >&2
+    echo "    Check:  $RT ps -a --filter name=$NAME   /   safent logs" >&2
+    exit 1
+  fi
   echo "[ok] Restored from $_archive"
 }
 
@@ -662,13 +821,59 @@ cmd_unpair() {
   echo "[ok] Instance unpaired.  Restart Safent to revert to community edition: safent restart"
 }
 
+# R17 — sovereign fallback to release the emergency brake without MFA. A
+# brake can be engaged before the owner ever enrolls TOTP, and a fresh
+# install has no device/OS password either (the PAM fallback the REST API
+# already offers, POST /api/v1/security/kill-switch, fails closed 403 with
+# neither) — the owner was left with no way out short of enrolling MFA with
+# the brake still on. Host access to run `podman exec` on THIS container
+# already IS the owner (same trust boundary every other host verb here
+# relies on: pair/unpair, companion rotate/update, backup/restore). Execs
+# as hermes-user (uid 1000) — the SAME uid the desktop shell's own DIRECT
+# D-Bus calls already run as and the daemon's authorized_uids already
+# trusts unconditionally — so the release is audited under the real owner
+# identity, not a synthetic one. See brake_release_cli.py's own docstring
+# for the full authorization chain. TOTP via the UI remains the primary,
+# normal path — this is reachable only from the host CLI.
+cmd_brake() {
+  case "${1:-}" in
+    release|libera) ;;
+    "") echo "[x] Usage: safent brake release"; exit 1 ;;
+    *) echo "[x] Unknown 'safent brake' subcommand: $1"; echo "    Usage: safent brake release"; exit 1 ;;
+  esac
+  _ensure_machine
+  if ! _running; then
+    echo "[x] Safent must be running to release the brake.  Start it with: safent start" >&2
+    exit 1
+  fi
+  "$RT" exec -u hermes-user "$NAME" python3 -m hermes.shell_server.security.brake_release_cli release \
+    || { echo "[x] Could not release the brake — see the error above." >&2; exit 1; }
+}
+
 cmd_status() {
+  # CLI-N2 (specs/025-safent-repaso matriz-final-39eeb8e): this used to
+  # `echo` human text unconditionally, on stdout, even under --porcelain —
+  # violating app-engine.md §2 ("stdout — exclusivamente NDJSON"). Not in
+  # the closed verb table of §4 either, so no wrapper depends on the human
+  # text shape; still, every verb honours the flag now (T004 pattern above).
   if _exists && _running; then
-    echo "[ok] Safent running at  http://localhost:$(_port)/   (open with: safent)"
+    if [ "$PORCELAIN" -eq 1 ]; then
+      printf '{"t":"status","state":"running","port":%s}\n' "$(_port)"
+    else
+      echo "[ok] Safent running at  http://localhost:$(_port)/   (open with: safent)"
+    fi
   elif _exists; then
-    echo "[ ] Safent is stopped.  Start it with: safent"
+    if [ "$PORCELAIN" -eq 1 ]; then
+      printf '{"t":"status","state":"stopped"}\n'
+    else
+      echo "[ ] Safent is stopped.  Start it with: safent"
+    fi
   else
-    echo "[ ] Safent is not installed.  Install with: safent update"
+    if [ "$PORCELAIN" -eq 1 ]; then
+      printf '{"t":"status","state":"not_installed"}\n'
+    else
+      echo "[ ] Safent is not installed.  Install with: safent update"
+    fi
   fi
 }
 
@@ -687,53 +892,211 @@ cmd_logs() { "$RT" logs -f "$NAME"; }
 # the daemon). The backend's POST /api/v1/system/update touches this exact path.
 _UPDATE_FLAG="/var/lib/hermes/instance/.update-requested"
 _UNINSTALL_FLAG="/var/lib/hermes/instance/.uninstall-requested"
+
+# ---- install-request marker consumption (T016, contracts/install-request.md) ----
+# `install_companion`/`repair_companion` are the NEW closed-vocabulary markers
+# (install_requests.py, T006) — a separate mechanism from the legacy flat
+# _UPDATE_FLAG/_UNINSTALL_FLAG above (which this loop keeps watching
+# unchanged; both are dual-written by the daemon today, see that module's
+# own docstring). `install_request_agent_cli` is the ONE implementation of
+# the marker's claim/expiry/consume rules — this loop never re-parses the
+# marker file itself, exactly the "misma implementacion" install-request.md
+# §4 requires of its two readers (this agent, and the open app).
+_AGENT_CLAIMANT="safent-agent-$$"
+
+# Claims *verb*'s live request, if any. Prints the claimed slug (may be
+# empty) to stdout and returns 0; returns 1 with no output when there is
+# nothing to claim right now (no live request, or someone else — the open
+# app — already holds a live claim).
+_claim_install_request() {
+  "$RT" exec "$NAME" python3 -m hermes.shell_server.install_request_agent_cli \
+    claim "$1" --claimant "$_AGENT_CLAIMANT" 2>/dev/null
+}
+
+# Releases *verb*'s claim; on success also consumes the marker so it is
+# never re-run. Best-effort: a failure to reach the daemon here must never
+# crash the agent loop — the marker's own TTL is the backstop.
+_resolve_install_request() {
+  "$RT" exec "$NAME" python3 -m hermes.shell_server.install_request_agent_cli \
+    resolve "$1" "--$2" >/dev/null 2>&1 || true
+}
+
+# One verb, one action: claim -> run the action -> resolve success/failure.
+# Never loops on its own — the outer `cmd_agent` while-loop's `sleep 20`
+# already paces every retry, and a failure leaves the marker `pending`
+# (not re-claimed until the NEXT iteration), so a persistently-failing
+# install polls at the loop's own cadence, never in a tight retry storm.
+#
+# The action runs in a SUBSHELL `( "$2" )`, not a plain call: porcelain
+# failures (_die_porcelain, cmd_companion_install/repair's own failure
+# path) call `exit`, which is correct when that verb runs as its OWN
+# top-level `safent companion install` process, but would otherwise kill
+# THIS whole long-running agent loop too — a subshell scopes that `exit`
+# to just the one attempt.
+_handle_install_request() {  # $1=verb $2=action-function-name
+  _running || return 0
+  _claim_install_request "$1" >/dev/null || return 0
+  echo "[*] $1 requested from the UI — applying…"
+  if ( "$2" ); then
+    _resolve_install_request "$1" success
+  else
+    echo "[!] $1 failed; it stays pending and will be retried." >&2
+    _resolve_install_request "$1" failure
+  fi
+}
+
+# One pass over every marker this agent watches — extracted from cmd_agent's
+# loop so it is independently callable (SAFENT_AGENT_ONCE below, and tests).
+_agent_tick() {
+  # Uninstall wins over update — checked first; it removes everything (incl. this agent).
+  if _running && "$RT" exec "$NAME" test -f "$_UNINSTALL_FLAG" 2>/dev/null; then
+    echo "[*] Uninstall requested from the UI — removing Safent…"
+    cmd_uninstall
+    exit 0
+  fi
+  if _running && "$RT" exec "$NAME" test -f "$_UPDATE_FLAG" 2>/dev/null; then
+    "$RT" exec "$NAME" rm -f "$_UPDATE_FLAG" 2>/dev/null || true
+    echo "[*] Update requested from the UI — applying..."
+    cmd_update || echo "[!] Update failed; re-request it from the UI to retry."
+  fi
+  _handle_install_request install_companion cmd_companion_install
+  _handle_install_request repair_companion cmd_companion_repair
+}
+
 cmd_agent() {
-  echo "[*] Safent update agent running (watches for UI-triggered updates/uninstall)."
+  echo "[*] Safent update agent running (watches for UI-triggered updates/uninstall/companion installs)."
   while :; do
-    # Uninstall wins over update — checked first; it removes everything (incl. this agent).
-    if _running && "$RT" exec "$NAME" test -f "$_UNINSTALL_FLAG" 2>/dev/null; then
-      echo "[*] Uninstall requested from the UI — removing Safent…"
-      cmd_uninstall
-      exit 0
-    fi
-    if _running && "$RT" exec "$NAME" test -f "$_UPDATE_FLAG" 2>/dev/null; then
-      "$RT" exec "$NAME" rm -f "$_UPDATE_FLAG" 2>/dev/null || true
-      echo "[*] Update requested from the UI — applying..."
-      cmd_update || echo "[!] Update failed; re-request it from the UI to retry."
-    fi
+    _agent_tick
+    # Test-only escape hatch (same "env var flips a non-interactive mode"
+    # shape as SAFENT_NO_BROWSER/SAFENT_NO_SELF_UPDATE above): run exactly
+    # one pass instead of looping forever, so the marker-consumption logic
+    # is testable without waiting through a real sleep cycle.
+    [ "${SAFENT_AGENT_ONCE:-0}" = "1" ] && return 0
     sleep 20
   done
 }
 
-# Exports the three vars compose.yaml interpolates (SAFENT_STATE,
-# SAFENT_ADS_IMAGE, ADS_POSTGRES_PASSWORD), same values `provision.sh` used to
-# bring the companion up. Shared by every `$RT compose ...` call site below so
-# there is exactly ONE place that resolves them, never copy-pasted per verb.
-_companion_env() {
+# Halves of the companion env shared by every resolution below — never the
+# image, which resolves differently per verb (see _companion_env vs
+# _companion_update_env).
+_companion_env_common() {
   SAFENT_STATE="$COMPANION_STATE"
-  SAFENT_ADS_IMAGE="${SAFENT_ADS_IMAGE:-ghcr.io/devwspito/safent-ads:latest}"
   if [ -f "$COMPANION_STATE/pg_password" ]; then
     ADS_POSTGRES_PASSWORD="$(cat "$COMPANION_STATE/pg_password" 2>/dev/null || true)"
   else
     ADS_POSTGRES_PASSWORD="unused-for-down"
   fi
+}
+
+# The image ref `provision.sh` persisted at $COMPANION_STATE/image on the
+# last provisioning run (CLI-10).
+#
+# Security review 2026-09-10 (MEDIUM finding): this used to fall back to
+# the hard-coded ghcr.io/…/safent-ads:latest default when the marker file
+# was absent — deleting that ONE file (0700 dir, no integrity protection,
+# same owner as `safent` itself) silently restored the EXACT CLI-10
+# divergence this whole fix set out to close (status/rotate/remove
+# recreating against a DIFFERENT image than what is actually running).
+# Fail closed instead: refuse with a clear recovery step rather than guess.
+# `safent companion update` is the ONE place a missing marker is still a
+# legitimate bootstrap case (see _companion_update_env) — never here.
+_persisted_ads_image() {
+  if [ -f "$COMPANION_STATE/image" ]; then
+    cat "$COMPANION_STATE/image"
+    return 0
+  fi
+  echo "[x] $COMPANION_STATE/image not found — refusing to guess the companion's image." >&2
+  echo "    Run 'safent companion update' once to record it, then retry." >&2
+  exit 1
+}
+
+# Exports the three vars compose.yaml interpolates (SAFENT_STATE,
+# SAFENT_ADS_IMAGE, ADS_POSTGRES_PASSWORD). Shared by every `$RT compose ...`
+# call site below so there is exactly ONE place that resolves them, never
+# copy-pasted per verb.
+#
+# SAFENT_ADS_IMAGE is ALWAYS the persisted ref (never an ambient env var) —
+# status/rotate/remove must reuse the EXACT image already running, or a
+# rotate recreates ads-api against a DIFFERENT image than ads-worker still
+# runs, and an image whose alembic history doesn't know the database's
+# current revision dies `Can't locate revision …` (CLI-10, verified live:
+# ghcr.io/devwspito/safent-ads:latest got pulled and mixed in even though
+# run-safent.sh had actually provisioned with safent-ads:local). `safent
+# companion update` is the ONE verb allowed to pick a NEW image — see
+# _companion_update_env — and the only one that overwrites the marker.
+_companion_env() {
+  _companion_env_common
+  SAFENT_ADS_IMAGE="$(_persisted_ads_image)"
   export SAFENT_STATE SAFENT_ADS_IMAGE ADS_POSTGRES_PASSWORD
 }
 
-# Tear down the safent-ads companion (024): compose down its four services
-# and remove the fixed network, using the SAME cached compose.yaml
-# provisioning used to start it (nothing rebuilt here). Best-effort — a
-# companion that was never provisioned (no cached compose.yaml) is a no-op.
-# $STATE itself (TLS, secrets, caps.yaml) is NOT touched here: it is removed
-# below by the same `rm -rf "$SECCOMP_DIR"` that already wipes every other
-# piece of local Safent state (there is no partial-uninstall mode in this
-# CLI today — see cmd_uninstall's own doc comment).
-_uninstall_companion() {
-  [ -f "$COMPANION_COMPOSE" ] || return 0
-  echo "[*] Removing the safent-ads companion…"
-  _companion_env
-  "$RT" compose -p safent-ads -f "$COMPANION_COMPOSE" down >/dev/null 2>&1 || true
-  "$RT" network rm "$COMPANION_NETWORK" >/dev/null 2>&1 || true
+# `safent companion update`'s own resolution: an explicit SAFENT_ADS_IMAGE
+# from the caller's env WINS (that is how an owner asks for a specific new
+# image); with none given, keep whatever is already persisted — a plain
+# re-pull/refresh of the same tag. `update` is the ONE place a missing
+# marker is still a legitimate bootstrap (recovering a companion whose
+# $STATE/image was lost, or a companion provisioned before CLI-10 ever
+# wrote one) — deliberately does NOT call the now-fail-closed
+# _persisted_ads_image (that helper is for status/rotate/remove, which
+# must NEVER guess); falls back to the published default INLINE instead,
+# same historical shape, only reachable from this one explicit verb.
+_companion_update_env() {
+  _companion_env_common
+  if [ -n "${SAFENT_ADS_IMAGE:-}" ]; then
+    : # explicit override from the caller — use it as-is
+  elif [ -f "$COMPANION_STATE/image" ]; then
+    SAFENT_ADS_IMAGE="$(cat "$COMPANION_STATE/image")"
+  else
+    SAFENT_ADS_IMAGE="ghcr.io/devwspito/safent-ads:latest"
+  fi
+  export SAFENT_STATE SAFENT_ADS_IMAGE ADS_POSTGRES_PASSWORD
+}
+
+# T003/UPD-06: `safent-companions` is a HOST-GLOBAL network — every Safent
+# instance on this host that ever joined it (`--network safent-companions`
+# in `_run`) shares the ONE network, regardless of which instance's
+# companion provisioned it. A scoped uninstall must never rm it while
+# another instance's container (or another instance's companion) is still
+# attached — `podman ps --filter network=…` lists every CONTAINER on it,
+# running or not, which is a portable (podman AND docker), engine-version-
+# independent way to answer "is anything still using this" without parsing
+# `network inspect`'s own (less stable) Containers map shape.
+_remove_companion_network_if_unused() {
+  "$RT" network inspect "$COMPANION_NETWORK" >/dev/null 2>&1 || return 0
+  _attached="$("$RT" ps -a --filter "network=$COMPANION_NETWORK" --format '{{.ID}}' 2>/dev/null || true)"
+  if [ -z "$_attached" ]; then
+    "$RT" network rm "$COMPANION_NETWORK" >/dev/null 2>&1 || true
+  else
+    echo "[*] Keeping network '$COMPANION_NETWORK' — still in use by another instance." >&2
+  fi
+}
+
+# Tear down the safent-ads companion (024): compose down its four services,
+# using the SAME cached compose.yaml provisioning used to start it (nothing
+# rebuilt here), then remove the fixed network ONLY if nothing else is
+# still attached to it. Best-effort — a companion that was never
+# provisioned (no cached compose.yaml) is a no-op.
+#
+# $STATE (TLS, secrets, caps.yaml, companions.json) and the three podman
+# volumes (db-data, broker-sock, credential-store — CLI-12's own matrix
+# nuance) are NOT touched here unless *purge*=1: an owner reaching for
+# `safent uninstall` (no --purge) wants the software gone, not necessarily
+# the campaign history/credentials re-generated from scratch on the next
+# install.
+_uninstall_companion() {  # $1: 1 to also purge state + volumes, 0 to keep them
+  _purge="${1:-0}"
+  if [ -f "$COMPANION_COMPOSE" ]; then
+    echo "[*] Removing the safent-ads companion…"
+    _companion_env
+    "$RT" compose -p safent-ads -f "$COMPANION_COMPOSE" down >/dev/null 2>&1 || true
+  fi
+  _remove_companion_network_if_unused
+  if [ "$_purge" -eq 1 ]; then
+    for _v in safent-ads-companion-db-data safent-ads-companion-broker-sock safent-ads-companion-credential-store; do
+      "$RT" volume rm "$_v" >/dev/null 2>&1 || true
+    done
+    rm -rf "$COMPANION_STATE" 2>/dev/null || true
+  fi
 }
 
 # ---- companion subcommands (T193): status|update|rotate|remove -------------
@@ -746,9 +1109,18 @@ _uninstall_companion() {
 # `podman/docker compose ps -q [-a]` prints one container ID per line — the
 # same ID format `$RT inspect` accepts, so counting running vs total reuses
 # the exact primitive `_running()` already uses for the main container.
+#
+# CLI-08 root cause: this used to call compose WITHOUT `_companion_env`, so
+# compose.yaml's `${ADS_POSTGRES_PASSWORD:?...}` interpolation failed
+# ("required variable ... is missing a value"), `ps -q -a` printed nothing,
+# and `safent companion status` reported `0/0 running` against a companion
+# whose 5 containers were actually Up/healthy. `_companion_env` here (not
+# just at the call site) means every current AND future caller gets it
+# right by construction.
 _companion_container_counts() {
   total=0
   running=0
+  _companion_env
   ids="$("$RT" compose -p safent-ads -f "$COMPANION_COMPOSE" ps -q -a 2>/dev/null || true)"
   for id in $ids; do
     total=$((total + 1))
@@ -764,6 +1136,74 @@ _companion_health_code() {
     --cacert "$COMPANION_STATE/tls/ca.crt" \
     --resolve "$COMPANION_HOST:$COMPANION_PORT:$COMPANION_IP" \
     "https://$COMPANION_HOST:$COMPANION_PORT/mcp/health" 2>/dev/null || true
+}
+
+# ---- companion install|repair (T016) ---------------------------------------
+# Both converge to the SAME target state: provision.sh is already a full
+# reconciler (every one of its steps is "generate/start if absent, skip if
+# already done" — network, TLS, bearer, secrets, SSO keypair, migrations,
+# compose up are ALL idempotent by construction, see provision.sh's own
+# header). `install` (nothing provisioned yet) and `repair` (network/volumes/
+# DB/bearer/SSO half-provisioned, or the compose stack simply unhealthy)
+# therefore share ONE implementation — install-request.md's per-verb TTL
+# (30 min vs 15 min) is the real distinction between the two, not the work
+# itself. `--purge`-style destructive behaviour never lives here.
+#
+# Runs the (potentially minutes-long) image pull + compose up in the
+# background and emits a porcelain heartbeat at least every 5s while it is
+# alive — app-engine.md §3 NFR-001/002 requires progress at least that
+# often, and provision.sh itself is an opaque subprocess with no
+# finer-grained hook. Polls every 1s (not 5s): the loop condition is
+# checked BEFORE each sleep, so a 5s poll would force every call — even one
+# wrapping a sub-second operation — to pay a full 5s tax before ever
+# noticing the child already exited.
+_run_with_heartbeat() {
+  "$@" >&2 &
+  _hb_pid=$!
+  _hb_elapsed=0
+  while kill -0 "$_hb_pid" 2>/dev/null; do
+    sleep 1
+    _hb_elapsed=$((_hb_elapsed + 1))
+    [ $((_hb_elapsed % 5)) -eq 0 ] && _stage_progress "$_hb_elapsed" "" seconds
+  done
+  wait "$_hb_pid"
+}
+
+_companion_install_or_repair() {
+  mkdir -p "$COMPANION_BIN_DIR" 2>/dev/null || true
+  for _cf in provision.sh compose.yaml caps.template.yaml; do
+    _fetch_companion_file "$_cf" || _die_porcelain companion_network_conflict "No se pudo obtener $_cf" true
+  done
+
+  _stage companion_scaffold "Preparando el andamiaje del companion"
+  "$COMPANION_BIN_DIR/provision.sh" --scaffold >&2 \
+    || _die_porcelain companion_network_conflict "No se pudo preparar la red/estado del companion" true
+  _stage_done
+
+  _stage companion_up "Instalando el companion"
+  _run_with_heartbeat "$COMPANION_BIN_DIR/provision.sh" \
+    || _die_porcelain companion_migration_failed "El companion no arranco" true
+  _stage_done
+
+  _stage companion_reload "Registrando el companion en Safent"
+  if _running; then
+    "$RT" exec -u hermes "$NAME" python3 -m hermes.shell_server.companion_reload_cli \
+      reload safent-ads >&2 \
+      || echo "[!] No se pudo recargar el companion en caliente en Safent — 'safent restart' lo recoge igualmente (029 CL-002)." >&2
+  fi
+  _stage_done
+
+  [ "$PORCELAIN" -eq 1 ] || return 0
+}
+
+cmd_companion_install() {
+  _companion_install_or_repair
+  [ "$PORCELAIN" -eq 1 ] || echo "[ok] Companion instalado."
+}
+
+cmd_companion_repair() {
+  _companion_install_or_repair
+  [ "$PORCELAIN" -eq 1 ] || echo "[ok] Companion reparado."
 }
 
 cmd_companion_status() {
@@ -791,6 +1231,53 @@ cmd_companion_status() {
   fi
 }
 
+# CLI-10 guard: `ads-migrate` (`alembic upgrade head`) dies loud
+# (`Can't locate revision identified by '<rev>'`, exit 255) when *image*'s
+# migration set never heard of the revision already applied to the database
+# — but only AFTER ads-api/ads-worker have already been recreated against
+# that mismatched image, leaving ads-api down (verified live). `alembic
+# history` reads only the image's own migration scripts (no DB connection,
+# no --network needed) — if the database's current revision never appears
+# in it, *image* cannot possibly upgrade past it: refuse before recreating
+# anything.
+#
+# Security review 2026-09-10 (MEDIUM finding, CWE-754): this used to fail
+# OPEN twice — an unreadable `history` (image inspection failed for ANY
+# reason) proceeded "without the guard", and the match itself was a bare
+# substring (`case "$history" in *"$db_rev"*)`), so a db_rev that happened
+# to appear inside an unrelated line (revision-message text, another
+# revision's hash as a substring) satisfied it wrongly. Now: ONLY a
+# genuinely brand-new database (no alembic_version row at all — nothing
+# to compare yet, not a failure) skips the guard; once db_rev is read
+# successfully, an unreadable history is a REFUSAL, not a shrug, and the
+# match is word-bounded (`grep -qw`, not a substring).
+_refuse_if_image_predates_the_database() {
+  image="$1"
+  db_rev="$("$RT" compose -p safent-ads -f "$COMPANION_COMPOSE" exec -T ads-db \
+    psql -U ads -d ads -tAc 'SELECT version_num FROM alembic_version;' 2>/dev/null \
+    | tr -d '[:space:]')"
+  if [ -z "$db_rev" ]; then
+    echo "[*] No alembic_version row yet — skipping the migration-head guard."
+    return 0
+  fi
+  # Security review 2026-09-10 (LOW finding, CWE-88): `--` stops podman/
+  # docker from ever reading $image as an option (e.g. a value beginning
+  # with `-`) — $STATE is 0700, owner-only, no privilege boundary crossed
+  # today, but the image ref sits in option position regardless.
+  history="$("$RT" run --rm --network none -- "$image" alembic history 2>/dev/null || true)"
+  if [ -z "$history" ]; then
+    echo "[x] Could not read '$image' migration history — refusing to update against an unverifiable image." >&2
+    echo "    The database is already at revision '$db_rev'; retry once the image can be inspected." >&2
+    exit 1
+  fi
+  if printf '%s\n' "$history" | grep -qw -- "$db_rev"; then
+    return 0
+  fi
+  echo "[x] '$image' does not know revision '$db_rev' (already applied to the database)." >&2
+  echo "    That image is OLDER than the database — refusing to update (it would break ads-api/ads-worker)." >&2
+  exit 1
+}
+
 # Pull the owner's published companion image and recreate its containers —
 # ONLY the companion, never Safent itself (that coupling was exactly T193's
 # gap: `safent update` re-provisioned the companion as a SIDE EFFECT of
@@ -800,12 +1287,15 @@ cmd_companion_update() {
     echo "[x] Companion not provisioned yet. Run 'safent update' first." >&2
     exit 1
   fi
-  _companion_env
+  _companion_update_env
   echo "[*] Pulling $SAFENT_ADS_IMAGE..."
   "$RT" pull "$SAFENT_ADS_IMAGE" || { echo "[x] Could not pull the companion image." >&2; exit 1; }
+  _refuse_if_image_predates_the_database "$SAFENT_ADS_IMAGE"
   echo "[*] Recreating the companion containers..."
   "$RT" compose -p safent-ads -f "$COMPANION_COMPOSE" up -d \
     || { echo "[x] Companion update failed." >&2; exit 1; }
+  printf '%s' "$SAFENT_ADS_IMAGE" > "$COMPANION_STATE/image.tmp"
+  mv -f "$COMPANION_STATE/image.tmp" "$COMPANION_STATE/image"
   echo "[ok] Companion updated."
 }
 
@@ -831,6 +1321,14 @@ cmd_companion_rotate() {
     echo "[x] $api_env not found — cannot rotate (companion secrets missing)." >&2
     exit 1
   fi
+  # Resolve (and, on a missing $STATE/image marker, fail closed) BEFORE
+  # touching anything — security review 2026-09-10 follow-up: _companion_env
+  # used to run only right before the SSO-keygen step, well after the
+  # bearer was already rotated on disk; a missing marker would then leave
+  # the companion in a half-rotated state (new bearer, old SSO key) instead
+  # of refusing cleanly up front.
+  _companion_env
+
   echo "[*] Rotating the companion bearer..."
   new_bearer="$(openssl rand -hex 32)"
   printf '%s' "$new_bearer" > "$COMPANION_STATE/bearer.tmp"
@@ -847,8 +1345,9 @@ cmd_companion_rotate() {
   mv -f "$tmp_env" "$api_env"
 
   echo "[*] Rotating the SSO Ed25519 keypair (026)..."
-  _companion_env
-  sso_keypair="$("$RT" run --rm --network none "$SAFENT_ADS_IMAGE" \
+  # -- (LOW finding, CWE-88): see _refuse_if_image_predates_the_database's
+  # own comment on this exact pattern.
+  sso_keypair="$("$RT" run --rm --network none -- "$SAFENT_ADS_IMAGE" \
     python -m safent_ads.tools.gen_keys)"
   sso_seed="$(printf '%s\n' "$sso_keypair" | sed -n 's/^ADS_APPROVAL_SIGNING_KEY=//p')"
   sso_pub_std="$(printf '%s\n' "$sso_keypair" | sed -n 's/^ADS_APPROVAL_PUBLIC_KEY=//p')"
@@ -874,6 +1373,13 @@ cmd_companion_rotate() {
   chmod 0600 "$tmp_env2"
   mv -f "$tmp_env2" "$api_env"
 
+  # Security review 2026-09-10 (MEDIUM finding): rotate recreates ads-api
+  # via --force-recreate below — the SAME guard `update` uses, applied here
+  # too, so a persisted image that has somehow drifted behind the
+  # database (e.g. provision.sh re-running with a stale SAFENT_ADS_IMAGE)
+  # is caught before ads-api restarts against it, not after.
+  _refuse_if_image_predates_the_database "$SAFENT_ADS_IMAGE"
+
   echo "[*] Restarting ads-api with the new token..."
   "$RT" compose -p safent-ads -f "$COMPANION_COMPOSE" up -d --force-recreate ads-api \
     || { echo "[x] Bearer/SSO files updated but ads-api restart failed — restart it by hand." >&2; exit 1; }
@@ -881,63 +1387,469 @@ cmd_companion_rotate() {
   echo "    Restart Safent so the daemon re-reads them:  safent restart"
 }
 
-# Compose down + remove the fixed network — mirrors _uninstall_companion
-# exactly, except $STATE (TLS/secrets/caps.yaml) survives unless --purge:
-# an owner reaching for THIS verb wants the companion gone, not necessarily
-# its history/config re-generated from scratch on the next `safent update`.
+# Delegates to `_uninstall_companion` — the ONE implementation of "tear
+# down the companion" (compose down, network-only-if-unused, and, with
+# --purge, the three podman volumes too). CLI-12 nuance (matrix 025, T003):
+# --purge used to leave the campaign database + broker-sock + credential-
+# store volumes AND the network behind — both are gone now, without this
+# verb re-implementing the teardown a second time.
 cmd_companion_remove() {
-  if [ -f "$COMPANION_COMPOSE" ]; then
-    echo "[*] Stopping the companion..."
-    _companion_env
-    "$RT" compose -p safent-ads -f "$COMPANION_COMPOSE" down >/dev/null 2>&1 || true
-  fi
-  "$RT" network rm "$COMPANION_NETWORK" >/dev/null 2>&1 || true
   if [ "${1:-}" = "--purge" ]; then
-    rm -rf "$COMPANION_STATE" 2>/dev/null || true
+    _uninstall_companion 1
     echo "[ok] Companion removed and state purged ($COMPANION_STATE)."
   else
+    _uninstall_companion 0
     echo "[ok] Companion removed. State kept at $COMPANION_STATE (use --purge to delete it too)."
   fi
 }
 
 cmd_companion() {
   case "${1:-}" in
+    install) cmd_companion_install ;;
+    repair) cmd_companion_repair ;;
     status) cmd_companion_status ;;
     update) cmd_companion_update ;;
     rotate) cmd_companion_rotate ;;
     remove) cmd_companion_remove "${2:-}" ;;
     *)
-      echo "Usage: safent companion status|update|rotate|remove [--purge]" >&2
+      echo "Usage: safent companion install|repair|status|update|rotate|remove [--purge]" >&2
       exit 1
       ;;
   esac
 }
 
-# Remove Safent from the machine: the container, the companion, its data
-# volume, the seccomp cache, the UI-update agent, and the CLI itself. Leaves
-# podman/docker installed (they are general tools you may use elsewhere).
-# Triggerable from the UI (POST /system/uninstall → marker → the agent runs
-# this) or by hand: `safent uninstall`.
+# T003 (matrix 025 UPD-06): "machine (macOS) only if it is ours" —
+# $SAFENT_STATE_HOME/machine.json is written by the DESKTOP APP's bootstrap
+# service (RT-DESK) when it creates or adopts a podman machine; a bare
+# terminal install never writes it, so this is a no-op there.
+# `adopted=true` means an EXISTING machine was found and used as-is
+# (plan.md: "la ajena no se toca" — a foreign machine is never touched);
+# `adopted=false` means WE created it, so uninstalling removes what this
+# installation created.
+_uninstall_machine_if_ours() {
+  [ "$OS" = Darwin ] || return 0
+  _mj="$SAFENT_STATE_HOME/machine.json"
+  [ -f "$_mj" ] || return 0
+  _m_name="$(_manifest_field "$_mj" name)"
+  [ -n "$_m_name" ] || return 0
+  [ "$(_json_bool_field "$_mj" adopted)" = "true" ] && return 0
+  "$RT" machine rm -f "$_m_name" >/dev/null 2>&1 || true
+}
+
+# Remove Safent from the machine, SCOPED TO THIS INSTALLATION
+# (SAFENT_NAME/SAFENT_STATE_HOME) — corrects UPD-06 (matrix 025): the old
+# unconditional version disabled/deleted ANOTHER instance's host agent and
+# the shared CLI binary regardless of $NAME, and always removed the
+# companion network even while another instance was still attached to it.
+#
+# `--scope this-install` is the only scope this CLI understands
+# (app-engine.md §4's own verb shape, `uninstall --scope this-install`) —
+# accepted (and, from the embedded CLI, required), rejected if given
+# anything else. There is no OTHER mode: "this installation only" is
+# simply the correct behaviour, not one of several supported ones.
+#
+# Default (no --purge): removes the SOFTWARE — this instance's container,
+# the companion stack (its network only if nothing else is still attached
+# to it), the podman machine only if THIS installation created it, the
+# host agent unit/plist scoped to this instance's name, and the cached
+# companion provisioning scripts — but KEEPS DATA: the Safent data volume,
+# the companion's three podman volumes (including the campaign database,
+# CLI-12's own nuance), and $SAFENT_STATE_HOME (TLS/secrets/bearer/SSO/
+# backups). `--purge` deletes all of that too, for real, and the final
+# line says exactly what was removed.
+#
+# Triggerable from the UI (install-request `uninstall_system` -> `safent
+# agent` runs this) or by hand: `safent uninstall [--purge]`.
 cmd_uninstall() {
-  echo "[*] Uninstalling Safent…"
-  _uninstall_companion
+  _scope="this-install"
+  _purge=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --scope) _scope="${2:-}"; shift 2 ;;
+      --scope=*) _scope="${1#--scope=}"; shift ;;
+      --purge) _purge=1; shift ;;
+      *) echo "[x] Unknown uninstall option: $1" >&2; exit 1 ;;
+    esac
+  done
+  if [ "$_scope" != "this-install" ]; then
+    echo "[x] Unsupported --scope '$_scope' (only 'this-install' is supported)." >&2
+    exit 1
+  fi
+
+  echo "[*] Uninstalling Safent (instance: $NAME)…"
   "$RT" rm -f "$NAME" >/dev/null 2>&1 || true
-  "$RT" volume rm "$DATA_VOLUME" >/dev/null 2>&1 || true
-  rm -rf "$SECCOMP_DIR" 2>/dev/null || true
+  _uninstall_companion "$_purge"
+  _uninstall_machine_if_ours
+  rm -rf "$COMPANION_BIN_DIR" 2>/dev/null || true
   case "$OS" in
     Darwin)
-      launchctl unload "$HOME/Library/LaunchAgents/run.safent.agent.plist" 2>/dev/null || true
-      rm -f "$HOME/Library/LaunchAgents/run.safent.agent.plist" 2>/dev/null || true
+      launchctl unload "$HOME/Library/LaunchAgents/$(_agent_label).plist" >/dev/null 2>&1 || true
+      rm -f "$HOME/Library/LaunchAgents/$(_agent_label).plist" 2>/dev/null || true
       ;;
     Linux)
-      systemctl --user disable --now safent-agent.service >/dev/null 2>&1 || true
-      rm -f "$HOME/.config/systemd/user/safent-agent.service" 2>/dev/null || true
+      systemctl --user disable --now "$(_agent_unit)" >/dev/null 2>&1 || true
+      rm -f "$HOME/.config/systemd/user/$(_agent_unit)" 2>/dev/null || true
       ;;
   esac
-  rm -rf "$HOME/.safent" 2>/dev/null || true
-  # Remove the CLI last (safe to unlink a running script on Unix).
-  rm -f /opt/homebrew/bin/safent /usr/local/bin/safent "$HOME/.local/bin/safent" "$HOME/bin/safent" 2>/dev/null || true
-  echo "[ok] Safent uninstalled. (podman/docker were left installed.)"
+  # The CLI binary and the DEFAULT-name agent are shared, host-level
+  # plumbing — only the default instance (what get-safent.sh installs)
+  # owns them. A named/secondary instance (multi-instance testing, a
+  # second tenant on the same host) must never remove what other
+  # instances still depend on.
+  if [ "$NAME" = "safent" ]; then
+    rm -f /opt/homebrew/bin/safent /usr/local/bin/safent "$HOME/.local/bin/safent" "$HOME/bin/safent" 2>/dev/null || true
+  fi
+
+  if [ "$_purge" -eq 1 ]; then
+    "$RT" volume rm "$DATA_VOLUME" >/dev/null 2>&1 && echo "[ok] Removed data volume: $DATA_VOLUME"
+    rm -rf "$SAFENT_STATE_HOME" 2>/dev/null || true
+    echo "[ok] Safent uninstalled and purged (state, data volume and companion volumes removed)."
+  else
+    echo "[ok] Safent uninstalled. Kept: data volume ($DATA_VOLUME), companion state and volumes (use --purge to delete them too)."
+  fi
+  echo "    (podman/docker were left installed.)"
+}
+
+# ---- porcelain mode (T004): NDJSON on stdout — contracts/app-engine.md ----
+# Purely additive: no cmd_* above is touched. --porcelain does not change ANY
+# decision this CLI makes, only the channel it reports progress on. Without
+# the flag every function below falls back to the existing "[*]"/"[x]" human
+# text on stderr, so a terminal user sees nothing new.
+
+# Escape backslash + double-quote for embedding in a JSON string value. Every
+# detail/label this CLI emits is a short one-line ASCII/Spanish message (see
+# the existing echo "[x] ..." calls) — UTF-8 bytes pass through untouched,
+# which is valid inside a JSON string; control characters are not produced by
+# any caller so a full JSON encoder is not warranted here (same "no general
+# parser for a fixed, known shape" rule _manifest_field already follows).
+_json_str() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+# Redact the bootstrap ticket (?k=<value>) from any text before it can reach
+# an event's `detail` field — belt-and-suspenders on top of `up` never
+# putting the ticket on stdout/stderr in the first place (app-engine.md §3.1).
+_mask_secret() {
+  printf '%s' "$1" | sed -E 's/(\?k=)[^&[:space:]"]+/\1***/g'
+}
+
+# FailureCode -> exit code, stable and closed (app-engine.md §2/§3). Order
+# matches the contract's own listing; unknown codes fall back to 1
+# ("fallo no clasificado"), never to a code in the 10..39 domain range.
+_failure_exit_code() {
+  case "$1" in
+    unsupported_os) echo 10 ;;              unsupported_arch) echo 11 ;;
+    insufficient_disk) echo 12 ;;           insufficient_memory) echo 13 ;;
+    runtime_hash_mismatch) echo 14 ;;       machine_create_failed) echo 15 ;;
+    machine_start_failed) echo 16 ;;        userns_blocked) echo 17 ;;
+    helper_denied) echo 18 ;;               registry_unreachable) echo 19 ;;
+    digest_mismatch) echo 20 ;;             pull_interrupted) echo 21 ;;
+    port_exhausted) echo 22 ;;              container_start_failed) echo 23 ;;
+    daemon_unhealthy) echo 24 ;;            companion_network_conflict) echo 25 ;;
+    companion_migration_failed) echo 26 ;;  companion_unreachable) echo 27 ;;
+    backup_failed) echo 28 ;;               restore_failed) echo 29 ;;
+    clock_skew) echo 30 ;;                  *) echo 1 ;;
+  esac
+}
+
+_ndjson_stage() {  # id label [total_bytes]
+  if [ -n "${3:-}" ]; then
+    printf '{"t":"stage","id":"%s","label":"%s","total_bytes":%s}\n' "$1" "$(_json_str "$2")" "$3"
+  else
+    printf '{"t":"stage","id":"%s","label":"%s"}\n' "$1" "$(_json_str "$2")"
+  fi
+}
+
+# One active stage at a time (app-engine.md: "cada stage cierra con
+# exactamente un done o un failed") — global state is the simplest, POSIX-sh
+# way to thread id/label/start through _stage_progress/_stage_done without
+# passing them at every call site.
+_stage() {  # id label
+  _STAGE_ID="$1"; _STAGE_LABEL="$2"; _STAGE_START="$(date +%s)"
+  if [ "$PORCELAIN" -eq 1 ]; then _ndjson_stage "$1" "$2"
+  else echo "[*] ${2}..." >&2
+  fi
+}
+
+_stage_progress() {  # done [total] [unit]
+  [ "$PORCELAIN" -eq 1 ] || return 0
+  _d="$1"; _t="${2:-}"; _u="${3:-steps}"
+  if [ -n "$_t" ]; then
+    printf '{"t":"progress","id":"%s","done":%s,"total":%s,"unit":"%s"}\n' "$_STAGE_ID" "$_d" "$_t" "$_u"
+  else
+    printf '{"t":"progress","id":"%s","done":%s,"unit":"%s"}\n' "$_STAGE_ID" "$_d" "$_u"
+  fi
+}
+
+_stage_done() {
+  if [ "$PORCELAIN" -eq 1 ]; then
+    _now="$(date +%s)"; _ms=$(( (_now - _STAGE_START) * 1000 ))
+    printf '{"t":"done","id":"%s","ms":%s}\n' "$_STAGE_ID" "$_ms"
+  else
+    echo "[ok] ${_STAGE_LABEL}." >&2
+  fi
+}
+
+# Close the live stage with `failed` and exit with the mapped code. Every
+# call site in this section routes through here so a stage NEVER closes any
+# other way (app-engine.md invariant: exactly one done XOR one failed).
+_die_porcelain() {  # code detail [retryable=true]
+  _code="$1"; _detail="$(_mask_secret "$2")"; _retryable="${3:-true}"
+  if [ "$PORCELAIN" -eq 1 ]; then
+    printf '{"t":"failed","id":"%s","code":"%s","detail":"%s","retryable":%s}\n' \
+      "$_STAGE_ID" "$_code" "$(_json_str "$_detail")" "$_retryable"
+  else
+    echo "[x] ${_STAGE_LABEL}: ${_detail}" >&2
+  fi
+  exit "$(_failure_exit_code "$_code")"
+}
+
+# ---- facts --json: pure observation, never mutates anything --------------
+
+_free_disk_bytes() {
+  _d="$SAFENT_STATE_HOME"
+  [ -d "$_d" ] || _d="${HOME:-/tmp}"
+  _v="$(df -k "$_d" 2>/dev/null | awk 'NR==2{print $4*1024}')"
+  [ -n "$_v" ] && printf '%s' "$_v" || printf '0'
+}
+
+_total_memory_bytes() {
+  if [ "$OS" = Darwin ]; then
+    sysctl -n hw.memsize 2>/dev/null || echo 0
+  else
+    awk '/MemTotal:/{print $2*1024}' /proc/meminfo 2>/dev/null || echo 0
+  fi
+}
+
+# macOS only (podman machines do not exist on Linux hosts). "ours" reflects
+# the wrapper's OWN state.json record (data-model.md persisted state:
+# machine.name/adopted), written by the bootstrap service (RT-DESK, T011) —
+# this CLI never invents that answer, it only ever reads what was recorded.
+_machines_json() {
+  [ "$OS" = Darwin ] && [ -n "$RT" ] || { echo "[]"; return; }
+  names="$("$RT" machine list -q 2>/dev/null || true)"
+  [ -n "$names" ] || { echo "[]"; return; }
+  recorded_name=""
+  [ -f "$SAFENT_STATE_HOME/machine.json" ] && recorded_name="$(_manifest_field "$SAFENT_STATE_HOME/machine.json" name)"
+  out=""
+  for m in $names; do
+    rootful="$("$RT" machine inspect "$m" --format '{{.Rootful}}' 2>/dev/null | head -1)"
+    state="$("$RT" machine inspect "$m" --format '{{.State}}' 2>/dev/null | head -1)"
+    [ "$state" = "running" ] && running=true || running=false
+    [ "$rootful" = "true" ] && rootful=true || rootful=false
+    [ -n "$recorded_name" ] && [ "$m" = "$recorded_name" ] && ours=true || ours=false
+    entry="{\"name\":\"$(_json_str "$m")\",\"provider\":\"podman\",\"rootful\":$rootful,\"running\":$running,\"ours\":$ours}"
+    [ -z "$out" ] && out="$entry" || out="$out,$entry"
+  done
+  echo "[$out]"
+}
+
+cmd_facts() {
+  case "$OS" in Darwin) os_id=darwin ;; Linux) os_id=linux ;; *) os_id="$OS" ;; esac
+  arch="$(uname -m 2>/dev/null || echo unknown)"
+  case "$arch" in x86_64|amd64) arch=amd64 ;; arm64|aarch64) arch=arm64 ;; esac
+
+  engine_exists=false; engine_running=false; engine_digest=null
+  if [ -n "$RT" ] && _exists; then
+    engine_exists=true
+    _running && engine_running=true
+    d="$("$RT" inspect -f '{{.Image}}' "$NAME" 2>/dev/null || true)"
+    [ -n "$d" ] && engine_digest="\"$(_json_str "$d")\""
+  fi
+
+  # Whether the DESIRED digest is already present locally, independent of
+  # whether a container is running it yet (data-model.md HostFacts: distinct
+  # from engineContainer.imageDigest, which only reflects the RUNNING
+  # container). Needed so the wrapper's reconciler can tell "not pulled yet"
+  # (pull) apart from "pulled, just needs a container" (create) instead of
+  # re-pulling forever — `podman image exists` is a cheap, read-only check,
+  # the same style as the `_exists`/`volume exists` probes above. Only
+  # meaningful for a digest-pinned reference (contract app-engine.md §1: the
+  # wrapper always sets SAFENT_IMAGE/SAFENT_ADS_IMAGE as repo@sha256:...);
+  # a bare tag (plain terminal use) correctly reports null, same as before.
+  local_engine_digest=null
+  case "$IMAGE" in
+    *@sha256:*)
+      [ -n "$RT" ] && "$RT" image exists "$IMAGE" 2>/dev/null \
+        && local_engine_digest="\"$(_json_str "${IMAGE#*@}")\""
+      ;;
+  esac
+  local_companion_digest=null
+  case "${SAFENT_ADS_IMAGE:-}" in
+    *@sha256:*)
+      [ -n "$RT" ] && "$RT" image exists "$SAFENT_ADS_IMAGE" 2>/dev/null \
+        && local_companion_digest="\"$(_json_str "${SAFENT_ADS_IMAGE#*@}")\""
+      ;;
+  esac
+
+  published_port=null
+  [ "$engine_running" = true ] && { p="$(_port 2>/dev/null || true)"; [ -n "$p" ] && published_port="$p"; }
+  data_volume=false
+  [ -n "$RT" ] && "$RT" volume exists "$DATA_VOLUME" >/dev/null 2>&1 && data_volume=true
+
+  companion_scaffold=false; companion_running=0; companion_total=0
+  if [ -f "$COMPANION_COMPOSE" ]; then
+    companion_scaffold=true
+    [ -n "$RT" ] && { _companion_container_counts; companion_running="$running"; companion_total="$total"; }
+  fi
+  companion_health=unknown
+  if [ -f "$COMPANION_STATE/tls/ca.crt" ]; then
+    case "$(_companion_health_code)" in
+      200|401) companion_health=healthy ;;
+      *) companion_health=unreachable ;;
+    esac
+  fi
+
+  daemon_health=unknown; app_version=null
+  if [ "$engine_running" = true ] && [ -n "$RT" ]; then
+    a="$("$RT" exec "$NAME" systemctl is-active hermes-runtime 2>/dev/null || true)"
+    case "$a" in active) daemon_health=healthy ;; failed) daemon_health=unreachable ;; esac
+    v="$("$RT" exec "$NAME" python3 -c 'import hermes; print(hermes.__version__)' 2>/dev/null | tr -d ' \t\r\n')"
+    [ -n "$v" ] && app_version="\"$(_json_str "$v")\""
+  fi
+
+  runtime_ok=false
+  for f in "$SAFENT_STATE_HOME"/runtime/*/.verified; do
+    [ -f "$f" ] && runtime_ok=true
+  done
+
+  userns_allowed=true
+  if [ "$OS" = Linux ]; then
+    v="$(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo 1)"
+    [ "$v" = "0" ] && userns_allowed=false
+  fi
+  # AppArmor `userns` profile for the packaged podman (plan.md governance
+  # table) — installed once by the privileged helper (RT-DESK, T011). Not
+  # written by anything in this repo yet: correctly reports false today.
+  helper_installed=false
+  [ -f /etc/apparmor.d/safent-userns ] && helper_installed=true
+
+  facts="{\"os\":\"$os_id\",\"arch\":\"$arch\",\"freeDiskBytes\":$(_free_disk_bytes),\"totalMemoryBytes\":$(_total_memory_bytes),\"runtimeStaged\":$runtime_ok,\"runtimeHashOk\":$runtime_ok,\"machines\":$(_machines_json),\"engineContainer\":{\"exists\":$engine_exists,\"running\":$engine_running,\"imageDigest\":$engine_digest},\"localEngineImageDigest\":$local_engine_digest,\"localCompanionImageDigest\":$local_companion_digest,\"publishedPort\":$published_port,\"dataVolume\":$data_volume,\"companionScaffold\":$companion_scaffold,\"companionContainers\":{\"running\":$companion_running,\"total\":$companion_total},\"companionHealth\":\"$companion_health\",\"daemonHealth\":\"$daemon_health\",\"appVersion\":$app_version,\"userNsAllowed\":$userns_allowed,\"helperInstalled\":$helper_installed}"
+
+  if [ "$PORCELAIN" -eq 1 ]; then
+    printf '{"t":"facts","facts":%s}\n' "$facts"
+  else
+    printf '%s\n' "$facts"
+  fi
+}
+
+# ---- stage-runtime: deploy + sha256-verify the bundled podman ------------
+# Manifest lives beside this script inside the app bundle (app-engine.md §1:
+# `<bundle>/engine/safent`), never fetched over the network. Fixed, known
+# shape — same "no general JSON parser" rule as _manifest_field.
+cmd_stage_runtime() {
+  _stage runtime_staging "Preparando la base de ejecucion"
+  bundle_dir="$(CDPATH='' cd -- "$(dirname "$0")" 2>/dev/null && pwd)"
+  manifest="$bundle_dir/runtime-bundle.json"
+  if [ ! -f "$manifest" ]; then
+    # Not running from a real app bundle (plain terminal/dev use) — nothing
+    # packaged to stage; PATH/SAFENT_PODMAN resolution is used as-is.
+    _stage_done
+    return 0
+  fi
+  version="$(_manifest_field "$manifest" podman_version)"
+  [ -n "$version" ] || _die_porcelain runtime_hash_mismatch "Manifiesto sin podman_version" false
+  target="$SAFENT_STATE_HOME/runtime/$version"
+  mkdir -p "$target" 2>/dev/null || _die_porcelain runtime_hash_mismatch "No se pudo crear $target" false
+
+  paths="$(grep -o '"path": *"[^"]*"' "$manifest" | sed -E 's/.*"([^"]*)"$/\1/')"
+  total="$(printf '%s\n' "$paths" | grep -c .)"
+  done_n=0
+  for path in $paths; do
+    entry_block="$(awk -v p="\"path\": \"$path\"" 'index($0,p){f=1} f{print; if(/}/){exit}}' "$manifest")"
+    sha="$(printf '%s\n' "$entry_block" | sed -n 's/.*"sha256": *"\([^"]*\)".*/\1/p' | head -1)"
+    mode="$(printf '%s\n' "$entry_block" | sed -n 's/.*"mode": *"\([^"]*\)".*/\1/p' | head -1)"
+    mode="${mode:-0755}"
+    src="$bundle_dir/$path"
+    [ -f "$src" ] || _die_porcelain runtime_hash_mismatch "Falta $path en el paquete" false
+    [ "$(_sha256 "$src")" = "$sha" ] || _die_porcelain runtime_hash_mismatch "$path no coincide con el manifiesto" false
+    dst="$target/$path"
+    mkdir -p "$(dirname "$dst")" 2>/dev/null || true
+    cp "$src" "$dst" && chmod "$mode" "$dst"
+    done_n=$((done_n + 1))
+    _stage_progress "$done_n" "$total" steps
+  done
+  : > "$target/.verified"
+  [ -n "${SAFENT_PODMAN:-}" ] || SAFENT_PODMAN="$target/podman"
+  _stage_done
+}
+
+# ---- ensure-machine / ensure-images / up: porcelain-narrated primitives --
+# These call the SAME podman primitives _ensure_machine/_run already use,
+# just narrated as NDJSON stages — _ensure_machine/_run themselves are left
+# untouched (another lane edits them concurrently).
+
+cmd_ensure_machine() {
+  _stage machine "Preparando la maquina"
+  if [ "$RTN" != podman ] || [ "$OS" != Darwin ]; then
+    _stage_done
+    return 0
+  fi
+  name="$("$RT" machine list -q 2>/dev/null | head -1)"
+  if [ -z "$name" ]; then
+    "$RT" machine init --rootful --cpus 4 --memory 8192 --disk-size 60 >&2 \
+      || _die_porcelain machine_create_failed "No se pudo crear la maquina" true
+    name="$("$RT" machine list -q 2>/dev/null | head -1)"
+  fi
+  rootful="$("$RT" machine inspect "$name" --format '{{.Rootful}}' 2>/dev/null | head -1)"
+  [ "$rootful" = "true" ] || _die_porcelain machine_create_failed "La maquina existente es rootless" false
+  "$RT" machine start "$name" >&2 2>/dev/null || "$RT" info >/dev/null 2>&1 \
+    || _die_porcelain machine_start_failed "No se pudo arrancar la maquina" true
+  _stage_done
+}
+
+cmd_ensure_images() {
+  _stage pull_engine "Descargando Safent"
+  "$RT" pull "$IMAGE" >&2 || _die_porcelain registry_unreachable "No se pudo descargar la imagen" true
+  _stage_progress 1 1 layers
+  _stage_done
+
+  if [ "$NO_COMPANION" -eq 0 ] && [ -n "${SAFENT_ADS_IMAGE:-}" ]; then
+    _stage pull_companion "Descargando el companero"
+    "$RT" pull "$SAFENT_ADS_IMAGE" >&2 || _die_porcelain registry_unreachable "No se pudo descargar el companero" true
+    _stage_progress 1 1 layers
+    _stage_done
+  fi
+}
+
+cmd_up() {
+  secret_fd=3
+  [ "${1:-}" = "--secret-fd" ] && secret_fd="${2:-3}"
+
+  _stage container "Creando el contenedor"
+  _run
+  _stage_done
+
+  _stage health "Esperando a que Safent este listo"
+  secret=""
+  i=0
+  while [ "$i" -lt 48 ]; do
+    a="$("$RT" exec "$NAME" systemctl is-active hermes-runtime 2>/dev/null || true)"
+    if [ "$a" = active ]; then
+      secret="$("$RT" exec "$NAME" cat /var/lib/hermes-bootstrap/bootstrap/webui-bootstrap 2>/dev/null | tr -d '\r\n' || true)"
+      [ -n "$secret" ] && break
+    fi
+    [ "$a" = failed ] && _die_porcelain daemon_unhealthy "El servicio de Safent no arranco" true
+    _stage_progress "$i" 48 steps
+    sleep 5
+    i=$((i + 1))
+  done
+  [ -n "$secret" ] || _die_porcelain daemon_unhealthy "Safent no respondio a tiempo" true
+  _stage_done
+
+  url="http://127.0.0.1:$(_port)/?k=${secret}"
+  if [ "$PORCELAIN" -eq 1 ]; then
+    printf '{"t":"ready","endpoint_ref":"stdout-secret"}\n'
+    # /dev/fd/N (not `>&N`, and no eval): dash's redirection grammar only
+    # recognizes a SINGLE digit before `>&`, silently misparsing any 2+
+    # digit fd as a command word ("Bad fd number") — confirmed against the
+    # real dash binary, not a hypothetical. /dev/fd/<n> is a plain PATH, so
+    # ordinary variable expansion applies and any fd number works.
+    printf '%s\n' "$url" > "/dev/fd/${secret_fd}" 2>/dev/null \
+      || echo "[!] No se pudo escribir el vale en el descriptor $secret_fd." >&2
+  else
+    printf '%s\n' "$url"
+  fi
 }
 
 usage() {
@@ -954,7 +1866,11 @@ safent - control your local Safent
   safent logs       follow the container journal
   safent pair <code>   associate with an enterprise tenant (same image, associate mode)
   safent unpair        remove the enterprise association (reverts to community edition)
-  safent uninstall     remove Safent (container + data + CLI + agent; keeps podman/docker)
+  safent uninstall [--purge]
+                       remove THIS installation's software (container, companion
+                       stack, host agent, CLI); keeps your data volume + companion
+                       state unless --purge, which deletes those too. Never touches
+                       another instance or podman/docker itself.
 
   safent backup [dir]             stop cleanly, archive the data volume + companion
                                    state (secrets) + seccomp cache into one 0600 file
@@ -964,16 +1880,42 @@ safent - control your local Safent
                                    `safent backup`, then restart. Refuses to overwrite
                                    an existing data volume unless --force is given
 
-  safent companion status            is the companion up? containers, /mcp/health
-  safent companion update            pull the latest companion image and recreate it
-  safent companion rotate            issue a new /mcp bearer on both sides, restart ads-api
-  safent companion remove [--purge]  stop + remove the companion (keeps its state unless --purge)
+  safent companion install            install the companion (idempotent — safe to re-run)
+  safent companion repair             reconcile a half-provisioned companion (same as install)
+  safent companion status             is the companion up? containers, /mcp/health
+  safent companion update             pull the latest companion image and recreate it
+  safent companion rotate             issue a new /mcp bearer on both sides, restart ads-api
+  safent companion remove [--purge]   stop + remove the companion (keeps its state unless --purge)
+
+  safent brake release   release the emergency brake without MFA (host access == owner;
+                          use only when MFA isn't enrolled yet and no device password
+                          exists — TOTP via the UI is the normal path)
 
   --no-companion    FIRST argument, any command: skip provisioning/joining the
                      preinstalled Safent Ads companion (MCP campaign tools).
                      A failed provisioning attempt never blocks Safent itself.
 EOF
 }
+
+# Filter --porcelain AND --no-companion out of argv from ANY position
+# (app-engine.md §1: --porcelain trails the verb, e.g. `up --porcelain`;
+# --no-companion has the SAME need — the Tauri adapter always invokes
+# `<cli_path> <verb> [args] --porcelain`, verb first, so a position-locked
+# "$1 only" check could never be requested by it at all) before the
+# dispatch below reads positional args. Safe to mutate "$@" mid-loop:
+# `for x in "$@"` expands the list once, up front.
+_rest_n=0
+for _a in "$@"; do
+  case "$_a" in
+    --porcelain) PORCELAIN=1 ;;
+    --no-companion) NO_COMPANION=1 ;;
+    *)
+      if [ "$_rest_n" -eq 0 ]; then set -- "$_a"; else set -- "$@" "$_a"; fi
+      _rest_n=$((_rest_n + 1))
+      ;;
+  esac
+done
+[ "$_rest_n" -eq 0 ] && set --
 
 case "${1:-open}" in
   ""|open|abrir)               cmd_open ;;
@@ -988,9 +1930,15 @@ case "${1:-open}" in
   companion|compañero)         cmd_companion "${2:-}" "${3:-}" ;;
   pair|vincular)               cmd_pair "${2:-}" ;;
   unpair|desvincular)          cmd_unpair ;;
-  uninstall|desinstalar)       cmd_uninstall ;;
+  uninstall|desinstalar)       shift; cmd_uninstall "$@" ;;
   backup|respaldo)             cmd_backup "${2:-}" ;;
   restore|restaura)            shift; cmd_restore "$@" ;;
+  facts)                       cmd_facts ;;
+  stage-runtime)                cmd_stage_runtime ;;
+  ensure-machine)               cmd_ensure_machine ;;
+  ensure-images)                 cmd_ensure_images ;;
+  up)                           cmd_up "${2:-}" "${3:-}" ;;
+  brake|freno)                 cmd_brake "${2:-}" ;;
   -h|--help|help|ayuda)        usage ;;
   *) echo "Unknown command: $1"; echo; usage; exit 1 ;;
 esac

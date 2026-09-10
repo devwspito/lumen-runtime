@@ -29,9 +29,45 @@ añadirá cuando Windows entre.
 
 ## 2. Manifiesto del motor y del compañero — `runtime-manifest.json`
 
-Vive junto a `latest.json`, firmado con **la misma clave** y verificado con la
-misma clave pública embebida. Es lo que convierte «hay versión nueva» en un hecho
+Vive junto a `latest.json`. Es lo que convierte «hay versión nueva» en un hecho
 comprobable en lugar de una comparación de cadenas.
+
+> **Reconciliación entre carriles (T005→T006, backend-engineer).** T005
+> implementó una desviación temporal (Ed25519 crudo hex, clave propia); el
+> carril de escritorio (T014, RT-DESK) ya verificaba `runtime-manifest.json`
+> con **minisign** usando **la misma clave** que el actualizador de Tauri
+> (`TAURI_SIGNING_PRIVATE_KEY` en `agents-autonomy`) — decisión del dueño:
+> **una sola clave para los dos ficheros**. T006 corrige el lado del daemon
+> para volver a coincidir con el texto original de este documento:
+> - Firmado con **minisign, modo prehashed «ED»** (BLAKE2b-512 + Ed25519) —
+>   el mismo par que `latest.json`, nunca un par propio.
+>   `runtime-manifest.json.minisig` es el sidecar separado y estándar
+>   (`minisign -S -s <clave> -m runtime-manifest.json`); el JSON en sí **ya
+>   no lleva un campo de firma embebido**.
+> - Verificador: `hermes.shell_server.runtime_manifest` — implementación
+>   Python pura sobre `cryptography` (Ed25519) + `hashlib.blake2b` de la
+>   librería estándar (**sin dependencia nueva**); el formato se validó
+>   contra el binario real `minisign` 0.11, no solo de memoria.
+> - Herramienta de firma: `ops/container/sign_runtime_manifest.py sign
+>   --minisign-secret-key <clave>` — invoca el binario `minisign` real (no
+>   reimplementa el manejo de la clave secreta, deliberadamente: eso es
+>   justo la parte que no conviene reescribir a mano). Sin esa opción,
+>   escribe solo el JSON sin firmar para que el pipeline firme aparte.
+> - Clave pública **comprometida en el repo**:
+>   `ops/keys/runtime-manifest.pub` (formato de fichero público de
+>   minisign), horneada en la imagen en
+>   `/usr/share/hermes/keys/runtime-manifest.pub` (Containerfile) y cargada
+>   **por defecto**. `SAFENT_RUNTIME_MANIFEST_PUBKEY` solo la sustituye
+>   **en tests**.
+> - **Hoy `ops/keys/runtime-manifest.pub` es un placeholder** (clave
+>   Ed25519 toda a cero, comentario explícito) — el carril del pipeline
+>   (`agents-autonomy`, T023, `minisign -G`) aún no ha generado el par real
+>   ni comprometido la mitad pública. Mientras tanto,
+>   `is_placeholder_pubkey()` lo detecta y `fetch_verified_manifest()`
+>   devuelve `None` (fail-closed: ningún manifiesto verifica con la clave
+>   de relleno). `tests/unit/ops/test_runtime_manifest_pubkey_release_gate.py`
+>   falla a propósito con `SAFENT_RELEASE=1` mientras el placeholder siga
+>   ahí — es el gate que bloquea una build de release sin la clave real.
 
 ```jsonc
 {
@@ -161,8 +197,12 @@ Por release, en el mismo destino:
 1. Instaladores firmados y **notarizados** por plataforma (DMG con el ticket
    grapado; .deb y .AppImage).
 2. `latest.json` firmado (`includeUpdaterJson: true`).
-3. `runtime-manifest.json` firmado con la misma clave, con los digests que **ya
-   se publicaron** de `ghcr.io/devwspito/safent` y `…/safent-ads`.
+3. `runtime-manifest.json` + `runtime-manifest.json.minisig`, firmados con
+   **la misma clave minisign** que `latest.json` (§2 —
+   `ops/container/sign_runtime_manifest.py sign --minisign-secret-key
+   <TAURI_SIGNING_PRIVATE_KEY>`, digests que **ya se publicaron** de
+   `ghcr.io/devwspito/safent` y `…/safent-ads`, resueltos por la propia
+   herramienta de registro del pipeline, no por este script).
 4. `VERSION` actualizado (compatibilidad con el chequeo de hoy).
 
 Si falta cualquiera de los cuatro, la release **no se publica**: una app que ve

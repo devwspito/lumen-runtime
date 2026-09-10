@@ -698,3 +698,76 @@ export type StreamFrame =
   | { kind: 'status';         message?: string; status?: string; seq?: number }
   | { kind: 'done';           seq?: number }
   | { kind: 'error';          message?: string; seq?: number }
+
+// ── Install requests (028/029, contracts/install-request.md) ───────────────────
+//
+// The sandbox never creates sibling containers: the UI leaves a request marker
+// under /var/lib/hermes/instance/ and the HOST agent (safent agent, or the app
+// itself when open) claims and fulfils it. Closed vocabulary by design — no
+// field carries a command, path, URL or argument (contract §1 invariant 1).
+
+export type HostVerb =
+  | 'install_companion'
+  | 'repair_companion'
+  | 'remove_companion'
+  | 'update_system'
+  | 'uninstall_system'
+
+export type InstallRequestState = 'pending' | 'claimed' | 'applied' | 'expired' | 'failed'
+
+export interface InstallRequestProgress {
+  done: number
+  total?: number
+  unit: 'bytes' | 'layers' | 'steps'
+}
+
+export interface InstallRequestFailure {
+  code: string
+  /** Owner-facing sentence, already in Spanish — the frontend renders it as-is. */
+  label: string
+  retryable: boolean
+}
+
+export interface InstallRequestStatus {
+  verb: HostVerb
+  state: InstallRequestState
+  /** Echoes the live engine stage (contracts/app-engine.md §3 StageId). */
+  stage?: string
+  progress?: InstallRequestProgress
+  expires_at: string
+  last_failure?: InstallRequestFailure
+}
+
+export interface InstallRequestResponse {
+  accepted: boolean
+  request?: InstallRequestStatus
+  code?: 'unknown_verb' | 'unknown_slug'
+}
+
+export interface InstallRequestsListResponse {
+  requests: InstallRequestStatus[]
+}
+
+// ── System update (028, contracts/update.md) ───────────────────────────────────
+
+export interface VersionSet {
+  app: string
+  engine: string
+  companion: string | null
+}
+
+export type UpdatePieceKind = 'app' | 'engine' | 'companion'
+
+export interface UpdatePiece {
+  kind: UpdatePieceKind
+  size_bytes?: number
+}
+
+/** The rich shape the Tauri host shell injects once it has checked for real (contract §3). */
+export interface SafentUpdateGlobal {
+  available: boolean
+  current: VersionSet
+  to?: VersionSet
+  pieces?: UpdatePiece[]
+  checked_at: string
+}

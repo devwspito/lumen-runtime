@@ -839,6 +839,15 @@ def create_app() -> FastAPI:
     # middleware — they must stay reachable pre-auth so the owner can load the
     # shell and present the bootstrap secret in the first place.
     #
+    # A-07 (specs/025-safent-repaso matriz-final-39eeb8e): /openapi.json is
+    # OUTSIDE /api/v1/ too, but unlike the four surfaces above it is NOT meant
+    # to be public — it was served 200 with no bearer while every route it
+    # describes gave 401, handing the full API surface (71 GET routes + the
+    # rest) to anyone who reaches the port. docs_url/redoc_url are disabled
+    # (FastAPI never registers those routes), but are included here too so
+    # re-enabling either can't reopen this same hole silently.
+    _PROTECTED_NON_API_PATHS: frozenset[str] = frozenset({"/openapi.json", "/docs", "/redoc"})
+    #
     # The ONE protocol-level constraint: the browser's EventSource API (used by
     # the two SSE views) cannot set a custom Authorization header. Rather than
     # exempting those routes from auth, they accept the SAME bearer via a
@@ -875,7 +884,7 @@ def create_app() -> FastAPI:
     @app.middleware("http")
     async def _require_operator_token(request: _Req, call_next):  # noqa: ANN001,ANN202
         path = request.url.path
-        if path.startswith("/api/v1/"):
+        if path.startswith("/api/v1/") or path in _PROTECTED_NON_API_PATHS:
             auth = request.headers.get("authorization", "")
             token = auth[7:] if auth[:7].lower() == "bearer " else ""
             if not token and request.method == "GET" and _is_query_token_sse_route(path):
@@ -1509,12 +1518,19 @@ def create_app() -> FastAPI:
 
     app.include_router(create_instance_router(_DB_PATH, vault))
 
-    # UI-triggered update: GET reports current/latest version, POST drops a marker the
-    # host-side `safent agent` watches to apply the update (the sandbox can't self-update).
+    # UI-triggered update: GET reports current/latest version + verified
+    # manifest digests (T005). Requesting the update/uninstall/companion
+    # actions themselves is install_requests' job (T006) — POST/GET
+    # /api/v1/system/requests, plus the /system/update and /system/uninstall
+    # POST aliases existing installs already call.
+    from hermes.shell_server.install_requests import (  # noqa: PLC0415
+        create_install_requests_router,
+    )
     from hermes.shell_server.system_update import (  # noqa: PLC0415
         create_system_update_router,
     )
     app.include_router(create_system_update_router())
+    app.include_router(create_install_requests_router())
 
 
     # ------------------------------------------------------------------

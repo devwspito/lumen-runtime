@@ -47,6 +47,19 @@
 # Publishing ghcr.io/devwspito/safent-ads (SAFENT_ADS_IMAGE's default) is
 # the OWNER's own release step, from the ads repo's CI — never done from
 # here or from a developer machine.
+#
+# --scaffold (028 T015): stop after the network/TLS/bearer/companions.json/
+# caps/pg_password steps — every one of them is local and image-independent
+# (no pull, no `podman run` of the ads image). Skips ensure_image,
+# ensure_secrets, ensure_sso_keypair, start_companion and wait_for_health,
+# so the companion's OWN service never comes up. This is what run-safent.sh
+# and the `safent` CLI now call on EVERY Safent start: the four files Safent
+# binds read-only (companions.json, ca.crt, bearer, sso/ads-sso.key) always
+# exist from first boot, so a LATER `safent companion install` only ever
+# writes into mounts that are already there — it never has to recreate
+# Safent's own container. Without --scaffold this script still runs the
+# FULL sequence (today's exact behaviour), used by `safent companion
+# install|repair` (T016) to actually bring the service up.
 set -euo pipefail
 
 readonly COMPANION_SUBNET="10.201.0.0/24"
@@ -64,8 +77,24 @@ readonly SAFENT_ADS_IMAGE="${SAFENT_ADS_IMAGE:-ghcr.io/devwspito/safent-ads:late
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE="${SAFENT_COMPANION_STATE:-$HOME/.safent/companions/ads}"
-RUNTIME="$(command -v podman || command -v docker)"
+# SAFENT_PODMAN wins over PATH resolution — same rule as the `safent` CLI
+# (contracts/app-engine.md §1): the desktop app ships its OWN pinned podman
+# binary and this script must never fall back to whatever a terminal user
+# happens to have on PATH once it is invoked from the embedded CLI
+# (`safent companion install|repair`, T016).
+if [ -n "${SAFENT_PODMAN:-}" ]; then
+  RUNTIME="$SAFENT_PODMAN"
+else
+  RUNTIME="$(command -v podman || command -v docker)"
+fi
 [ -n "$RUNTIME" ] || { echo "provision.sh: need podman or docker" >&2; exit 1; }
+
+SCAFFOLD_ONLY=0
+case "${1:-}" in
+  --scaffold) SCAFFOLD_ONLY=1 ;;
+  "") ;;
+  *) echo "provision.sh: unknown argument '$1' (usage: provision.sh [--scaffold])" >&2; exit 1 ;;
+esac
 
 mkdir -p "$STATE/tls" "$STATE/secrets" "$STATE/sso"
 chmod 0700 "$STATE" "$STATE/secrets" "$STATE/sso"
@@ -172,10 +201,28 @@ JSON
 ensure_image() {
   if "$RUNTIME" image inspect "$SAFENT_ADS_IMAGE" >/dev/null 2>&1; then
     log "imagen '$SAFENT_ADS_IMAGE' ya está en local — OK"
-    return 0
+  else
+    log "descargando '$SAFENT_ADS_IMAGE'…"
+    "$RUNTIME" pull "$SAFENT_ADS_IMAGE" || fail "no se pudo descargar '$SAFENT_ADS_IMAGE'"
   fi
-  log "descargando '$SAFENT_ADS_IMAGE'…"
-  "$RUNTIME" pull "$SAFENT_ADS_IMAGE" || fail "no se pudo descargar '$SAFENT_ADS_IMAGE'"
+  record_provisioned_image
+}
+
+# Persist the EXACT image ref this run actually used — the single source of
+# truth `safent companion status/rotate/remove` reads back (CLI-10). Without
+# this, those verbs fell back to a hard-coded ghcr.io/…/safent-ads:latest that
+# could silently diverge from the image `run-safent.sh` actually provisioned
+# with (its own dev convenience picks up safent-ads:local when present) — a
+# `rotate` would then recreate ads-api against a DIFFERENT image than
+# ads-worker was already running, and an image whose alembic history doesn't
+# know the DB's current revision dies `Can't locate revision …`. Re-written on
+# EVERY provisioning run (this script runs on every `run-safent.sh`/`safent`
+# start, not just first install) so it always reflects the image actually in
+# use — `safent companion update` is still the only verb that CHOOSES a new
+# one; this merely records the choice already made.
+record_provisioned_image() {
+  printf '%s' "$SAFENT_ADS_IMAGE" > "$STATE/image.tmp"
+  mv -f "$STATE/image.tmp" "$STATE/image"
 }
 
 # ── 6. Postgres password (compose.yaml's ADS_POSTGRES_PASSWORD) ─────────────
@@ -196,7 +243,9 @@ ensure_secrets() {
   else
     log "generando secretos de ads-api/ads-worker/ads-broker (una sola vez)…"
     local keypair signing_key public_key session_secret totp_key master_key
-    keypair="$("$RUNTIME" run --rm --network none "$SAFENT_ADS_IMAGE" \
+    # -- (security review 2026-09-10, LOW finding, CWE-88): stops podman/
+    # docker from ever reading $SAFENT_ADS_IMAGE as an option.
+    keypair="$("$RUNTIME" run --rm --network none -- "$SAFENT_ADS_IMAGE" \
       python -m safent_ads.tools.gen_keys)"
     signing_key="$(printf '%s\n' "$keypair" | sed -n 's/^ADS_APPROVAL_SIGNING_KEY=//p')"
     public_key="$(printf '%s\n' "$keypair" | sed -n 's/^ADS_APPROVAL_PUBLIC_KEY=//p')"
@@ -270,11 +319,35 @@ merge_vendor_credentials() {
 # PUBLIC_KEY as URL-SAFE base64 (matching the assertion's own <b64url(payload)>
 # encoding, contracts/sso.md §3). `tr '+/' '-_'` converts alphabets without
 # touching the padding — cheap, host-only, no extra dependency.
+# ── 7c. SSO key placeholder (028 T015, scaffold mode) ───────────────────────
+# An EMPTY, correctly-permissioned file so the bind mount run-safent.sh/the
+# `safent` CLI add for /etc/hermes/companions/ads-sso.key always has a
+# source, even before ensure_sso_keypair ever runs (that step needs the ads
+# image, which scaffold mode deliberately never pulls). The daemon's own
+# loader (hermes.agents_os.infrastructure.companion_sso_authority) already
+# fails CLOSED and CLEAN on an empty key (Ed25519PrivateKey.from_private_
+# bytes raises ValueError -> CompanionSsoKeyUnavailableError, no crash, no
+# key material anywhere) — this placeholder is what makes that the observed
+# behaviour instead of a missing bind-mount source. `[ -e ]`, not `[ -f ]`:
+# treats a placeholder OR a real key identically for "already have a file
+# here", `ensure_sso_keypair`'s own idempotency check below distinguishes
+# "real key already generated" (non-empty) from "just the placeholder".
+ensure_sso_placeholder() {
+  [ -e "$STATE/sso/ads-sso.key" ] && return 0
+  : > "$STATE/sso/ads-sso.key"
+  chmod 0400 "$STATE/sso/ads-sso.key"
+}
+
 ensure_sso_keypair() {
-  [ -f "$STATE/sso/ads-sso.key" ] && return 0
+  # -s (non-empty), not -f: a scaffold-mode placeholder (ensure_sso_
+  # placeholder above) is a zero-byte file at this exact path — it must
+  # NOT satisfy this check, or `safent companion install` would see "the
+  # key already exists" and never generate the real one (T015/T016 boundary).
+  [ -s "$STATE/sso/ads-sso.key" ] && return 0
   log "generando par Ed25519 de SSO (puente de sesión, 026)…"
   local keypair seed_std pub_std pub_urlsafe
-  keypair="$("$RUNTIME" run --rm --network none "$SAFENT_ADS_IMAGE" \
+  # -- (LOW finding, CWE-88): see ensure_secrets's own identical comment.
+  keypair="$("$RUNTIME" run --rm --network none -- "$SAFENT_ADS_IMAGE" \
     python -m safent_ads.tools.gen_keys)"
   seed_std="$(printf '%s\n' "$keypair" | sed -n 's/^ADS_APPROVAL_SIGNING_KEY=//p')"
   pub_std="$(printf '%s\n' "$keypair" | sed -n 's/^ADS_APPROVAL_PUBLIC_KEY=//p')"
@@ -315,11 +388,45 @@ ensure_caps() {
   log "caps.yaml creado desde la plantilla — sin cuentas autorizadas todavía (fail-closed)"
 }
 
+# Security review 2026-09-10 (MEDIUM finding, CWE-754): the SAME
+# migration-head guard `safent companion update`/`rotate` apply (see that
+# script's own comment for the full rationale) — this is the "repair"/
+# start path the review's own fix bullet calls out: provision.sh runs on
+# EVERY `run-safent.sh`/`safent start`, so a stale SAFENT_ADS_IMAGE could
+# otherwise bring up an image older than the database through THIS path
+# without ever going through `update`. Fail-SOFT here on purpose, unlike
+# the CLI verbs: this whole script's posture is FR-3 (a provisioning
+# problem never blocks Safent's OWN boot, only the companion) — an
+# unreachable DB/image means we cannot yet tell, and blocking the owner's
+# entire container boot over an availability-only risk (the review's own
+# rating: "no confidentiality or integrity loss") would be strictly worse
+# than the bug it guards against. Only fires when ads-db already exists (a
+# re-provision/restart) — nothing to compare on a brand-new database.
+_refuse_if_image_predates_the_database() {
+  "$RUNTIME" container exists safent-ads-ads-db-1 2>/dev/null || return 0
+  local db_rev history
+  db_rev="$("$RUNTIME" exec safent-ads-ads-db-1 \
+    psql -U ads -d ads -tAc 'SELECT version_num FROM alembic_version;' 2>/dev/null \
+    | tr -d '[:space:]')"
+  [ -n "$db_rev" ] || return 0
+  # -- (LOW finding, CWE-88): see ensure_secrets's own identical comment.
+  history="$("$RUNTIME" run --rm --network none -- "$SAFENT_ADS_IMAGE" alembic history 2>/dev/null || true)"
+  if [ -z "$history" ]; then
+    log "no se pudo leer el historial de alembic de '$SAFENT_ADS_IMAGE' — se continúa (FR-3, no bloquea el arranque)"
+    return 0
+  fi
+  if printf '%s\n' "$history" | grep -qw -- "$db_rev"; then
+    return 0
+  fi
+  fail "'$SAFENT_ADS_IMAGE' no conoce la revisión '$db_rev' (ya aplicada en la base de datos) — imagen MÁS ANTIGUA que la BD, no se arranca el companion con ella (usa 'safent companion update' con la imagen correcta; Safent arranca igual, sin companion — FR-3)"
+}
+
 start_companion() {
   export SAFENT_STATE="$STATE"
   export SAFENT_ADS_IMAGE
   export ADS_POSTGRES_PASSWORD
   ADS_POSTGRES_PASSWORD="$(cat "$STATE/pg_password")"
+  _refuse_if_image_predates_the_database
   "$RUNTIME" compose -p safent-ads -f "$HERE/compose.yaml" up -d
 }
 
@@ -351,11 +458,18 @@ ensure_network
 ensure_tls
 ensure_bearer
 write_companions_json
-ensure_image
 ensure_pg_password
+ensure_caps
+ensure_sso_placeholder
+
+if [ "$SCAFFOLD_ONLY" -eq 1 ]; then
+  log "andamiaje listo (red + companions.json + TLS + bearer) — companion NO arrancado (usa 'safent companion install')"
+  exit 0
+fi
+
+ensure_image
 ensure_secrets
 ensure_sso_keypair
-ensure_caps
 start_companion
 wait_for_health
 log "aprovisionamiento OK — $STATE/companions.json listo para el bind read-only"

@@ -10,7 +10,8 @@ rust-version = "1.77"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2"
 
 # update/ orchestrator (contracts/update.md): parse latest.json + runtime-manifest.json,
 # compare VersionSet, drive the Tauri updater plugin for the wrapper's own self-update.
@@ -23,6 +24,10 @@ tauri-plugin-updater = "2"
 # Verifies runtime-manifest.json's signature ourselves — the updater plugin
 # only knows about latest.json (contracts/update.md §2).
 minisign-verify = "0.2"
+
+# Unix-only: engine_adapter.rs lands the bootstrap secret on a dedicated fd via dup2 (app-engine.md §5).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 # Smaller, faster release binaries for the shipped desktop shell.
 [profile.release]

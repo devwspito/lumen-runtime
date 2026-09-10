@@ -39,7 +39,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID
 
 import pytest
@@ -184,6 +184,33 @@ class TestConfigureNativeProviderSetActiveGating:
 
 
 # ---------------------------------------------------------------------------
+# A2. list_native_providers — curated default_model suggestion (PROV-02)
+# ---------------------------------------------------------------------------
+
+
+class TestListNativeProvidersDefaultModel:
+    def test_curated_ids_carry_a_default_model(self, tmp_path: Path, _hermes_home: Path) -> None:
+        wiring = _make_wiring(tmp_path)
+        # NOTE: MagicMock(name=...) reserves `name` for the mock's own repr —
+        # it does NOT set a `.name` attribute. Assign it after construction so
+        # list_native_providers' `getattr(cfg, "name", pid)` sees a real string.
+        anthropic_cfg = MagicMock()
+        anthropic_cfg.name = "Anthropic"
+        made_up_cfg = MagicMock()
+        made_up_cfg.name = "Made Up"
+        registry = {"anthropic": anthropic_cfg, "made-up-id": made_up_cfg}
+        with patch.dict("sys.modules", {"hermes_cli.auth": MagicMock(PROVIDER_REGISTRY=registry)}):
+            out = wiring.list_native_providers()
+
+        by_id = {row["provider_id"]: row for row in out}
+        # Curated id: the UI's "Add/Connect" form can pre-fill this.
+        assert by_id["anthropic"]["default_model"] == "claude-sonnet-4-6"
+        # Non-curated id: "" (not missing) — the field still starts empty and
+        # editable rather than absent, so the frontend never has to special-case it.
+        assert by_id["made-up-id"]["default_model"] == ""
+
+
+# ---------------------------------------------------------------------------
 # B. set_active_provider — native (non-UUID) ids
 # ---------------------------------------------------------------------------
 
@@ -246,6 +273,33 @@ class TestSetActiveProviderNativeIds:
         assert result["ok"] is False
         assert "anthropic" in result["error"]
 
+    def test_native_id_with_key_but_no_model_refuses_to_activate(
+        self, tmp_path: Path, _hermes_home: Path
+    ) -> None:
+        """specs/025-safent-repaso PROV-02 — the UI's Add/Connect body is
+        configureNativeProvider({provider_id, api_key}), with NO `model`.
+        Activating that provider must raise loudly (-> 422 in REST, see
+        SetActiveProvider in the adapter) instead of writing config.yaml
+        with model.provider set and no model.default, which used to crash
+        the FIRST chat turn with HermesModelNotConfiguredError instead of
+        failing here, clearly."""
+        wiring = _make_wiring(tmp_path)
+        with (
+            patch(f"{_DBUS_MODULE}._write_hermes_model_config") as mock_write_model,
+            patch.dict("sys.modules", {"hermes_cli.auth": MagicMock(PROVIDER_REGISTRY=_FAKE_REGISTRY)}),
+        ):
+            # Exactly the UI's current body: no `model` at all.
+            wiring.configure_native_provider(
+                provider_id="anthropic", api_key="sk-ant", model="",
+                base_url="", sender_uid=1000, set_active=False,
+            )
+
+            with pytest.raises(ValueError, match="anthropic.*modelo"):
+                wiring.set_active_provider(provider_id="anthropic", sender_uid=1000)
+
+        # The broken config (provider set, no default) must NEVER be written.
+        mock_write_model.assert_not_called()
+
     def test_sql_uuid_path_is_unaffected(self, tmp_path: Path, _hermes_home: Path) -> None:
         """Regression guard: the pre-existing SQL-repo UUID path (custom
         providers added via POST /providers) must keep working exactly as
@@ -275,6 +329,332 @@ class TestSetActiveProviderNativeIds:
             wiring.set_active_provider(provider_id=saved["provider_id"], sender_uid=1000)
 
         mock_write_model.assert_called_once_with("openai-api", "gpt-5.4-nano", "")
+
+
+# ---------------------------------------------------------------------------
+# B2. test_provider — native (non-UUID) ids (specs/025-safent-repaso PROV-03)
+# ---------------------------------------------------------------------------
+#
+# Before the fix, test_provider did `pid = _UUID(provider_id)` unconditionally.
+# A native catalogue id ("anthropic", "gemini"...) is not a UUID, so this
+# raised ValueError — uncaught, it crosses the D-Bus boundary as a generic
+# error that dbus_proxy._translate_dbus_error can't match to any
+# org.hermes.Error.* name, so it falls through to AgentUnavailable. The REST
+# route then reports 200 {"ok": false, "error": "daemon_unavailable"} for
+# EVERY native "Test" click, valid key or not, and the card never activates.
+
+
+class TestTestProviderNativeIds:
+    async def test_native_id_reaches_the_real_validator_instead_of_crashing(
+        self, tmp_path: Path, _hermes_home: Path
+    ) -> None:
+        wiring = _make_wiring(tmp_path)
+        with patch.dict("sys.modules", {"hermes_cli.auth": MagicMock(PROVIDER_REGISTRY=_FAKE_REGISTRY)}):
+            # Save a key + model WITHOUT activating (mirrors the UI's
+            # "Add/Connect" step before the "Test" click).
+            wiring.configure_native_provider(
+                provider_id="anthropic", api_key="sk-ant-real", model="claude-x",
+                base_url="", sender_uid=1000, set_active=False,
+            )
+
+            with patch(
+                f"{_DBUS_MODULE}._nous_validate_model_string",
+                new=AsyncMock(return_value=(True, None, None)),
+            ) as mock_validate:
+                result = await wiring.test_provider(provider_id="anthropic", sender_uid=1000)
+
+        assert result == {"ok": True, "error": None, "code": None}
+        mock_validate.assert_awaited_once_with("anthropic/claude-x", "sk-ant-real", "")
+
+    async def test_unknown_native_id_fails_soft_not_valueerror(
+        self, tmp_path: Path, _hermes_home: Path
+    ) -> None:
+        wiring = _make_wiring(tmp_path)
+        with patch.dict("sys.modules", {"hermes_cli.auth": MagicMock(PROVIDER_REGISTRY=_FAKE_REGISTRY)}):
+            result = await wiring.test_provider(provider_id="not-a-real-provider", sender_uid=1000)
+        assert result == {"ok": False, "error": "provider desconocido: not-a-real-provider"}
+
+    async def test_native_id_without_saved_key_fails_soft(
+        self, tmp_path: Path, _hermes_home: Path
+    ) -> None:
+        """A native provider never configured (no key in .env) must report a
+        clear reason, not crash and not silently probe with an empty key."""
+        wiring = _make_wiring(tmp_path)
+        with patch.dict("sys.modules", {"hermes_cli.auth": MagicMock(PROVIDER_REGISTRY=_FAKE_REGISTRY)}):
+            result = await wiring.test_provider(provider_id="anthropic", sender_uid=1000)
+        assert result["ok"] is False
+        assert "anthropic" in result["error"]
+
+    async def test_native_id_without_model_fails_soft(
+        self, tmp_path: Path, _hermes_home: Path
+    ) -> None:
+        """specs/025-safent-repaso PROV-02 companion case: a key saved with NO
+        model (the UI's configureNativeProvider({provider_id, api_key}) body,
+        no `model`) must not crash test_provider either."""
+        wiring = _make_wiring(tmp_path)
+        with patch.dict("sys.modules", {"hermes_cli.auth": MagicMock(PROVIDER_REGISTRY=_FAKE_REGISTRY)}):
+            wiring.configure_native_provider(
+                provider_id="anthropic", api_key="sk-ant-real", model="",
+                base_url="", sender_uid=1000, set_active=False,
+            )
+            result = await wiring.test_provider(provider_id="anthropic", sender_uid=1000)
+        assert result == {"ok": False, "error": "anthropic no tiene modelo configurado"}
+
+    async def test_sql_uuid_path_is_unaffected(self, tmp_path: Path, _hermes_home: Path) -> None:
+        """Regression guard: a real SQL-repo provider (custom, UUID id) must
+        keep going through _nous_validate_provider — only non-UUID ids take
+        the new native branch."""
+        wiring = _make_wiring(tmp_path)
+        draft = json.dumps({
+            "kind": "openai", "alias": "t", "default_model": "gpt-5.4-nano",
+            "api_key": "sk-test", "set_active": False,
+        })
+        saved = wiring.add_provider(draft_json=draft, sender_uid=1000)
+        UUID(saved["provider_id"])  # sanity: really a UUID
+
+        with (
+            patch(f"{_DBUS_MODULE}._nous_validate_provider", new=AsyncMock(return_value=(True, None, None))) as mock_sql,
+            patch.object(wiring, "_test_native_provider", new=AsyncMock()) as mock_native,
+        ):
+            result = await wiring.test_provider(provider_id=saved["provider_id"], sender_uid=1000)
+
+        assert result == {"ok": True, "error": None, "code": None}
+        mock_sql.assert_awaited_once()
+        mock_native.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# B3. _nous_validate_model_string — honest protocol classification (PROV-03,
+# matriz-final-39eeb8e: "cambia la causa, no el síntoma"). The UUID crash is
+# fixed (B2 above), but the anthropic probe hit
+# `POST https://api.anthropic.com/chat/completions` (OpenAI shape) -> 404
+# ALWAYS, valid key or not, because Anthropic has never served that route —
+# only `/v1/messages`. Since ProvidersView.tsx only auto-activates on
+# `ok === true`, the Anthropic card never activated. These tests fake the
+# HTTP layer so no real network call happens.
+# ---------------------------------------------------------------------------
+
+
+class _FakeAnthropicResponse:
+    def __init__(self, *, status: int, body: str) -> None:
+        self.status = status
+        self._body = body
+
+    async def text(self) -> str:
+        return self._body
+
+    async def __aenter__(self) -> "_FakeAnthropicResponse":
+        return self
+
+    async def __aexit__(self, *_exc: object) -> bool:
+        return False
+
+
+class _FakeAnthropicSession:
+    """Drop-in for aiohttp.ClientSession — records the exact request
+    _probe_anthropic_messages_api sends and replays a scripted response.
+    Never touches the network."""
+
+    def __init__(self, response: _FakeAnthropicResponse, captured: dict) -> None:
+        self._response = response
+        self._captured = captured
+
+    async def __aenter__(self) -> "_FakeAnthropicSession":
+        return self
+
+    async def __aexit__(self, *_exc: object) -> bool:
+        return False
+
+    def post(self, url: str, *, headers: dict, json: dict, timeout: object) -> _FakeAnthropicResponse:  # noqa: A002
+        self._captured["url"] = url
+        self._captured["headers"] = headers
+        self._captured["json"] = json
+        return self._response
+
+
+def _install_fake_anthropic_http(
+    monkeypatch: pytest.MonkeyPatch, *, status: int, body: str
+) -> dict:
+    import aiohttp
+
+    captured: dict = {}
+    response = _FakeAnthropicResponse(status=status, body=body)
+    monkeypatch.setattr(
+        aiohttp, "ClientSession", lambda *_a, **_k: _FakeAnthropicSession(response, captured)
+    )
+    return captured
+
+
+class TestAnthropicMessagesApiProbe:
+    """Anthropic must be probed via its REAL wire format (POST /v1/messages,
+    x-api-key + anthropic-version) — never the OpenAI Chat Completions shape
+    every other provider uses."""
+
+    async def test_hits_v1_messages_not_chat_completions(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from hermes.agents_os.infrastructure import dbus_runtime_service as m
+
+        captured = _install_fake_anthropic_http(monkeypatch, status=200, body='{"id":"msg_1"}')
+        await m._nous_validate_model_string("anthropic/claude-sonnet-4-6", "sk-ant-real", None)
+
+        assert captured["url"] == "https://api.anthropic.com/v1/messages"
+        assert not captured["url"].endswith("/chat/completions")
+
+    async def test_valid_key_returns_ok_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from hermes.agents_os.infrastructure import dbus_runtime_service as m
+
+        captured = _install_fake_anthropic_http(monkeypatch, status=200, body='{"id":"msg_1"}')
+        ok, err, code = await m._nous_validate_model_string(
+            "anthropic/claude-sonnet-4-6", "sk-ant-real", None
+        )
+
+        assert (ok, err, code) == (True, None, None)
+        assert captured["headers"]["x-api-key"] == "sk-ant-real"
+        assert captured["headers"]["anthropic-version"]
+
+    async def test_rejected_key_returns_invalid_key_code(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from hermes.agents_os.infrastructure import dbus_runtime_service as m
+
+        _install_fake_anthropic_http(
+            monkeypatch,
+            status=401,
+            body='{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}',
+        )
+        ok, err, code = await m._nous_validate_model_string(
+            "anthropic/claude-sonnet-4-6", "sk-ant-bad", None
+        )
+
+        assert ok is False
+        assert code == "invalid_key"
+        assert "x-api-key" in err
+
+    async def test_wrong_endpoint_returns_endpoint_error_code(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The exact regression being pinned: before this fix, EVERY
+        anthropic probe hit /chat/completions and got an unclassified,
+        unconditional 404. Now a real 404 (e.g. a misconfigured self-hosted
+        base_url) is classified as endpoint_error, not a bare ok:false."""
+        from hermes.agents_os.infrastructure import dbus_runtime_service as m
+
+        _install_fake_anthropic_http(monkeypatch, status=404, body="404 page not found")
+        ok, err, code = await m._nous_validate_model_string(
+            "anthropic/claude-sonnet-4-6", "sk-ant-real", "https://self-hosted.example.com"
+        )
+
+        assert ok is False
+        assert code == "endpoint_error"
+
+    async def test_custom_base_url_appends_the_real_messages_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from hermes.agents_os.infrastructure import dbus_runtime_service as m
+
+        captured = _install_fake_anthropic_http(monkeypatch, status=200, body="{}")
+        await m._nous_validate_model_string(
+            "anthropic/claude-sonnet-4-6", "sk-ant-real", "https://proxy.example.com/anthropic/"
+        )
+
+        assert captured["url"] == "https://proxy.example.com/anthropic/v1/messages"
+
+
+class TestOpenAiCompatibleProbeClassification:
+    """gemini (OpenAI-compatible) keeps the EXISTING client path untouched —
+    the same classification rule (401/403 -> invalid_key, 404 ->
+    endpoint_error) now also applies to whatever the openai SDK raises,
+    using the REAL openai exception types (`.status_code`), not a hand-
+    rolled duck type. hermes_cli is not installed in this environment (it
+    ships inside the container image only — same constraint documented in
+    test_dbus_provider_verbs.py), so resolve_runtime_provider is faked via
+    sys.modules, mirroring this file's own PROVIDER_REGISTRY fake above."""
+
+    async def test_401_from_the_endpoint_is_classified_invalid_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import httpx
+        import openai
+
+        from hermes.agents_os.infrastructure import dbus_runtime_service as m
+
+        request = httpx.Request(
+            "POST", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+        )
+        response = httpx.Response(401, request=request, json={"error": {"message": "API key not valid"}})
+        auth_error = openai.AuthenticationError("API key not valid", response=response, body=None)
+
+        class _FakeCompletions:
+            def create(self, **_kw: object) -> None:
+                raise auth_error
+
+        class _FakeChat:
+            completions = _FakeCompletions()
+
+        class _FakeOpenAI:
+            def __init__(self, **_kw: object) -> None:
+                self.chat = _FakeChat()
+
+        fake_openai_module = MagicMock(OpenAI=_FakeOpenAI)
+        fake_runtime_provider_module = MagicMock()
+        fake_runtime_provider_module.resolve_runtime_provider.return_value = {
+            "api_key": "bad-key",
+            "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+        }
+
+        with patch.dict(
+            "sys.modules",
+            {"openai": fake_openai_module, "hermes_cli.runtime_provider": fake_runtime_provider_module},
+        ):
+            ok, err, code = await m._nous_validate_model_string(
+                "gemini/gemini-2.5-flash", "bad-key", None
+            )
+
+        assert ok is False
+        assert code == "invalid_key"
+        assert "API key not valid" in err
+
+    async def test_404_from_the_endpoint_is_classified_endpoint_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import httpx
+        import openai
+
+        from hermes.agents_os.infrastructure import dbus_runtime_service as m
+
+        request = httpx.Request("POST", "https://bogus.example.com/v1/chat/completions")
+        response = httpx.Response(404, request=request, text="404 page not found")
+        not_found_error = openai.NotFoundError("404 page not found", response=response, body=None)
+
+        class _FakeCompletions:
+            def create(self, **_kw: object) -> None:
+                raise not_found_error
+
+        class _FakeChat:
+            completions = _FakeCompletions()
+
+        class _FakeOpenAI:
+            def __init__(self, **_kw: object) -> None:
+                self.chat = _FakeChat()
+
+        fake_openai_module = MagicMock(OpenAI=_FakeOpenAI)
+        fake_runtime_provider_module = MagicMock()
+        fake_runtime_provider_module.resolve_runtime_provider.return_value = {
+            "api_key": "sk-whatever",
+            "base_url": "https://bogus.example.com",
+        }
+
+        with patch.dict(
+            "sys.modules",
+            {"openai": fake_openai_module, "hermes_cli.runtime_provider": fake_runtime_provider_module},
+        ):
+            ok, err, code = await m._nous_validate_model_string(
+                "gemini/gemini-2.5-flash", "sk-whatever", None
+            )
+
+        assert ok is False
+        assert code == "endpoint_error"
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +695,45 @@ class TestClearRuntimeProviderCache:
 
         assert first[0]["provider"] == "gemini"
         assert second[0]["provider"] == "anthropic"
+        assert calls == ["gemini", "anthropic"]
+
+    def test_slow_resolve_does_not_poison_cache_after_concurrent_clear(self) -> None:
+        """PROV-05 — the ~30-70s "switch takes a while" symptom is a write-
+        after-clear race, not a missing invalidation call: _resolve_hermes_
+        runtime() runs OUTSIDE the lock (it's a blocking disk/SDK read), so a
+        resolve that started BEFORE a switch can still be mid-flight when
+        clear_runtime_provider_cache() runs, and then write its STALE result
+        back into the cache AFTER the clear — re-poisoning it with the OLD
+        provider for a full new 30s TTL window even though the switch (and
+        config.yaml) already moved on. Reproduces the exact matrix pattern:
+        turn #1 (in flight before the switch) correctly returns the OLD
+        provider; turn #2 (issued AFTER the switch) must NOT inherit turn
+        #1's stale write."""
+        from hermes.runtime import nous_engine
+
+        engine_id = 888
+        calls: list[str] = []
+
+        def _fake_resolve(model_config):
+            calls.append(model_config)
+            if len(calls) == 1:
+                # The owner switches providers (and the daemon clears the
+                # cache) WHILE this first resolve is still running.
+                nous_engine.clear_runtime_provider_cache()
+            return ({"provider": model_config}, "bare-model")
+
+        with patch.object(nous_engine, "_resolve_hermes_runtime", side_effect=_fake_resolve):
+            first = nous_engine._cached_resolve_hermes_runtime(engine_id, "gemini")
+            second = nous_engine._cached_resolve_hermes_runtime(engine_id, "anthropic")
+
+        assert first[0]["provider"] == "gemini"
+        assert second[0]["provider"] == "anthropic"
+        # The critical assertion: turn #2 must have MISSED the cache and
+        # recomputed. Without the epoch guard, turn #1's write-back (which
+        # runs AFTER the clear but is unconditional) wins the race and turn
+        # #2 reads it straight from cache — same failure mode as before the
+        # fix, just moved one layer down: "invalidated but immediately
+        # re-poisoned" instead of "never invalidated".
         assert calls == ["gemini", "anthropic"]
 
 

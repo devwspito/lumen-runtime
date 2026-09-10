@@ -490,7 +490,7 @@ function PendingChangesBanner({ count, busy, onSave, onDiscard }: PendingChanges
 
 // ── Governance section ────────────────────────────────────────────────────────
 
-function GovernanceSection() {
+export function GovernanceSection() {
   const t = useT()
   const [mfa, setMfa] = useState<MfaStatus | null>(null)
   const [pol, setPol] = useState<PoliciesResponse | null>(null)
@@ -662,7 +662,13 @@ function GovernanceSection() {
   }
 
   function requestMfaDangersToggle(checked: boolean) {
-    if (mfaDisabled) {
+    // SOVEREIGN switch (SEG-15): gated on MFA ENROLLMENT, never on the
+    // toggle's own current value — unlike preset/tools below, which
+    // correctly skip the prompt while mfaDisabled. Branching on mfaDisabled
+    // here made turning the switch back ON a dead end: once off, this sent
+    // totp:'' straight through and the backend (rightly) 401'd it, with the
+    // UI never showing a modal to collect a real code.
+    if (!mfa?.enrolled) {
       setBusy(true)
       void setMfaOnDangers(checked, '')
         .then(() => {
@@ -1888,7 +1894,9 @@ export function KillSwitchSection() {
           description={tNew(
             t,
             'seg.killswitch.release.password_hint',
-            'El MFA no está configurado en esta instancia — libera el freno con la contraseña de tu dispositivo.',
+            'El MFA no está configurado en esta instancia. Si tu dispositivo tampoco tiene ' +
+              'contraseña configurada (instalación nueva), libera el freno desde la terminal ' +
+              'del propio equipo con: safent brake release',
           )}
           onSign={password => { void handleReleaseWith({ devicePassword: password }) }}
           onCancel={() => setConfirmRelease(false)}

@@ -132,3 +132,35 @@ def require_owner_mfa(mfa_store: MfaStore, totp: str, *, action: str) -> None:
                 "message": f"{action[:1].upper()}{action[1:]} exige tu código MFA.",
             },
         )
+
+
+def require_owner_mfa_if_enrolled(mfa_store: MfaStore, totp: str, *, action: str) -> None:
+    """Gate for a SOVEREIGN switch that governs its own enforcement (the
+    `mfa_on_dangers` toggle itself) — must stay protected independent of the
+    state it controls, but must never lock a fresh install out of its own
+    switch before the owner has anything to verify against.
+
+    Enrolled → same bar as require_owner_mfa (401 on missing/bad code).
+    Not enrolled → no factor exists to check, so this is a no-op (proceeds) —
+    unlike require_owner_mfa, this NEVER raises 403 mfa_not_enrolled here.
+    specs/025-safent-repaso SEG-15: the toggle used to sit behind the plain
+    require_owner_mfa gate, which the caller ALSO used (unconditionally) for
+    every other policy mutation; once the owner turned mfa_on_dangers off,
+    the UI stopped prompting for TOTP anywhere (correctly, for non-sovereign
+    decisions) but kept sending totp="" to this endpoint too — 401 forever,
+    with no way to turn the switch back on from the UI.
+    """
+    if not mfa_store.is_enrolled():
+        return
+    ok, reason = mfa_store.verify(level=ProtectionLevel.MFA, totp=totp or "")
+    if not ok:
+        logger.warning(
+            "hermes.mfa.owner_gate_denied action=%r reason=%s", action, reason
+        )
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "code": reason,
+                "message": f"{action[:1].upper()}{action[1:]} exige tu código MFA.",
+            },
+        )

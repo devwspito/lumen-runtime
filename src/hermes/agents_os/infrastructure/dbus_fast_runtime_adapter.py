@@ -236,10 +236,16 @@ class Runtime1ServiceInterface(ServiceInterface):
         return True
 
     @method()
-    async def Resume(self) -> "b":  # noqa: N802,F821,UP037
-        """Reanuda. by = UID del bus."""
+    async def Resume(self, reason: "s") -> "b":  # noqa: N802,F821,UP037
+        """Reanuda. by = UID del bus.
+
+        reason (security review 2026-09-10, MEDIUM finding): audit-only
+        provenance string, threaded to the signed AGENT_RESUMED entry via
+        request_resume/AgentStatePort.resume — "host_cli" for `safent brake
+        release`, "" for the normal REST/UI path (cowork/dbus_proxy.py).
+        """
         sender_uid = await self._resolve_current_sender_uid()
-        await self._wiring.request_resume(sender_uid=sender_uid)
+        await self._wiring.request_resume(sender_uid=sender_uid, reason=reason)
         return True
 
     @method()
@@ -749,9 +755,16 @@ class Runtime1ServiceInterface(ServiceInterface):
     @method()
     async def SetActiveProvider(self, provider_id: "s") -> "s":  # noqa: N802,F821,UP037
         sender_uid = await self._resolve_current_sender_uid()
-        result = self._wiring.set_active_provider(
-            provider_id=provider_id, sender_uid=sender_uid
-        )
+        try:
+            result = self._wiring.set_active_provider(
+                provider_id=provider_id, sender_uid=sender_uid
+            )
+        except ValueError as exc:
+            # specs/025-safent-repaso PROV-02: activating a native provider
+            # with no model recorded (e.g. never configured with one) must
+            # reach the caller as a clear 422, not silently write a
+            # model.provider-without-model.default config.yaml.
+            raise DBusError("org.hermes.Error.InvalidInput", str(exc)) from exc
         self._schedule_byok_mcp_rewire()
         return json.dumps(result)
 
@@ -1080,6 +1093,26 @@ class Runtime1ServiceInterface(ServiceInterface):
         resuelve a state="unreachable" (FR-3, companion opcional).
         """
         result = await self._wiring.get_companion_health(slug=slug)
+        return json.dumps(result)
+
+    @method()
+    async def ReloadCompanionPresence(self, slug: "s") -> "s":  # noqa: N802,F821,UP037
+        """Re-lee companions.json/bearer para *slug* y resiembra + reconecta
+        su entrada MCP SIN reiniciar el daemon (028 T017).
+
+        authZ: SOLO el uid del shell-server (misma frontera que
+        MintCompanionOwnerAssertion) — invocado por el agente anfitrión tras
+        un `safent companion install|repair` con éxito, nunca directamente
+        por el operador. Devuelve JSON {ok, state?, reachable?} o
+        {ok: false, reason: "not_installed"} si el andamiaje aún no valida.
+        """
+        sender_uid = await self._resolve_current_sender_uid()
+        try:
+            result = await self._wiring.reload_companion_presence(
+                slug=slug, sender_uid=sender_uid
+            )
+        except PermissionError as exc:
+            raise DBusError("org.hermes.Error.Unauthorized", str(exc)) from exc
         return json.dumps(result)
 
     @method()
@@ -1558,7 +1591,8 @@ class Runtime1ServiceInterface(ServiceInterface):
     async def ForgetMemoryEntry(self, entry_id: "s") -> "s":  # noqa: N802,F821,UP037
         """Olvida (borra) una entrada de memoria por su id '{target}:{index}'.
 
-        Idempotente: devuelve {ok:true} aunque la entrada ya haya sido borrada.
+        {ok:false, code:"not_found"} si la entrada no existe (nunca existió o
+        ya se borró) — la capa REST lo traduce a 404.
         authZ: operador (sender_uid del bus, CWE-862).
         PII: el contenido NUNCA cruza el bus ni se loguea.
         """

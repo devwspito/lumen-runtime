@@ -1,0 +1,1109 @@
+//! T011 — the boot service: observe -> plan -> apply -> reobserve, with
+//! backoff between retries and cancel support honored only before the point
+//! of no return. `BootService` itself has no `tauri` import — only the
+//! "Tauri glue" section at the bottom does, and `main.rs`'s one
+//! `boot::start(app.handle().clone())` call is its only caller.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use crate::domain::{
+    AttemptCount, BootstrapTicket, DesiredState, DomainEvent, EngineLifecycle, EnginePhase,
+    FailOutcome, FailureCause, FailureCode, HostFacts, RepairAction, SemVer, Stage, VersionSet,
+};
+use crate::ports::{
+    ApplyOutcome, CancelSignal, Clock, EngineDriver, EngineError, EngineProbe, Notifier,
+};
+use crate::reconcile;
+
+/// Where `BootService::run` landed.
+#[derive(Debug)]
+pub enum LoopOutcome {
+    /// The product is reachable — `ticket` authenticates the window's ONE
+    /// navigation to it (contract app-engine.md §5). `lifecycle` is read
+    /// back out by tests asserting the final phase; `run_once` only needs
+    /// `ticket`.
+    Ready {
+        ticket: BootstrapTicket,
+        #[allow(dead_code)]
+        lifecycle: EngineLifecycle,
+    },
+    /// `HostFacts::another_instance_running` — nothing here was touched.
+    FocusExisting,
+    /// The owner cancelled before the point of no return.
+    Cancelled {
+        #[allow(dead_code)]
+        lifecycle: EngineLifecycle,
+    },
+    /// No progress twice in a row (data-model.md `EngineLifecycle` invariant
+    /// 5) — one screen, one "Reintentar"; `lifecycle.last_failure()` has why.
+    /// `run_once` does not read `lifecycle` back out today — the UI already
+    /// got the cause via the `EngineDegraded` event on `safent://engine-event`
+    /// — but a future diagnostics/status command will want it.
+    Degraded {
+        #[allow(dead_code)]
+        lifecycle: EngineLifecycle,
+    },
+}
+
+/// Bootstrap-scoped: true from the `container` CLI stage onward, matching
+/// the point past which the owner's "Cancelar" is disabled in the UI. This
+/// is NOT a universal property of `Stage` (the update flow, `src-tauri/src/
+/// update/`, declares `backup` as ITS point of no return instead) — it lives
+/// here because only the bootstrap context's policy is this loop's to define.
+pub(crate) fn bootstrap_point_of_no_return(stage: Stage) -> bool {
+    matches!(
+        stage,
+        Stage::Container
+            | Stage::Health
+            | Stage::CompanionScaffold
+            | Stage::CompanionUp
+            | Stage::CompanionReload
+            | Stage::Backup
+            | Stage::Restore
+            | Stage::Cleanup
+    )
+}
+
+/// Same rule, expressed in `EnginePhase` terms for the loop's own cancel
+/// gate (it knows the phase it is about to enter before any CLI stage event
+/// arrives).
+fn phase_past_point_of_no_return(phase: EnginePhase) -> bool {
+    matches!(
+        phase,
+        EnginePhase::EngineStarting
+            | EnginePhase::EngineReady
+            | EnginePhase::CompanionProvisioning
+            | EnginePhase::CompanionReady
+    )
+}
+
+fn phase_for(action: &RepairAction) -> Option<EnginePhase> {
+    match action {
+        RepairAction::StageRuntime => Some(EnginePhase::RuntimeStaging),
+        RepairAction::AdoptMachine(_)
+        | RepairAction::CreateMachine
+        | RepairAction::StartMachine(_)
+        | RepairAction::InstallPrivilegedHelper => Some(EnginePhase::EngineProvisioning),
+        RepairAction::PullEngine(_) | RepairAction::PullCompanion(_) => {
+            Some(EnginePhase::EnginePulling)
+        }
+        RepairAction::ChoosePort
+        | RepairAction::CreateContainer
+        | RepairAction::StartContainer
+        | RepairAction::RecreateEngine => Some(EnginePhase::EngineStarting),
+        RepairAction::EnsureCompanionScaffold
+        | RepairAction::ComposeCompanionUp(_)
+        | RepairAction::ReloadCompanionPresence => Some(EnginePhase::CompanionProvisioning),
+        RepairAction::FocusExistingWindow => None,
+    }
+}
+
+/// 1s, 2s, 4s, 8s, 16s, capped at 30s — the backoff between repeated
+/// attempts of the SAME repair episode (`EngineLifecycle::attempt`).
+fn backoff_for(attempt: AttemptCount) -> Duration {
+    let exponent = attempt.0.min(5); // 1<<5 = 32, comfortably within u64 — no overflow to guard
+    Duration::from_secs((1u64 << exponent).min(30))
+}
+
+pub struct BootService {
+    probe: Arc<dyn EngineProbe>,
+    driver: Arc<dyn EngineDriver>,
+    clock: Arc<dyn Clock>,
+    desired: DesiredState,
+    app_version: SemVer,
+}
+
+impl BootService {
+    pub fn new(
+        probe: Arc<dyn EngineProbe>,
+        driver: Arc<dyn EngineDriver>,
+        clock: Arc<dyn Clock>,
+        desired: DesiredState,
+        app_version: SemVer,
+    ) -> Self {
+        Self {
+            probe,
+            driver,
+            clock,
+            desired,
+            app_version,
+        }
+    }
+
+    /// Cancellation is deliberately NOT checked proactively at the top of
+    /// this loop: at that point the next action (and therefore its target
+    /// phase) is not known yet, so an early check here could reject a
+    /// perfectly fine cancel request one action too early, or accept one
+    /// that is about to land past the gate. The one place that decides is
+    /// `apply_gated`, which knows the SPECIFIC action about to run — a
+    /// cancel is honored the moment `apply_gated` hands the driver a live
+    /// signal and the driver reports back `EngineError::Cancelled`.
+    pub fn run(&self, notifier: &dyn Notifier, cancel: &CancelSignal) -> LoopOutcome {
+        let mut lifecycle = EngineLifecycle::fresh();
+        lifecycle
+            .enter(EnginePhase::Preflight)
+            .expect("Fresh -> Preflight is always legal");
+
+        // The action + facts a repair last reported SUCCESS against — not
+        // touched by the failure path, which has its own guard
+        // (`EngineLifecycle::fail`). Detects a DIFFERENT failure mode a
+        // real packaged run hit live: `cmd_stage_runtime` as a no-op
+        // returned `Ok(Progressed)` ~400 times in 90s without
+        // `runtime_staged` ever becoming true, because the packaged CLI had
+        // no manifest to actually stage — every `Err` guard in this loop
+        // was irrelevant; nothing ever failed.
+        let mut last_effective_repair: Option<(RepairAction, HostFacts)> = None;
+
+        loop {
+            let facts = match self.probe.observe() {
+                Ok(facts) => facts,
+                Err(error) => {
+                    match self.handle_failure(
+                        &mut lifecycle,
+                        None,
+                        error.to_failure_cause(),
+                        notifier,
+                    ) {
+                        Some(outcome) => return outcome,
+                        None => continue,
+                    }
+                }
+            };
+
+            if facts.another_instance_running {
+                return LoopOutcome::FocusExisting;
+            }
+
+            if let Some(cause) = reconcile::preflight_violation(&facts, &self.desired) {
+                match self.handle_failure(&mut lifecycle, None, cause, notifier) {
+                    Some(outcome) => return outcome,
+                    None => continue,
+                }
+            }
+
+            let Some(action) = reconcile::reconcile(&facts, &self.desired)
+                .into_iter()
+                .next()
+            else {
+                return self.confirm_ready(&mut lifecycle, notifier, cancel);
+            };
+
+            if matches!(action, RepairAction::FocusExistingWindow) {
+                return LoopOutcome::FocusExisting;
+            }
+
+            // The SAME action reconcile just asked for again, against
+            // EXACTLY the facts its own last (successful!) application left
+            // behind: whatever it did had no observable effect. Routed
+            // through the SAME `handle_failure`/`lifecycle.fail()` path the
+            // error branch below uses — `EngineLifecycle`'s own invariant
+            // is that `Degraded` is reachable ONLY via `fail()` detecting a
+            // REPEAT, never a direct construction — so this gives it one
+            // more backoff-and-retry (`FailOutcome::Repairing`, in case the
+            // apply was genuinely flaky) exactly like a real error would,
+            // and only degrades on the SECOND ineffective cycle in a row.
+            if let Some((last_action, last_facts)) = &last_effective_repair {
+                if *last_action == action && *last_facts == facts {
+                    let cause = FailureCause {
+                        code: FailureCode::RepairIneffective,
+                        message: format!(
+                            "{action:?} se aplicó y no cambió nada observable en el equipo"
+                        ),
+                        retryable: false,
+                    };
+                    if let Some(outcome) =
+                        self.handle_failure(&mut lifecycle, Some(&action), cause, notifier)
+                    {
+                        return outcome;
+                    }
+                    continue;
+                }
+            }
+
+            match self.apply_gated(&mut lifecycle, &action, notifier, cancel) {
+                Ok(ApplyOutcome::Progressed) => {
+                    notifier.notify(&DomainEvent::RepairApplied {
+                        action: action.clone(),
+                    });
+                    self.advance_to(&mut lifecycle, &action);
+                    last_effective_repair = Some((action, facts));
+                }
+                Ok(ApplyOutcome::Ready(ticket)) => {
+                    self.advance_to(&mut lifecycle, &action);
+                    let _ = lifecycle.enter(EnginePhase::EngineReady);
+                    notifier.notify(&DomainEvent::EngineReady {
+                        version_set: self.version_set(),
+                    });
+                    return LoopOutcome::Ready { ticket, lifecycle };
+                }
+                Err(EngineError::Cancelled) => return LoopOutcome::Cancelled { lifecycle },
+                Err(error) => {
+                    // A failure is a DIFFERENT episode than a silent no-op
+                    // success — EngineLifecycle::fail() owns detecting
+                    // repeated failures on its own attempt-count; starting
+                    // fresh here means a transient error right after an
+                    // effective repair is never confused with THIS guard.
+                    last_effective_repair = None;
+                    self.notify_if_reconnecting(&mut lifecycle, &error, notifier);
+                    if let Some(outcome) = self.handle_failure(
+                        &mut lifecycle,
+                        Some(&action),
+                        error.to_failure_cause(),
+                        notifier,
+                    ) {
+                        return outcome;
+                    }
+                }
+            }
+        }
+    }
+
+    /// `apply`, but with a cancel signal that reads as permanently UNSET once
+    /// `action`'s phase is past the point of no return — contract
+    /// app-engine.md §6: "la cancelación se rechaza [...] lo declara antes,
+    /// nunca después". The real signal is left untouched; a request made too
+    /// late is simply never honored, not silently lost or errored.
+    fn apply_gated(
+        &self,
+        lifecycle: &mut EngineLifecycle,
+        action: &RepairAction,
+        notifier: &dyn Notifier,
+        cancel: &CancelSignal,
+    ) -> Result<ApplyOutcome, EngineError> {
+        let target_phase = phase_for(action).unwrap_or_else(|| lifecycle.phase());
+        if phase_past_point_of_no_return(target_phase) {
+            self.driver.apply(action, notifier, &CancelSignal::new())
+        } else {
+            self.driver.apply(action, notifier, cancel)
+        }
+    }
+
+    /// Reconcile found nothing left to do. If a ticket had been minted THIS
+    /// run we would already have returned via `ApplyOutcome::Ready` — landing
+    /// here on the very first observe means the engine was already fully up
+    /// from a PREVIOUS session (adopted, not recreated). `up` is documented
+    /// idempotent (contract app-engine.md §4) and is the only place a ticket
+    /// is minted (FR-011: renewed on every engine start), so re-invoking it
+    /// is exactly what "reopened against an already-running engine" means.
+    fn confirm_ready(
+        &self,
+        lifecycle: &mut EngineLifecycle,
+        notifier: &dyn Notifier,
+        cancel: &CancelSignal,
+    ) -> LoopOutcome {
+        self.advance_to(lifecycle, &RepairAction::StartContainer);
+        match self.apply_gated(lifecycle, &RepairAction::StartContainer, notifier, cancel) {
+            Ok(ApplyOutcome::Ready(ticket)) => {
+                let _ = lifecycle.enter(EnginePhase::EngineReady);
+                notifier.notify(&DomainEvent::EngineReady {
+                    version_set: self.version_set(),
+                });
+                LoopOutcome::Ready {
+                    ticket,
+                    lifecycle: lifecycle.clone(),
+                }
+            }
+            Ok(ApplyOutcome::Progressed) => {
+                let cause = FailureCause {
+                    code: FailureCode::CliPorcelainUnsupported,
+                    message: "up no entregó un vale de arranque".to_string(),
+                    retryable: false,
+                };
+                notifier.notify(&DomainEvent::EngineDegraded { cause });
+                LoopOutcome::Degraded {
+                    lifecycle: lifecycle.clone(),
+                }
+            }
+            Err(EngineError::Cancelled) => LoopOutcome::Cancelled {
+                lifecycle: lifecycle.clone(),
+            },
+            Err(error) => {
+                self.notify_if_reconnecting(lifecycle, &error, notifier);
+                notifier.notify(&DomainEvent::EngineDegraded {
+                    cause: error.to_failure_cause(),
+                });
+                LoopOutcome::Degraded {
+                    lifecycle: lifecycle.clone(),
+                }
+            }
+        }
+    }
+
+    /// FR-012's safety net: `up` succeeding without ever delivering a ticket
+    /// gets its OWN UI signal (`safent://reconnecting`, reason
+    /// `token_missing`) instead of looking like an ordinary repair failure —
+    /// still counted toward the no-progress rule by the caller right after
+    /// this, so a PERSISTENT case still degrades rather than reconnecting
+    /// forever.
+    fn notify_if_reconnecting(
+        &self,
+        lifecycle: &mut EngineLifecycle,
+        error: &EngineError,
+        notifier: &dyn Notifier,
+    ) {
+        if matches!(error, EngineError::ReadyWithoutTicket) {
+            let _ = lifecycle.enter(EnginePhase::Reconnecting);
+            notifier.notify(&DomainEvent::Reconnecting {
+                reason: crate::domain::ReconnectReason::TokenMissing,
+            });
+        }
+    }
+
+    fn advance_to(&self, lifecycle: &mut EngineLifecycle, action: &RepairAction) {
+        if let Some(phase) = phase_for(action) {
+            if lifecycle.phase() != phase {
+                let _ = lifecycle.enter(phase);
+            }
+        }
+    }
+
+    /// Records a failure and either resolves to `Degraded` (returned to the
+    /// caller) or sleeps out the backoff and signals "keep looping" (`None`).
+    fn handle_failure(
+        &self,
+        lifecycle: &mut EngineLifecycle,
+        action: Option<&RepairAction>,
+        cause: FailureCause,
+        notifier: &dyn Notifier,
+    ) -> Option<LoopOutcome> {
+        match lifecycle.fail(action, cause.clone()) {
+            Ok(FailOutcome::Repairing) => {
+                self.clock.sleep(backoff_for(lifecycle.attempt()));
+                None
+            }
+            Ok(FailOutcome::Degraded) => {
+                notifier.notify(&DomainEvent::NoProgressDetected {
+                    action: action.cloned(),
+                    code: cause.code,
+                });
+                notifier.notify(&DomainEvent::EngineDegraded { cause });
+                Some(LoopOutcome::Degraded {
+                    lifecycle: lifecycle.clone(),
+                })
+            }
+            // A rejected transition here is a domain-modeling bug, not a
+            // runtime condition (e.g. two failure sources disagreeing about
+            // the current episode) — fail loudly into Degraded rather than
+            // loop forever or panic the boot thread.
+            Err(_illegal) => {
+                notifier.notify(&DomainEvent::EngineDegraded { cause });
+                Some(LoopOutcome::Degraded {
+                    lifecycle: lifecycle.clone(),
+                })
+            }
+        }
+    }
+
+    fn version_set(&self) -> VersionSet {
+        VersionSet {
+            app: self.app_version.clone(),
+            engine: self.desired.engine_image.clone(),
+            companion: self.desired.companion_image.clone(),
+        }
+    }
+}
+
+// ===========================================================================
+// Tauri glue — the ONLY part of this module that imports `tauri`.
+// `main.rs`'s one `boot::start(app.handle().clone())` call is the only
+// caller of `start`; nothing above this line needs Tauri to compile or test.
+// ===========================================================================
+
+use std::path::PathBuf;
+
+use tauri::{AppHandle, Emitter, Listener, Manager};
+
+use crate::domain::{Bytes, ImageRef, MachineSpec};
+use crate::engine_adapter::{EmbeddedCliConfig, EmbeddedCliDriver};
+use crate::start_update_checker;
+use crate::window_policy::WindowPolicy;
+
+/// The UI lane already codes against these exact channel names.
+pub const ENGINE_EVENT_CHANNEL: &str = "safent://engine-event";
+pub const RECONNECTING_CHANNEL: &str = "safent://reconnecting";
+const RESTART_REQUESTED_EVENT: &str = "safent://restart-engine-requested";
+const QUIT_REQUESTED_EVENT: &str = "safent://quit-requested";
+
+/// Mirrors contract app-engine.md §3's `EngineEvent` union — `kind` is the
+/// wire tag the UI switches on, matching the CLI's own vocabulary rather
+/// than this module's internal `DomainEvent` names.
+#[derive(Clone, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum EngineEventPayload {
+    Stage {
+        stage: &'static str,
+        label: String,
+        total_bytes: Option<u64>,
+        point_of_no_return: bool,
+    },
+    Progress {
+        stage: &'static str,
+        done: u64,
+        total: Option<u64>,
+        unit: &'static str,
+    },
+    Done {
+        stage: &'static str,
+        ms: u64,
+    },
+    Failed {
+        code: &'static str,
+        detail: String,
+        retryable: bool,
+    },
+    Ready {
+        app_version: String,
+        engine_digest: String,
+        companion_digest: Option<String>,
+    },
+}
+
+#[derive(Clone, serde::Serialize)]
+pub(crate) struct ReconnectingPayload {
+    reason: &'static str,
+}
+
+/// Emits `DomainEvent`s to the window. `RepairApplied`/`NoProgressDetected`/
+/// `WindowNavigated` are internal bookkeeping, not part of the UI's 6-kind
+/// `engine-event` contract, and are not forwarded — best-effort emit (a
+/// closed/gone window is not this loop's problem to recover from).
+struct TauriNotifier {
+    app: AppHandle,
+}
+
+impl Notifier for TauriNotifier {
+    fn notify(&self, event: &DomainEvent) {
+        match event {
+            DomainEvent::StageEntered {
+                stage,
+                label,
+                total_bytes,
+            } => {
+                let _ = self.app.emit(
+                    ENGINE_EVENT_CHANNEL,
+                    EngineEventPayload::Stage {
+                        stage: stage.wire_name(),
+                        label: label.clone(),
+                        total_bytes: *total_bytes,
+                        point_of_no_return: bootstrap_point_of_no_return(*stage),
+                    },
+                );
+            }
+            DomainEvent::StageProgressed {
+                stage,
+                done,
+                total,
+                unit,
+            } => {
+                let _ = self.app.emit(
+                    ENGINE_EVENT_CHANNEL,
+                    EngineEventPayload::Progress {
+                        stage: stage.wire_name(),
+                        done: *done,
+                        total: *total,
+                        unit: unit.wire_name(),
+                    },
+                );
+            }
+            DomainEvent::StageCompleted { stage, duration_ms } => {
+                let _ = self.app.emit(
+                    ENGINE_EVENT_CHANNEL,
+                    EngineEventPayload::Done {
+                        stage: stage.wire_name(),
+                        ms: *duration_ms,
+                    },
+                );
+            }
+            DomainEvent::EngineDegraded { cause } => {
+                let _ = self.app.emit(
+                    ENGINE_EVENT_CHANNEL,
+                    EngineEventPayload::Failed {
+                        code: cause.code.wire_name(),
+                        detail: cause.message.clone(),
+                        retryable: cause.retryable,
+                    },
+                );
+            }
+            DomainEvent::EngineReady { version_set } => {
+                let _ = self.app.emit(
+                    ENGINE_EVENT_CHANNEL,
+                    EngineEventPayload::Ready {
+                        app_version: version_set.app.as_str().to_string(),
+                        engine_digest: version_set.engine.digest.clone(),
+                        companion_digest: version_set.companion.as_ref().map(|c| c.digest.clone()),
+                    },
+                );
+            }
+            DomainEvent::Reconnecting { reason } => {
+                let _ = self.app.emit(
+                    RECONNECTING_CHANNEL,
+                    ReconnectingPayload {
+                        reason: reason.wire_name(),
+                    },
+                );
+            }
+            DomainEvent::RepairApplied { .. }
+            | DomainEvent::NoProgressDetected { .. }
+            | DomainEvent::WindowNavigated => {}
+        }
+    }
+}
+
+/// No `tauri` in this type either — `pub(crate)` so `selftest.rs` (headless,
+/// no window) can build the same real-time `BootService` this module's own
+/// `run_once` uses.
+pub(crate) struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> std::time::Instant {
+        std::time::Instant::now()
+    }
+    fn sleep(&self, duration: Duration) {
+        std::thread::sleep(duration);
+    }
+}
+
+/// The owner's "Cancelar" button, wired the same way `install_podman`
+/// already is: a plain Tauri command the LOCAL loader page invokes
+/// (capabilities/default.json). Exact name is this module's choice — if the
+/// already-finished UI lane invokes a different one, it is a one-line rename
+/// here, not a design change.
+#[tauri::command]
+pub fn cancel_bootstrap(cancel: tauri::State<'_, CancelSignal>) {
+    cancel.set();
+}
+
+/// FR-033's single "Reintentar": re-runs the whole loop from a fresh
+/// observation. No separate "resume from where it degraded" state — reconcile
+/// re-derives the plan from what is ACTUALLY true on the host each time, so a
+/// full re-run correctly skips everything already done and repeats only what
+/// still needs it.
+#[tauri::command]
+pub fn retry_bootstrap(app: AppHandle) {
+    std::thread::spawn(move || run_once(app, CancelSignal::new()));
+}
+
+/// Starts the bootstrap loop off the main thread (so the window never
+/// freezes) and wires the tray/UI commands the coordinator specified:
+/// `safent://restart-engine-requested` (stop -> observe -> plan -> apply
+/// again) and `safent://quit-requested` (explicit engine stop, then exit —
+/// research.md FR-030: closing the WINDOW alone never stops the engine).
+pub fn start(app: AppHandle) {
+    let cancel = CancelSignal::new();
+    app.manage(cancel.clone());
+
+    let restart_handle = app.clone();
+    app.listen(RESTART_REQUESTED_EVENT, move |_event| {
+        let handle = restart_handle.clone();
+        std::thread::spawn(move || {
+            stop_engine_best_effort(&handle);
+            TauriNotifier {
+                app: handle.clone(),
+            }
+            .notify(&DomainEvent::Reconnecting {
+                reason: crate::domain::ReconnectReason::EngineRestarted,
+            });
+            run_once(handle, CancelSignal::new());
+        });
+    });
+
+    let quit_handle = app.clone();
+    app.listen(QUIT_REQUESTED_EVENT, move |_event| {
+        let handle = quit_handle.clone();
+        std::thread::spawn(move || {
+            stop_engine_best_effort(&handle);
+            handle.exit(0);
+        });
+    });
+
+    std::thread::spawn(move || run_once(app, cancel));
+}
+
+/// `safent://quit-requested` (FR-030: "Salir" explicitly stops the engine,
+/// unlike closing the window) and the restart command both need this — best
+/// effort, since a stop that cannot be confirmed still must not block the
+/// window from closing or the restart from proceeding.
+fn stop_engine_best_effort(app: &AppHandle) {
+    if let Ok(desired) = desired_state_from_env() {
+        let config = resolve_config(app, desired.engine_image, desired.companion_image);
+        let _ = EmbeddedCliDriver::new(config).stop();
+    }
+}
+
+fn run_once(app: AppHandle, cancel: CancelSignal) {
+    let notifier = TauriNotifier { app: app.clone() };
+    let desired = match desired_state_from_env() {
+        Ok(desired) => desired,
+        Err(message) => {
+            notifier.notify(&DomainEvent::EngineDegraded {
+                cause: FailureCause {
+                    code: FailureCode::CliPorcelainUnsupported,
+                    message,
+                    retryable: false,
+                },
+            });
+            return;
+        }
+    };
+    let config = resolve_config(
+        &app,
+        desired.engine_image.clone(),
+        desired.companion_image.clone(),
+    );
+    let driver = Arc::new(EmbeddedCliDriver::new(config));
+    let probe: Arc<dyn EngineProbe> = driver.clone();
+    let engine_driver: Arc<dyn EngineDriver> = driver;
+    let service = BootService::new(
+        probe,
+        engine_driver,
+        Arc::new(SystemClock),
+        desired,
+        app_version(),
+    );
+
+    match service.run(&notifier, &cancel) {
+        LoopOutcome::Ready { ticket, .. } => navigate_to_ticket(&app, &ticket),
+        LoopOutcome::FocusExisting
+        | LoopOutcome::Cancelled { .. }
+        | LoopOutcome::Degraded { .. } => {}
+    }
+}
+
+fn navigate_to_ticket(app: &AppHandle, ticket: &BootstrapTicket) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let Ok(url) = ticket.expose().parse::<tauri::Url>() else {
+        // A malformed ticket URL leaves the loader screen up rather than
+        // navigating anywhere unsafe — reconcile/EngineLifecycle already
+        // treat "ready without a usable ticket" as reconnecting, not as
+        // this path.
+        return;
+    };
+    // window_policy's on_navigation denies any http(s) target that was never
+    // declared authorized (contract app-engine.md §7/§8) — this MUST run
+    // before `navigate`, exactly like the legacy install_podman flow already
+    // did for its own navigation, or the engine's own ticketed URL gets
+    // rejected by the policy that exists to protect it.
+    if let Some(policy) = app.try_state::<WindowPolicy>() {
+        policy.set_authorized_origin(url.clone());
+    }
+    let _ = window.navigate(url);
+    start_update_checker(&window);
+}
+
+fn app_version() -> SemVer {
+    SemVer::parse(env!("CARGO_PKG_VERSION")).unwrap_or_else(|_| SemVer::parse("0.0.0").unwrap())
+}
+
+/// The runtime manifest (`desktop/runtime-manifest.lock`, T010) is not in
+/// this worktree yet — `SAFENT_ENGINE_DIGEST`/`SAFENT_COMPANION_DIGEST` are
+/// the seam until it lands. Missing/malformed fails closed into `Degraded`
+/// with a message that says exactly what is missing, never a panic.
+pub fn desired_state_from_env() -> Result<DesiredState, String> {
+    let engine_digest = std::env::var("SAFENT_ENGINE_DIGEST").map_err(|_| {
+        "SAFENT_ENGINE_DIGEST no está definido (falta el manifiesto del runtime)".to_string()
+    })?;
+    // Same seam as the digest itself (doc comment below): the published repo
+    // is the production default, overridable for local dev/testing against
+    // an already-built image (e.g. `localhost/safent-runtime`) without
+    // touching a real registry — `cmd_ensure_images`/`podman pull` always
+    // contact the registry named in the reference, even for content already
+    // present locally under a DIFFERENT repo name, so pointing this at a
+    // `localhost/...` image is what lets reconcile converge without network.
+    let engine_repo = std::env::var("SAFENT_ENGINE_IMAGE_REPO")
+        .unwrap_or_else(|_| "ghcr.io/devwspito/safent".to_string());
+    let engine_image = ImageRef::new(engine_repo, engine_digest)
+        .map_err(|_| "SAFENT_ENGINE_DIGEST no tiene forma de digest sha256:...".to_string())?;
+    let companion_repo = std::env::var("SAFENT_COMPANION_IMAGE_REPO")
+        .unwrap_or_else(|_| "ghcr.io/devwspito/safent-ads".to_string());
+    let companion_image = std::env::var("SAFENT_COMPANION_DIGEST")
+        .ok()
+        .and_then(|digest| ImageRef::new(companion_repo, digest).ok());
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+    Ok(DesiredState {
+        engine_image,
+        companion_image,
+        machine: desired_machine_spec(),
+        min_free_disk_bytes: Bytes(4 * GIB),
+        min_total_memory_bytes: Bytes(4 * GIB),
+    })
+}
+
+fn desired_machine_spec() -> Option<MachineSpec> {
+    #[cfg(target_os = "macos")]
+    {
+        use crate::domain::MachineProvider;
+        const GIB: u64 = 1024 * 1024 * 1024;
+        Some(MachineSpec {
+            provider: MachineProvider::AppleHv,
+            cpus: 4,
+            memory_bytes: Bytes(6 * GIB),
+            os_version: "6.1".to_string(),
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+/// Resolves the bundled runtime's paths for a windowed run, read off the
+/// Tauri resource dir. `desktop/RUNTIME-BUNDLE.md`'s own documented formula
+/// — verified there against the real `glob` crate, not assumed — is
+/// `resource_dir().join("runtime").join("podman")`, NO target-triple
+/// component: `bundle.resources`'s single glob pattern flattens the
+/// per-triple staged tree (`resources/runtime/<triple>/{bin,libexec,etc}/...`,
+/// what `stage-runtime.sh` produces) into `$RESOURCES/runtime/<basename>` —
+/// only one triple's files ever ship in a given build, so there is nothing
+/// left to select between at runtime. `selftest.rs`'s own fallback already
+/// gets this right (`exe.parent().join("runtime")`, no triple either); this
+/// function's extra `.join(target_triple())` was the odd one out and would
+/// have looked for the runtime one directory too deep in a real packaged
+/// app. Thin wrapper over `resolve_config_with_fallback` (this module's only
+/// Tauri-dependent path-resolution code).
+pub fn resolve_config(
+    app: &AppHandle,
+    engine_image: ImageRef,
+    companion_image: Option<ImageRef>,
+) -> EmbeddedCliConfig {
+    let fallback = app
+        .path()
+        .resource_dir()
+        .map(|dir| dir.join("runtime"))
+        .unwrap_or_else(|_| PathBuf::from("runtime"));
+    resolve_config_with_fallback(fallback, engine_image, companion_image)
+}
+
+/// `SAFENT_RUNTIME_DIR`/`SAFENT_CLI_PATH`/`SAFENT_PODMAN_PATH`/
+/// `SAFENT_STATE_HOME` override `fallback_runtime_dir` — the same pattern
+/// main.rs's legacy flow already uses for `SAFENT_BIN`. No `tauri` import:
+/// `selftest.rs` (headless, no window, no resource bundle to ask Tauri for)
+/// calls this directly with its own fallback.
+pub fn resolve_config_with_fallback(
+    fallback_runtime_dir: PathBuf,
+    engine_image: ImageRef,
+    companion_image: Option<ImageRef>,
+) -> EmbeddedCliConfig {
+    let runtime_dir = std::env::var_os("SAFENT_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or(fallback_runtime_dir);
+    let cli_path = std::env::var_os("SAFENT_CLI_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| runtime_dir.join("safent"));
+    let podman_path = std::env::var_os("SAFENT_PODMAN_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| runtime_dir.join("podman"));
+    let state_home = std::env::var_os("SAFENT_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home_dir().join(".safent"));
+    EmbeddedCliConfig::with_defaults(
+        cli_path,
+        podman_path,
+        state_home,
+        engine_image,
+        companion_image,
+    )
+}
+
+pub fn home_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{
+        Arch, Bytes, CompanionContainers, CompanionHealth, ContainerFact, DaemonHealth, HostFacts,
+        HostOs, ImageRef, LocalStateFact, Port,
+    };
+    use crate::ports::fakes::{
+        EngineErrorKind, FakeClock, RecordingNotifier, ScriptedDriver, ScriptedProbe,
+    };
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+
+    fn engine_image() -> ImageRef {
+        ImageRef::new("ghcr.io/devwspito/safent", "sha256:engine-good").unwrap()
+    }
+
+    fn desired() -> DesiredState {
+        DesiredState {
+            engine_image: engine_image(),
+            companion_image: None,
+            machine: None, // Linux desired state — no machine chain to satisfy
+            min_free_disk_bytes: Bytes(4 * GIB),
+            min_total_memory_bytes: Bytes(8 * GIB),
+        }
+    }
+
+    fn converged_facts() -> HostFacts {
+        HostFacts {
+            os: HostOs::Linux,
+            arch: Arch::Amd64,
+            free_disk_bytes: Bytes(20 * GIB),
+            total_memory_bytes: Bytes(16 * GIB),
+            runtime_staged: true,
+            runtime_hash_ok: true,
+            machines: vec![],
+            engine_container: Some(ContainerFact {
+                exists: true,
+                running: true,
+                image_digest: Some("sha256:engine-good".into()),
+            }),
+            local_engine_image_digest: Some("sha256:engine-good".into()),
+            local_companion_image_digest: None,
+            published_port: Some(Port(37013)),
+            data_volume: true,
+            companion_scaffold: false,
+            companion_containers: CompanionContainers::default(),
+            companion_health: CompanionHealth::Unknown,
+            daemon_health: DaemonHealth::Healthy,
+            app_version: SemVer::parse("0.2.0").unwrap(),
+            user_ns_allowed: true,
+            helper_installed: true,
+            local_state: LocalStateFact::Trusted,
+            another_instance_running: false,
+        }
+    }
+
+    fn service(probe: ScriptedProbe, driver: ScriptedDriver) -> (BootService, Arc<FakeClock>) {
+        let clock = Arc::new(FakeClock::new());
+        let svc = BootService::new(
+            Arc::new(probe),
+            Arc::new(driver),
+            clock.clone(),
+            desired(),
+            SemVer::parse("0.2.0").unwrap(),
+        );
+        (svc, clock)
+    }
+
+    fn ticket() -> BootstrapTicket {
+        BootstrapTicket::new("http://127.0.0.1:37013/?k=test-ticket".to_string())
+    }
+
+    #[test]
+    fn already_converged_reissues_up_once_for_a_fresh_ticket() {
+        // No cache to trust, so the loop re-observes for real — an ALREADY
+        // fully running engine (adopted from a previous session) means
+        // reconcile converges on the very first observation, and the only
+        // way to get a ticket is re-invoking `up` (idempotent).
+        let probe = ScriptedProbe::new(vec![Ok(converged_facts())]);
+        let driver = ScriptedDriver::new(vec![(
+            RepairAction::StartContainer,
+            Ok(ApplyOutcome::Ready(ticket())),
+        )]);
+        let (service, _clock) = service(probe, driver);
+        let notifier = RecordingNotifier::new();
+        let cancel = CancelSignal::new();
+
+        match service.run(&notifier, &cancel) {
+            LoopOutcome::Ready { ticket, lifecycle } => {
+                assert_eq!(ticket.expose(), "http://127.0.0.1:37013/?k=test-ticket");
+                assert_eq!(lifecycle.phase(), EnginePhase::EngineReady);
+            }
+            other => panic!("expected Ready, got {other:?}"),
+        }
+        assert!(notifier
+            .events()
+            .iter()
+            .any(|e| matches!(e, DomainEvent::EngineReady { .. })));
+    }
+
+    #[test]
+    fn converges_through_a_realistic_chain_of_actions() {
+        let mut fresh = converged_facts();
+        fresh.runtime_staged = false;
+        fresh.runtime_hash_ok = false;
+        fresh.engine_container = None;
+        fresh.local_engine_image_digest = None;
+        fresh.published_port = None;
+
+        let mut runtime_staged = fresh.clone();
+        runtime_staged.runtime_staged = true;
+        runtime_staged.runtime_hash_ok = true;
+
+        let mut image_pulled = runtime_staged.clone();
+        image_pulled.local_engine_image_digest = Some("sha256:engine-good".into());
+
+        let probe = ScriptedProbe::new(vec![
+            Ok(fresh),             // -> StageRuntime
+            Ok(runtime_staged),    // -> PullEngine
+            Ok(image_pulled), // -> ChoosePort (no container, no port on record: CreateContainer)
+            Ok(converged_facts()), // after `up`, fully converged
+        ]);
+        let driver = ScriptedDriver::new(vec![
+            (RepairAction::StageRuntime, Ok(ApplyOutcome::Progressed)),
+            (
+                RepairAction::PullEngine(engine_image()),
+                Ok(ApplyOutcome::Progressed),
+            ),
+            (
+                RepairAction::CreateContainer,
+                Ok(ApplyOutcome::Ready(ticket())),
+            ),
+        ]);
+        let (service, _clock) = service(probe, driver);
+        let notifier = RecordingNotifier::new();
+
+        match service.run(&notifier, &CancelSignal::new()) {
+            LoopOutcome::Ready { lifecycle, .. } => {
+                assert_eq!(lifecycle.phase(), EnginePhase::EngineReady)
+            }
+            other => panic!("expected Ready, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_second_instance_focuses_the_existing_window_without_touching_anything() {
+        let mut facts = converged_facts();
+        facts.another_instance_running = true;
+        let probe = ScriptedProbe::new(vec![Ok(facts)]);
+        let driver = ScriptedDriver::new(vec![]);
+        let (service, _clock) = service(probe, driver);
+        let notifier = RecordingNotifier::new();
+
+        assert!(matches!(
+            service.run(&notifier, &CancelSignal::new()),
+            LoopOutcome::FocusExisting
+        ));
+    }
+
+    #[test]
+    fn same_action_failing_twice_degrades_with_backoff_between_attempts() {
+        let mut fresh = converged_facts();
+        fresh.runtime_staged = false;
+        fresh.runtime_hash_ok = false;
+
+        let probe = ScriptedProbe::new(vec![Ok(fresh)]);
+        let driver = ScriptedDriver::new(vec![(
+            RepairAction::StageRuntime,
+            Err(EngineErrorKind::Io("registro no disponible".to_string())),
+        )]);
+        // ScriptedDriver consumes its scripted response on first use; a
+        // second `apply()` call for an action with no script left errors
+        // with a distinct message, which still counts as "the same action,
+        // a nonzero-th failure" for the purposes of this test since we only
+        // assert on the FINAL outcome + that backoff was requested at least
+        // once — the exact code differing on call 2 does not matter here.
+        let (service, clock) = service(probe, driver);
+        let notifier = RecordingNotifier::new();
+
+        let outcome = service.run(&notifier, &CancelSignal::new());
+        assert!(
+            matches!(outcome, LoopOutcome::Degraded { .. }),
+            "{outcome:?}"
+        );
+        assert!(
+            !clock.requested_sleeps().is_empty(),
+            "must back off between attempts, not spin"
+        );
+    }
+
+    /// The real packaged-Linux bug (specs/028-safent-app-nativa/
+    /// verificacion-paquete-linux.md): `cmd_stage_runtime` as a no-op
+    /// returns SUCCESS every time (`Ok(Progressed)`) without ever changing
+    /// `runtime_staged`. Every `Err`-based guard in this loop is silent —
+    /// nothing ever fails — so unbounded `Ok(Progressed)` against unchanged
+    /// facts needs its OWN guard. Scripts `StageRuntime` to "succeed" far
+    /// more times than a fixed loop cap could excuse away as coincidence,
+    /// to prove the loop stops ITSELF, not that the script merely ran out.
+    #[test]
+    fn same_action_succeeding_repeatedly_without_changing_facts_degrades_after_one_apply() {
+        let mut fresh = converged_facts();
+        fresh.runtime_staged = false;
+        fresh.runtime_hash_ok = false;
+
+        // Facts never change (ScriptedProbe repeats its last entry forever).
+        let probe = ScriptedProbe::new(vec![Ok(fresh)]);
+        let driver = ScriptedDriver::new(vec![
+            (RepairAction::StageRuntime, Ok(ApplyOutcome::Progressed)),
+            (RepairAction::StageRuntime, Ok(ApplyOutcome::Progressed)),
+            (RepairAction::StageRuntime, Ok(ApplyOutcome::Progressed)),
+            (RepairAction::StageRuntime, Ok(ApplyOutcome::Progressed)),
+            (RepairAction::StageRuntime, Ok(ApplyOutcome::Progressed)),
+        ]);
+        let (service, _clock) = service(probe, driver);
+        let notifier = RecordingNotifier::new();
+
+        let outcome = service.run(&notifier, &CancelSignal::new());
+        match outcome {
+            LoopOutcome::Degraded { lifecycle } => {
+                assert_eq!(
+                    lifecycle.last_failure().map(|f| f.code),
+                    Some(FailureCode::RepairIneffective)
+                );
+            }
+            other => panic!("expected Degraded(RepairIneffective), got {other:?}"),
+        }
+        assert!(
+            notifier.events().iter().any(|e| matches!(
+                e,
+                DomainEvent::EngineDegraded {
+                    cause: FailureCause {
+                        code: FailureCode::RepairIneffective,
+                        ..
+                    }
+                }
+            )),
+            "{:?}",
+            notifier.events()
+        );
+        assert!(notifier
+            .events()
+            .iter()
+            .any(|e| matches!(e, DomainEvent::EngineDegraded { .. })));
+    }
+
+    #[test]
+    fn cancelling_before_the_point_of_no_return_stops_the_loop() {
+        let mut fresh = converged_facts();
+        fresh.runtime_staged = false;
+        fresh.runtime_hash_ok = false;
+
+        let probe = ScriptedProbe::new(vec![Ok(fresh)]);
+        let driver = ScriptedDriver::new(vec![]);
+        let (service, _clock) = service(probe, driver);
+        let notifier = RecordingNotifier::new();
+        let cancel = CancelSignal::new();
+        cancel.set();
+
+        assert!(matches!(
+            service.run(&notifier, &cancel),
+            LoopOutcome::Cancelled { .. }
+        ));
+    }
+
+    #[test]
+    fn cancelling_past_the_point_of_no_return_is_rejected() {
+        // Already inside `up` (EngineStarting, past the point of no return) —
+        // the driver is scripted to ignore cancellation the way the real
+        // adapter would past that point, and this test proves BootService
+        // does not even ask it to: it hands down a fresh, unset signal.
+        let mut image_pulled = converged_facts();
+        image_pulled.engine_container = None;
+        image_pulled.published_port = None;
+
+        let probe = ScriptedProbe::new(vec![Ok(image_pulled)]);
+        let driver = ScriptedDriver::new(vec![(
+            RepairAction::CreateContainer,
+            Ok(ApplyOutcome::Ready(ticket())),
+        )]);
+        let (service, _clock) = service(probe, driver);
+        let notifier = RecordingNotifier::new();
+        let cancel = CancelSignal::new();
+        cancel.set(); // requested BEFORE this run — must still be rejected once past the gate
+
+        match service.run(&notifier, &cancel) {
+            LoopOutcome::Ready { .. } => {}
+            other => panic!(
+                "expected Ready (cancel rejected past the point of no return), got {other:?}"
+            ),
+        }
+    }
+}

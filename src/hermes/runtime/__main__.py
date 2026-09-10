@@ -785,6 +785,33 @@ def _build_audit_components(db_path: Path):
     return firmer, audit_repo
 
 
+def _build_agent_state(*, db_path: Path, firmer, audit_repo):
+    """Construye SqliteAgentState con el signer/audit_repo REALES (CTRL-12).
+
+    A diferencia de otros componentes de este módulo (p.ej. security_hook,
+    1542), el freno de emergencia NO degrada: pause/resume es la única
+    transición de estado del agente con consecuencia de seguridad, y
+    _build_audit_components() ya documenta que un (None, None) sólo debe
+    dejar arrancar degradado a un caller de TEST — main() no lo es. Antes de
+    este fix, SqliteAgentState se construía SIN firmer/audit_repo (aunque ya
+    estaban disponibles unas líneas más abajo) y absorbía el freno en
+    silencio: la cadena firmada crecía con otros eventos pero nunca con
+    AGENT_PAUSED/AGENT_RESUMED (CLI-N4, specs/025-safent-repaso
+    matriz-final-39eeb8e, CWE-778). Fail-loud aquí: sin un signing key real
+    (HERMES_AUDIT_KEY o master.key), el daemon rehúsa arrancar en vez de
+    servir pause/resume sin auditar.
+    """
+    from hermes.tasks.infrastructure.sqlite_agent_state import SqliteAgentState  # noqa: PLC0415
+
+    if firmer is None or audit_repo is None:
+        raise RuntimeError(
+            "hermes.runtime.agent_state_audit_unavailable: no se puede "
+            "construir SqliteAgentState sin signer/audit_repo — "
+            "AGENT_PAUSED/AGENT_RESUMED nunca deben auditarse en silencio "
+            "(CTRL-12/CWE-778, CLI-N4). Configura HERMES_AUDIT_KEY o "
+            "master.key antes de arrancar."
+        )
+    return SqliteAgentState(db_path=db_path, signer=firmer, audit_repo=audit_repo)
 
 
 def _build_composio_surface_adapter(db_path: Path):
@@ -1413,7 +1440,6 @@ async def _run(*, systemd_notify: bool) -> None:
 
     # Componentes del loop
     from hermes.tasks.infrastructure.sqlite_work_queue import SqliteWorkQueue  # noqa: PLC0415
-    from hermes.tasks.infrastructure.sqlite_agent_state import SqliteAgentState  # noqa: PLC0415
     from hermes.tasks.application.agent_loop_orchestrator import AgentLoopOrchestrator  # noqa: PLC0415
     from hermes.capabilities.domain.ports import ConsentContext  # noqa: PLC0415
 
@@ -1424,7 +1450,11 @@ async def _run(*, systemd_notify: bool) -> None:
         logger.warning("Cannot create DB dir %s", db_path.parent)
 
     queue = SqliteWorkQueue(db_path=db_path)
-    state = SqliteAgentState(db_path=db_path)
+    # Audit components built BEFORE agent_state (CLI-N4): the emergency-brake
+    # pause/resume audit trail must never be wired up after the fact / with a
+    # missing signer — see _build_agent_state's docstring.
+    firmer, audit_repo = _build_audit_components(db_path)
+    state = _build_agent_state(db_path=db_path, firmer=firmer, audit_repo=audit_repo)
     logger.info(
         "hermes.runtime.boot_step.sqlite_infra_ready",
         extra={"elapsed_ms": round((_time.perf_counter() - _t_start) * 1000, 1)},
@@ -1441,7 +1471,6 @@ async def _run(*, systemd_notify: bool) -> None:
     # SurfaceKind.BROWSER stays unregistered — the broker already handles None (1062).
     browser_adapter = None
 
-    firmer, audit_repo = _build_audit_components(db_path)
     logger.info(
         "hermes.runtime.boot_step.broker_deps_ready",
         extra={"elapsed_ms": round((_time.perf_counter() - _t_start) * 1000, 1)},
