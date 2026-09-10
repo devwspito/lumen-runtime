@@ -10,7 +10,8 @@ rust-version = "1.77"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2"
 
 # Smaller, faster release binaries for the shipped desktop shell.
 [profile.release]
