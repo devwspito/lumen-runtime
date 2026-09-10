@@ -25,6 +25,7 @@ from __future__ import annotations
 from enum import StrEnum
 
 from hermes.runtime.nous_tool_risk_map import NousRisk, classify_nous_tool
+from hermes.tailnet_ssh.tool_names import TAILNET_SSH_TOOL_NAMES
 
 
 class Delicacy(StrEnum):
@@ -73,7 +74,18 @@ _ORCHESTRATION: frozenset[str] = frozenset({"delegate_task", "mixture_of_agents"
 # REAL HITL gate for this tool is ExtendedCapabilityBinding.auto_executable=
 # False (capability_registry.py), enforced independently of this
 # classification.
-_DELICATE_NON_NATIVE: frozenset[str] = frozenset({"delegate_to_colleague"})
+#
+# tailnet_ssh / tailnet_file_get / tailnet_file_put (spec 022 v2): remote
+# command execution on an owner-approved tailnet host — the SAME
+# cage-escaping-outbound class as delegate_to_colleague/send_message, but
+# NOT a native Nous tool either. The REAL HITL gate is
+# `security_hook._resolve_tailnet_ssh_consent` (ALWAYS-ask per-host
+# block-and-resume, independent of mfa_on_dangers — see that function's
+# docstring); this classification only keeps delicacy()/the Policies UI
+# coherent, it does not itself gate anything.
+_DELICATE_NON_NATIVE: frozenset[str] = frozenset(
+    {"delegate_to_colleague"} | TAILNET_SSH_TOOL_NAMES
+)
 
 
 def delicacy(tool: str) -> Delicacy:
