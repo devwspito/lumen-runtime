@@ -238,3 +238,61 @@ departamentos poblados, `GET /instance/features` → `edition:"community"`.
 | **026 · entrada "Ads" en el sidebar** | **PASS** | `Layout.tsx:448,572` (`useAdsAvailability` + `<AdsNavItem>`) y `GET /api/v1/mcp` | la entrada es **incondicional** (ya no depende de `useAdsPanelOrigin`) y el hook resuelve `loading → ready \| unavailable(reason)`. Con el companion arriba, `companion_status` pasa de ausente a `listo` en ~5 s desde el arranque; `GetCompanionHealth` devuelve `{"state":"no_accounts","reachable":true,"http_status":200,"contract_version":"1.0.0","accounts_linked":{"google":false,"meta":false}}` — estado honesto, no pantalla vacía |
 | **026 · `/ads/` mismo origen, cero inicios de sesión (SC-002)** | **FALLA** | 20 aperturas no llegan a intentarse: la primera ya da 503 | por ADS-02. Lo que **sí** cumple el puente: sin cookie → **401**; `/ads/mcp` → **403**; `/ads/api/v1/auth/login` y `/ads/api/v1/auth/totp` → **403** (nada de formulario de acceso embebido); ninguna respuesta reenvía `Set-Cookie: ads_session` al navegador (0 coincidencias) |
 | **026 · `GET /api/v1/cockpit` por el puente** | **FALLA** | `GET /ads/api/v1/cockpit` con la cookie de puente | **503** `{"error":{"code":"ADS_SESSION_UNAVAILABLE"}}` — misma causa raíz (la petición nunca sale hacia el companion) |
+
+## §14 CLI `safent` (CLI) y §18 Copias (BKP)
+
+Ejecutado desde el host con `SAFENT_NAME=matriz-final-1`, `SAFENT_DATA_VOLUME=matriz-final-1-data`,
+`SAFENT_PORT=18090`, `SAFENT_IMAGE=localhost/safent-runtime:latest` y `HOME` redirigido al
+scratchpad (para no tocar `~/.safent`, que en esta máquina sólo tenía un `safent-seccomp.json`
+previo, intacto al terminar).
+
+| id | resultado | cómo | evidencia |
+|---|---|---|---|
+| CLI-01 | **PASS** | `./safent open` | imprime `Safent is ready: http://localhost:18090/?k=b21d2ca…`; sin navegador en el host, no revienta |
+| CLI-02 | **PASS** | `./safent url` | una sola línea con la URL y `?k=` en stdout, progreso a stderr |
+| CLI-03 | **PASS** | `./safent start` | arranca sin abrir navegador; `/healthz` 200 a los 2 s |
+| CLI-04 | **PASS** | `./safent stop` | `[ok] Safent stopped` en **7 s**, `Exited (0)` — parada ordenada, sin el SIGKILL de la 1ª pasada |
+| CLI-05 | **PASS** | `./safent restart` | stop+open, `/healthz` 200 a los 14 s |
+| CLI-06 | **PASS** | `./safent status` | `[ok] Safent running at http://localhost:18090/` |
+| CLI-07 | **PASS** | `./safent logs` | `podman logs -f` en streaming |
+| CLI-08 | **FALLA** | `./safent companion status` con los 5 contenedores del companion `Up`/`healthy` | responde `containers: 0/0 running` y `/mcp/health: unreachable`. Causa raíz reproducida: `_companion_container_counts` llama a `podman compose … ps -q -a` **sin** `_companion_env`, así que la interpolación falla (`required variable ADS_POSTGRES_PASSWORD is missing a value`) y la lista sale vacía — con el env exportado, la misma orden devuelve los contenedores. Además, en podman **rootless** la sonda `/mcp/health` del CLI no puede alcanzar `10.201.0.10:8443` desde el host (red del companion en su propio netns), así que siempre dirá "unreachable" |
+| CLI-09 | **[DUEÑO]** | `safent companion update` (pull + recreate) | no ejecutado: haría `pull` de la imagen publicada del dueño y recrearía el companion; el defecto de imagen que lo rompe está medido en CLI-10 |
+| CLI-10 | **FALLA (grave)** | `./safent companion rotate` sobre un companion sano | rota los ficheros del host y luego **rompe el companion**: `ads-migrate` sale `Exited (255)` con `FAILED: Can't locate revision identified by '0033_crm_bridge_health'` y `ads-api` se queda en `Created` (caído); el CLI acaba en `[x] Bearer/SSO files updated but ads-api restart failed — restart it by hand`. Causa raíz: `_companion_env()` fija `SAFENT_ADS_IMAGE="${SAFENT_ADS_IMAGE:-ghcr.io/devwspito/safent-ads:latest}"` mientras que `run-safent.sh` aprovisiona con `safent-ads:local` si existe → el rotate **descarga y mezcla otra imagen** (`podman inspect safent-ads-ads-migrate-1` → `ghcr.io/devwspito/safent-ads:latest`, mientras `ads-worker` seguía en `localhost/safent-ads:local`), y esa imagen publicada no conoce la cabeza de alembic que la local ya aplicó. Recuperado a mano con `podman compose … up -d` y `SAFENT_ADS_IMAGE=localhost/safent-ads:local` (migrate exit 0, `ads-api healthy`). Efecto colateral observado: mientras `ads-api` estuvo caído, `GET /api/v1/mcp` siguió diciendo `healthy`/`listo`/61 tools |
+| CLI-11 | **PASS** | ver §Destructivo | — |
+| CLI-12 | **PASS** | ver §Destructivo | — |
+| CLI-13 | **PASS** | `./safent --no-companion status` | acepta la bandera como primer argumento y salta el provisioning |
+| CLI-14 | **PASS** | `./safent pair CODIGO-FALSO-MATRIZ` | `[x] Pairing failed: Error de red al contactar el control plane.` — error claro, sin dejar estado |
+| CLI-15 | **PASS** | `./safent unpair` | `[ok] Not associated — nothing to unpair` + `[ok] Instance unpaired`; `GET /instance/status` sigue `community` |
+| BKP-01a (`safent backup`) | **PASS** | `./safent backup $SCRATCH/out/backups` | para la instancia, exporta volumen + estado del companion + caché de seccomp y la rearranca; `safent-backup-20260910T150842Z.tar.gz` de **157 MB** en 21 s, `0600` |
+| BKP-01b (`safent restore`) | **FALLA (grave, silenciosa)** | `./safent --no-companion restore <archivo>` con `SAFENT_NAME=matriz-final-2` | imprime `[ok] Restored from …` **pero no crea ningún contenedor**: `podman ps -a` no lista `matriz-final-2` tras un restore "correcto". Causa raíz reproducida con `sh -x`: `cmd_restore` importa primero el volumen y después llama a `cmd_start`, cuyo `_exists()` hace `podman inspect "$NAME"` — y esa orden **casa con el VOLUMEN** (`podman inspect matriz-final-2` → `"Name": "matriz-final-2-data"`), así que el CLI cree que la instancia ya existe, hace `podman start matriz-final-2` (falla, silenciado con `\|\| true`) y anuncia `[ok] Safent started`. El dueño se queda sin instancia y con un mensaje de éxito. Reproducible también con `./safent --no-companion start` a secas sobre un nombre que sólo tiene volumen |
+| BKP-01c (datos del backup) | **PASS** | arrancando a mano el volumen restaurado (`run-safent.sh … 18091 --no-companion`) | `/healthz` 200 a los 2 s y **todo el estado viaja**: las 2 skills (`native:git`, `native:gitnexus-explorer`), el cron con su UUID, el proveedor activo (`gemini/gemini-2.5-flash`), `mfa.enrolled:true`, `egress deny`, los MCP de oficina y **el mismo bearer** (misma `master.key`). `restore` repetido sin `--force` → se niega correctamente: `Volume … already exists — refusing to overwrite it` |
+| BKP-02 | **PASS** | equivalente `podman volume export/import` (lo que hace `safent backup` por dentro) | verificado en BKP-01c: el volumen importado conserva providers, skills, MCP, memoria y cron |
+
+## §15 Desktop shell (DESK) — 4 filas
+
+| id | resultado | motivo |
+|---|---|---|
+| DESK-01 | **NO-APLICA-DGX** | no hay build de Tauri ni sesión gráfica en este host |
+| DESK-02 | **NO-APLICA-DGX** | idem (webview nativo) |
+| DESK-03 | **NO-APLICA-DGX** | idem (`__safentLatestVersion` lo inyecta el shell nativo) |
+| DESK-04 | **NO-APLICA-DGX** | idem (comando de portapapeles `#[tauri::command]`) |
+
+## §16 Distribución (DIST)
+
+| id | resultado | cómo | evidencia |
+|---|---|---|---|
+| DIST-01 | **NO-APLICA-DGX** | `get-safent.sh` en VM Linux limpia | no hay VM limpia; ejecutarlo aquí instalaría el CLI en el PATH del host y tiraría de la imagen publicada |
+| DIST-02 | **NO-APLICA-DGX** | macOS Apple Silicon | — |
+| DIST-03 | **NO-APLICA-DGX** | macOS Intel | — |
+| DIST-04 | **NO-APLICA-DGX** | Windows + WSL2 | — |
+| DIST-05 | **PASS (contradicción documental confirmada)** | `docker --version`; `docker run --rm --systemd=always alpine true` | Docker **29.2.1** presente en el host: `docker run --help` no lista `--systemd` (0 coincidencias) y el intento real responde `unknown flag: --systemd`. `run-safent.sh` es, por tanto, **podman-only**; el README que ofrece "Podman o Docker Desktop" sigue siendo incorrecto |
+| DIST-06 | **PASS** | toda esta pasada corrió con **podman rootless** (`podman info … Rootless=true`, uid 1000) | arranque, Landlock (`enforcing=True`), seccomp de PID1 (`Seccomp: 2`), netns del navegador/MCP, nftables, companion y CLI funcionan igual que en las verificaciones rootful previas. Única diferencia observada: desde el host **no** se alcanza `10.201.0.10:8443` (red del companion en el netns del usuario) — de ahí el "unreachable" de CLI-08 |
+
+## §17 Enterprise (ENT)
+
+| id | resultado | cómo | evidencia |
+|---|---|---|---|
+| ENT-01 | **PASS** | `GET /api/v1/instance/features` y `/instance/status` | `edition:"community"`, `associated:false`, 10 vistas expuestas |
+| ENT-02 | **[DUEÑO]** | requiere código de tenant + control plane alcanzable | `safent pair` con código falso da error de red claro (CLI-14) |
+| ENT-03 | **[DUEÑO]** | depende de ENT-02 | — |
+| ENT-04 | **PASS** (camino inerte) | `./safent unpair` sin emparejar | `[ok] Not associated — nothing to unpair`; sigue `community` |
