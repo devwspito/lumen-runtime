@@ -208,7 +208,7 @@ class TestConnectManagedRemote:
         _, second_call = p.call_mutator.call_args_list
         draft = _json.loads(second_call.args[1])
         assert draft["server_id"] == "safent-ads"
-        assert draft["argv"] == ["npx", "-y", "mcp-remote", "https://ads.tenant.ts.net/mcp"]
+        assert draft["argv"] == ["npx", "-y", "mcp-remote@0.8.6", "https://ads.tenant.ts.net/mcp"]
         assert draft["label"] == "Safent Ads"
         assert draft["force"] is True
 

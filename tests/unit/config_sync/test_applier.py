@@ -1339,7 +1339,7 @@ class TestMcpBundleWarnOverride:
 
         proxy = WarnThenForceOkProxy()
         payload = _empty_payload(
-            mcp=[{"server_id": "safent-control", "argv": ["npx", "-y", "mcp-remote"]}]
+            mcp=[{"server_id": "safent-control", "argv": ["npx", "-y", "mcp-remote@0.8.6"]}]
         )
 
         result = await PolicyApplier(proxy).apply(payload, current_agents=[])
@@ -1370,7 +1370,7 @@ class TestMcpBundleWarnOverride:
 
         proxy = RecordingProxy()
         payload = _empty_payload(
-            mcp=[{"server_id": "safent-control", "argv": ["npx", "-y", "mcp-remote"]}]
+            mcp=[{"server_id": "safent-control", "argv": ["npx", "-y", "mcp-remote@0.8.6"]}]
         )
 
         await PolicyApplier(proxy).apply(payload, current_agents=[])
@@ -1472,7 +1472,7 @@ class TestMcpBundleWarnOverride:
         proxy = FakeDbusProxy()
         proxy._existing_mcp = [{"server_id": "safent-control"}]
         payload = _empty_payload(
-            mcp=[{"server_id": "safent-control", "argv": ["npx", "-y", "mcp-remote"]}]
+            mcp=[{"server_id": "safent-control", "argv": ["npx", "-y", "mcp-remote@0.8.6"]}]
         )
 
         result = await PolicyApplier(proxy).apply(payload, current_agents=[])

@@ -172,7 +172,7 @@ class TestImportSeedCompanionServers:
 
         assert written["server_id"] == "safent-ads"
         assert written["argv"] == [
-            "npx", "-y", "mcp-remote", "https://ads.safent.internal:8443/mcp",
+            "npx", "-y", "mcp-remote@0.8.6", "https://ads.safent.internal:8443/mcp",
             "--header", "Authorization: Bearer ${ADS_BEARER}",
         ]
         assert written["env"] == {"ADS_BEARER": "", "NODE_EXTRA_CA_CERTS": ""}
@@ -212,7 +212,7 @@ class TestImportSeedCompanionServers:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path
     ) -> None:
         self._reset_marker(monkeypatch, tmp_path)
-        neus_cfg = {"safent-ads": {"command": "npx", "args": ["-y", "mcp-remote", "https://legacy/mcp"]}}
+        neus_cfg = {"safent-ads": {"command": "npx", "args": ["-y", "mcp-remote@0.8.6", "https://legacy/mcp"]}}
 
         with (
             patch("hermes.shell_server.companions.get_companion", return_value=_endpoint()),
@@ -242,7 +242,7 @@ class TestListMcpServersSurfacesCompanionStatus:
     async def test_seeded_slug_carries_companion_status(self) -> None:
         wiring = self._make_wiring()
         live_status = [{"name": "safent-ads", "connected": True, "tools": 5}]
-        neus_cfg = {"safent-ads": {"command": "npx", "args": ["-y", "mcp-remote", "https://x/mcp"]}}
+        neus_cfg = {"safent-ads": {"command": "npx", "args": ["-y", "mcp-remote@0.8.6", "https://x/mcp"]}}
 
         with (
             patch("tools.mcp_tool_discovery.get_mcp_status", return_value=live_status),

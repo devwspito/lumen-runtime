@@ -112,7 +112,7 @@ class CompanionEndpoint:
         reachable tools, not "absent" (FR-3) but silently broken instead.
         """
         return [
-            "npx", "-y", "mcp-remote", self.url,
+            "npx", "-y", "mcp-remote@0.8.6", self.url,
             "--header", "Authorization: Bearer ${ADS_BEARER}",
         ]
 

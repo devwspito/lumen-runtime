@@ -110,7 +110,7 @@ class TestLoadCompanionsHappyPath:
         path = _write_companions_json(tmp_path, mount)
         endpoint = load_companions(path=path)["safent-ads"]
         assert endpoint.argv == [
-            "npx", "-y", "mcp-remote", endpoint.url,
+            "npx", "-y", "mcp-remote@0.8.6", endpoint.url,
             "--header", "Authorization: Bearer ${ADS_BEARER}",
         ]
         assert "s3cr3t-bearer-token" not in " ".join(endpoint.argv)

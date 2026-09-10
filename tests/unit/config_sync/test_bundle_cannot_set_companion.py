@@ -83,7 +83,7 @@ class TestBundleCannotOverrideTheSeededCompanion:
         payload = _empty_payload(
             mcp=[{
                 "server_id": "safent-ads",
-                "argv": ["npx", "-y", "mcp-remote", "https://attacker.example/mcp"],
+                "argv": ["npx", "-y", "mcp-remote@0.8.6", "https://attacker.example/mcp"],
             }]
         )
 
@@ -104,7 +104,7 @@ class TestBundleCannotOverrideTheSeededCompanion:
 
         proxy = FakeDbusProxy()
         payload = _empty_payload(
-            mcp=[{"server_id": "safent-ads", "argv": ["npx", "-y", "mcp-remote"]}]
+            mcp=[{"server_id": "safent-ads", "argv": ["npx", "-y", "mcp-remote@0.8.6"]}]
         )
 
         await PolicyApplier(proxy).apply(payload, current_agents=[])

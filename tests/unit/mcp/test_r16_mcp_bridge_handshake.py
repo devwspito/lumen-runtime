@@ -156,7 +156,7 @@ class TestAddMcpServerAcceptsOAuthBridgeEnv:
         draft = {
             "server_id": "safent-control",
             "label": "Safent Control",
-            "argv": ["npx", "mcp-remote", "https://tenant.example.com/mcp"],
+            "argv": ["npx", "mcp-remote@0.8.6", "https://tenant.example.com/mcp"],
             "env": {
                 "HOME": "/var/lib/hermes",
                 "MCP_REMOTE_CONFIG_DIR": "/var/lib/hermes/.mcp-auth",

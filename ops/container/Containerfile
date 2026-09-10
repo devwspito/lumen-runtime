@@ -458,7 +458,7 @@ RUN mkdir -p /var/lib/hermes/npm-cache /var/lib/hermes/uv-cache /var/lib/hermes/
       HOME=/var/lib/hermes/mcp-home timeout 240 uvx $spec </dev/null >/dev/null 2>&1 || true ; \
     done ; \
     echo "▸ warming npx mcp-remote" ; \
-    HOME=/var/lib/hermes/mcp-home timeout 240 npx -y mcp-remote --help </dev/null >/dev/null 2>&1 || true ; \
+    HOME=/var/lib/hermes/mcp-home timeout 240 npx -y mcp-remote@0.8.6 --help </dev/null >/dev/null 2>&1 || true ; \
     chown -R hermes:hermes-work /var/lib/hermes/npm-cache /var/lib/hermes/uv-cache \
       /var/lib/hermes/xdg-cache /var/lib/hermes/mcp-home && \
     chmod -R g+rwX /var/lib/hermes/npm-cache /var/lib/hermes/uv-cache \

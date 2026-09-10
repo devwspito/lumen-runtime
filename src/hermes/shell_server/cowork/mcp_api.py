@@ -218,7 +218,7 @@ def create_mcp_router() -> APIRouter:  # noqa: PLR0915 — 6 REST routes, one fa
         draft = {
             "server_id": slug,
             "label": _MANAGED_REMOTE_LABELS.get(slug, slug.replace("-", " ").title()),
-            "argv": ["npx", "-y", "mcp-remote", body.url],
+            "argv": ["npx", "-y", "mcp-remote@0.8.6", body.url],
             "env": {},
             "force": body.force,
         }
