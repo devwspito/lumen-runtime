@@ -1,15 +1,18 @@
-"""GET /api/v1/system/update + runtime-manifest.json verification (T005,
-contracts/update.md §2-3).
+"""GET /api/v1/system/update + runtime-manifest.json minisign verification
+(T005/T006, contracts/update.md §2-3).
 
-Two layers:
-  - `hermes.shell_server.runtime_manifest` — pure fetch+verify, no HTTP.
-    Fresh keypair per test, no hardcoded key material (same convention as
-    tests/unit/config_sync/test_signature.py).
-  - the HTTP route itself, via FastAPI's TestClient, with the network fetch
-    monkeypatched at `_fetch_raw` — hermetic, no real request ever leaves
-    the process (Constitution Principle V).
+Three layers:
+  - `hermes.shell_server.runtime_manifest` minisign wire-format parsing +
+    verification — pure, no HTTP, no network. The bulk of these tests sign
+    fixtures with a hand-built Python signer (`_minisign_sign` below) that
+    mirrors the verifier's own parsing rules, so the suite never depends on
+    the external `minisign` binary. `TestAgainstRealMinisignBinary` below
+    additionally cross-checks against the REAL `minisign` 0.11 reference
+    implementation when it is on PATH (skipped otherwise, same convention
+    as tests/unit/ops/test_gitleaks_allowlist.py).
+  - the HTTP route, via FastAPI's TestClient, network fetch monkeypatched.
 
-The one invariant tasks.md calls out explicitly: a manifest whose signature
+The one invariant tasks.md calls out by name: a manifest whose signature
 does not verify must produce `update_available: false`, even when the
 plain-text VERSION file says a newer version exists — fail-closed per
 Constitution Principle IV ("manifiesto sin firma valida -> sin boton").
@@ -17,11 +20,14 @@ Constitution Principle IV ("manifiesto sin firma valida -> sin boton").
 
 from __future__ import annotations
 
-import json
+import base64
+import hashlib
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -32,100 +38,148 @@ from hermes.shell_server.system_update import create_system_update_router
 pytestmark = pytest.mark.unit
 
 _TOKEN = "test-bearer-token"  # noqa: S105 - test fixture, not a real credential
+_KEY_ID = b"\x01\x02\x03\x04\x05\x06\x07\x08"
+_OTHER_KEY_ID = b"\xff\xfe\xfd\xfc\xfb\xfa\xf9\xf8"
 
 
-def _generate_keypair() -> tuple[Ed25519PrivateKey, str]:
-    private_key = Ed25519PrivateKey.generate()
-    return private_key, private_key.public_key().public_bytes_raw().hex()
+# ---------------------------------------------------------------------------
+# Test-only minisign signer — mirrors runtime_manifest's verifier so the
+# bulk of this suite is hermetic (no dependency on the external binary).
+# ---------------------------------------------------------------------------
 
 
-def _signed_manifest(
+def _minisign_pubkey_text(public_key: Ed25519PublicKey, key_id: bytes = _KEY_ID) -> str:
+    raw = b"Ed" + key_id + public_key.public_bytes_raw()
+    return f"untrusted comment: test pubkey\n{base64.b64encode(raw).decode()}\n"
+
+
+def _minisign_sign(
+    file_bytes: bytes,
     private_key: Ed25519PrivateKey,
     *,
-    version: str = "9.9.9",
-    engine: dict[str, str] | None = None,
-    companion: dict[str, dict[str, str]] | None = None,
-    min_app_version: str | None = None,
-) -> dict[str, object]:
-    default_engine = {"linux/amd64": "sha256:" + "1" * 64}
-    default_companion = {"safent-ads": {"linux/amd64": "sha256:" + "2" * 64}}
+    key_id: bytes = _KEY_ID,
+    trusted_comment: str = "test trusted comment",
+    legacy: bool = False,
+) -> str:
+    alg = b"Ed" if legacy else b"ED"
+    payload = file_bytes if legacy else hashlib.blake2b(file_bytes, digest_size=64).digest()
+    sig = private_key.sign(payload)
+    sig_raw = alg + key_id + sig
+    global_sig = private_key.sign(sig + trusted_comment.encode("utf-8"))
+    return (
+        f"untrusted comment: test signature\n"
+        f"{base64.b64encode(sig_raw).decode()}\n"
+        f"trusted comment: {trusted_comment}\n"
+        f"{base64.b64encode(global_sig).decode()}\n"
+    )
+
+
+def _generate_keypair(key_id: bytes = _KEY_ID) -> tuple[Ed25519PrivateKey, str]:
+    private_key = Ed25519PrivateKey.generate()
+    return private_key, _minisign_pubkey_text(private_key.public_key(), key_id)
+
+
+def _manifest_bytes(**overrides: object) -> bytes:
+    import json
+
     payload: dict[str, object] = {
         "schema_version": 1,
-        "version": version,
-        "engine": engine if engine is not None else default_engine,
-        "companion": companion if companion is not None else default_companion,
+        "version": "9.9.9",
+        "engine": {"linux/amd64": "sha256:" + "1" * 64},
+        "companion": {"safent-ads": {"linux/amd64": "sha256:" + "2" * 64}},
         "runtime_bundle": {"podman": "6.1.1", "machine_os": "6.1"},
-        "min_app_version": min_app_version or version,
+        "min_app_version": "9.9.9",
     }
-    signature_hex = private_key.sign(rm.canonical_bytes(payload)).hex()
-    return {**payload, rm.SIGNATURE_FIELD: signature_hex}
+    payload.update(overrides)
+    return (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
 # ---------------------------------------------------------------------------
-# Pure fetch+verify (no HTTP)
+# minisign wire-format parsing + verification (pure)
 # ---------------------------------------------------------------------------
 
 
-class TestFetchVerifiedManifest:
-    def test_valid_signature_parses_the_payload(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        private_key, pubkey_hex = _generate_keypair()
-        raw = _signed_manifest(private_key, version="1.2.3")
-        monkeypatch.setattr(rm, "_PUBKEY_HEX", pubkey_hex)
-        monkeypatch.setattr(rm, "_fetch_raw", lambda: raw)
+class TestVerifyMinisign:
+    def test_valid_signature_verifies(self) -> None:
+        private_key, pubkey_text = _generate_keypair()
+        file_bytes = _manifest_bytes()
+        minisig_text = _minisign_sign(file_bytes, private_key)
 
-        manifest = rm.fetch_verified_manifest()
+        assert rm.verify_minisign(file_bytes, pubkey_text, minisig_text) is True
 
-        assert manifest is not None
-        assert manifest.version == "1.2.3"
-        assert manifest.engine["linux/amd64"] == "sha256:" + "1" * 64
+    def test_tampered_file_fails(self) -> None:
+        private_key, pubkey_text = _generate_keypair()
+        minisig_text = _minisign_sign(_manifest_bytes(), private_key)
 
-    def test_no_pubkey_configured_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        private_key, _pubkey_hex = _generate_keypair()
-        raw = _signed_manifest(private_key)
-        monkeypatch.setattr(rm, "_PUBKEY_HEX", "")
-        monkeypatch.setattr(rm, "_fetch_raw", lambda: raw)
+        tampered = _manifest_bytes(version="0.0.1")
+        assert rm.verify_minisign(tampered, pubkey_text, minisig_text) is False
 
-        assert rm.fetch_verified_manifest() is None
+    def test_tampered_trusted_comment_fails(self) -> None:
+        """The global signature covers the trusted comment too — swapping
+        it after signing must invalidate verification even though the
+        main signature over the file itself is still technically valid."""
+        private_key, pubkey_text = _generate_keypair()
+        file_bytes = _manifest_bytes()
+        minisig_text = _minisign_sign(file_bytes, private_key, trusted_comment="original")
+        swapped = minisig_text.replace("trusted comment: original", "trusted comment: swapped")
 
-    def test_tampered_payload_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        private_key, pubkey_hex = _generate_keypair()
-        raw = _signed_manifest(private_key, version="1.2.3")
-        raw["version"] = "9.9.9"  # mutated AFTER signing
-        monkeypatch.setattr(rm, "_PUBKEY_HEX", pubkey_hex)
-        monkeypatch.setattr(rm, "_fetch_raw", lambda: raw)
+        assert rm.verify_minisign(file_bytes, pubkey_text, swapped) is False
 
-        assert rm.fetch_verified_manifest() is None
+    def test_signed_by_the_wrong_key_fails(self) -> None:
+        attacker_key, _ = _generate_keypair()
+        _real_key, real_pubkey_text = _generate_keypair()
+        file_bytes = _manifest_bytes()
+        minisig_text = _minisign_sign(file_bytes, attacker_key)
 
-    def test_signed_by_the_wrong_key_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        attacker_key, _attacker_pubkey = _generate_keypair()
-        _real_key, real_pubkey_hex = _generate_keypair()
-        raw = _signed_manifest(attacker_key)
-        monkeypatch.setattr(rm, "_PUBKEY_HEX", real_pubkey_hex)
-        monkeypatch.setattr(rm, "_fetch_raw", lambda: raw)
+        assert rm.verify_minisign(file_bytes, real_pubkey_text, minisig_text) is False
 
-        assert rm.fetch_verified_manifest() is None
+    def test_key_id_mismatch_fails_even_with_a_mathematically_valid_signature(self) -> None:
+        """Belt-and-suspenders: if a signature's key id doesn't match the
+        pubkey's, reject before even attempting Ed25519 verification."""
+        private_key, pubkey_text = _generate_keypair(key_id=_KEY_ID)
+        file_bytes = _manifest_bytes()
+        minisig_text = _minisign_sign(file_bytes, private_key, key_id=_OTHER_KEY_ID)
 
-    def test_missing_signature_field_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        _key, pubkey_hex = _generate_keypair()
-        raw = {"schema_version": 1, "version": "1.2.3"}
-        monkeypatch.setattr(rm, "_PUBKEY_HEX", pubkey_hex)
-        monkeypatch.setattr(rm, "_fetch_raw", lambda: raw)
+        assert rm.verify_minisign(file_bytes, pubkey_text, minisig_text) is False
 
-        assert rm.fetch_verified_manifest() is None
+    def test_legacy_ed_mode_signature_is_rejected(self) -> None:
+        """Only the prehashed 'ED' scheme is accepted (owner's spec) — a
+        legacy 'Ed' (unhashed) signature, even a mathematically valid one
+        over the same bytes, must not verify."""
+        private_key, pubkey_text = _generate_keypair()
+        file_bytes = _manifest_bytes()
+        legacy_sig = _minisign_sign(file_bytes, private_key, legacy=True)
 
-    def test_fetch_failure_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        _key, pubkey_hex = _generate_keypair()
-        monkeypatch.setattr(rm, "_PUBKEY_HEX", pubkey_hex)
-        monkeypatch.setattr(rm, "_fetch_raw", lambda: None)
+        assert rm.verify_minisign(file_bytes, pubkey_text, legacy_sig) is False
 
-        assert rm.fetch_verified_manifest() is None
+    def test_malformed_pubkey_text_fails_closed(self) -> None:
+        private_key, _ = _generate_keypair()
+        file_bytes = _manifest_bytes()
+        minisig_text = _minisign_sign(file_bytes, private_key)
 
-    def test_does_not_raise_on_non_dict_response(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        _key, pubkey_hex = _generate_keypair()
-        monkeypatch.setattr(rm, "_PUBKEY_HEX", pubkey_hex)
-        monkeypatch.setattr(rm, "_fetch_raw", lambda: ["not", "a", "dict"])
+        assert rm.verify_minisign(file_bytes, "not a pubkey file", minisig_text) is False
 
-        assert rm.fetch_verified_manifest() is None
+    def test_malformed_minisig_text_fails_closed(self) -> None:
+        _private_key, pubkey_text = _generate_keypair()
+        assert rm.verify_minisign(_manifest_bytes(), pubkey_text, "not a minisig file") is False
+
+    def test_does_not_raise_on_any_garbage_input(self) -> None:
+        assert rm.verify_minisign(b"", "\x00\x01garbage", "\x00\x01garbage") is False
+
+
+class TestIsPlaceholderPubkey:
+    def test_the_committed_placeholder_is_detected(self) -> None:
+        text = (Path(rm._REPO_PUBKEY_PATH)).read_text()
+        assert rm.is_placeholder_pubkey(text) is True
+
+    def test_a_real_looking_key_is_not_flagged(self) -> None:
+        _private_key, pubkey_text = _generate_keypair()
+        assert rm.is_placeholder_pubkey(pubkey_text) is False
+
+    def test_malformed_text_is_not_flagged_as_placeholder(self) -> None:
+        """Malformed input fails verification elsewhere (fail-closed) — it
+        is not specifically "the placeholder", a different failure mode."""
+        assert rm.is_placeholder_pubkey("garbage") is False
 
 
 class TestPiecesForArch:
@@ -146,6 +200,139 @@ class TestPiecesForArch:
         )
         pieces = rm.pieces_for_arch(manifest, "linux/arm64")
         assert pieces == []
+
+
+# ---------------------------------------------------------------------------
+# fetch_verified_manifest — orchestration
+# ---------------------------------------------------------------------------
+
+
+class TestFetchVerifiedManifest:
+    def test_end_to_end_with_a_valid_signature(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        private_key, pubkey_text = _generate_keypair()
+        file_bytes = _manifest_bytes(version="1.2.3")
+        minisig_text = _minisign_sign(file_bytes, private_key)
+
+        monkeypatch.setattr(rm, "_PUBKEY_TEXT_OVERRIDE", pubkey_text)
+        monkeypatch.setattr(rm, "_fetch_raw_bytes", lambda: file_bytes)
+        monkeypatch.setattr(rm, "_fetch_text", lambda _url: minisig_text)
+
+        manifest = rm.fetch_verified_manifest()
+        assert manifest is not None
+        assert manifest.version == "1.2.3"
+
+    def test_no_pubkey_configured_anywhere_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(rm, "_PUBKEY_TEXT_OVERRIDE", "")
+        monkeypatch.setattr(rm, "_BAKED_PUBKEY_PATH", Path("/does/not/exist"))
+        monkeypatch.setattr(rm, "_REPO_PUBKEY_PATH", Path("/does/not/exist/either"))
+
+        assert rm.fetch_verified_manifest() is None
+
+    def test_default_resolution_finds_the_repo_placeholder_and_stays_unverified(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No override, no baked container file (this is a bare checkout) —
+        falls back to ops/keys/runtime-manifest.pub, which today IS the
+        placeholder, so nothing ever verifies until T023 fills it in."""
+        monkeypatch.setattr(rm, "_PUBKEY_TEXT_OVERRIDE", "")
+        monkeypatch.setattr(rm, "_BAKED_PUBKEY_PATH", Path("/does/not/exist"))
+
+        assert rm.fetch_verified_manifest() is None
+
+    def test_fetch_failure_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _key, pubkey_text = _generate_keypair()
+        monkeypatch.setattr(rm, "_PUBKEY_TEXT_OVERRIDE", pubkey_text)
+        monkeypatch.setattr(rm, "_fetch_raw_bytes", lambda: None)
+        monkeypatch.setattr(rm, "_fetch_text", lambda _url: "irrelevant")
+
+        assert rm.fetch_verified_manifest() is None
+
+    def test_missing_minisig_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _key, pubkey_text = _generate_keypair()
+        monkeypatch.setattr(rm, "_PUBKEY_TEXT_OVERRIDE", pubkey_text)
+        monkeypatch.setattr(rm, "_fetch_raw_bytes", _manifest_bytes)
+        monkeypatch.setattr(rm, "_fetch_text", lambda _url: None)
+
+        assert rm.fetch_verified_manifest() is None
+
+    def test_tampered_manifest_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        private_key, pubkey_text = _generate_keypair()
+        signed_bytes = _manifest_bytes(version="1.2.3")
+        minisig_text = _minisign_sign(signed_bytes, private_key)
+
+        monkeypatch.setattr(rm, "_PUBKEY_TEXT_OVERRIDE", pubkey_text)
+        monkeypatch.setattr(rm, "_fetch_raw_bytes", lambda: _manifest_bytes(version="9.9.9"))
+        monkeypatch.setattr(rm, "_fetch_text", lambda _url: minisig_text)
+
+        assert rm.fetch_verified_manifest() is None
+
+    def test_invalid_json_after_a_valid_signature_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Defense in depth: even if something signed non-JSON bytes, the
+        daemon must not crash trying to parse them."""
+        private_key, pubkey_text = _generate_keypair()
+        not_json = b"not actually json"
+        minisig_text = _minisign_sign(not_json, private_key)
+
+        monkeypatch.setattr(rm, "_PUBKEY_TEXT_OVERRIDE", pubkey_text)
+        monkeypatch.setattr(rm, "_fetch_raw_bytes", lambda: not_json)
+        monkeypatch.setattr(rm, "_fetch_text", lambda _url: minisig_text)
+
+        assert rm.fetch_verified_manifest() is None
+
+
+# ---------------------------------------------------------------------------
+# Cross-check against the REAL minisign binary (skipped if not on PATH)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(shutil.which("minisign") is None, reason="minisign binary not on PATH")
+class TestAgainstRealMinisignBinary:
+    def test_a_signature_produced_by_real_minisign_verifies(self, tmp_path: Path) -> None:
+        pub_path = tmp_path / "real.pub"
+        key_path = tmp_path / "real.key"
+        subprocess.run(
+            ["minisign", "-G", "-W", "-f", "-p", str(pub_path), "-s", str(key_path), "-c", "t"],
+            check=True, capture_output=True, timeout=10,
+        )
+        manifest_path = tmp_path / "runtime-manifest.json"
+        manifest_path.write_bytes(_manifest_bytes(version="5.5.5"))
+        subprocess.run(
+            ["minisign", "-S", "-s", str(key_path), "-m", str(manifest_path), "-t", "real"],
+            check=True, capture_output=True, timeout=10,
+        )
+
+        pubkey_text = pub_path.read_text()
+        minisig_text = (tmp_path / "runtime-manifest.json.minisig").read_text()
+        assert rm.verify_minisign(manifest_path.read_bytes(), pubkey_text, minisig_text) is True
+
+    def test_real_minisign_rejects_what_we_tampered_and_so_do_we(self, tmp_path: Path) -> None:
+        pub_path = tmp_path / "real.pub"
+        key_path = tmp_path / "real.key"
+        subprocess.run(
+            ["minisign", "-G", "-W", "-f", "-p", str(pub_path), "-s", str(key_path), "-c", "t"],
+            check=True, capture_output=True, timeout=10,
+        )
+        manifest_path = tmp_path / "runtime-manifest.json"
+        manifest_path.write_bytes(_manifest_bytes(version="5.5.5"))
+        subprocess.run(
+            ["minisign", "-S", "-s", str(key_path), "-m", str(manifest_path), "-t", "real"],
+            check=True, capture_output=True, timeout=10,
+        )
+        manifest_path.write_bytes(_manifest_bytes(version="6.6.6"))  # tamper after signing
+
+        real_verify = subprocess.run(
+            ["minisign", "-V", "-p", str(pub_path), "-m", str(manifest_path)],
+            capture_output=True, timeout=10, check=False,  # non-zero IS the expected outcome
+        )
+        assert real_verify.returncode != 0
+
+        pubkey_text = pub_path.read_text()
+        minisig_text = (tmp_path / "runtime-manifest.json.minisig").read_text()
+        assert rm.verify_minisign(manifest_path.read_bytes(), pubkey_text, minisig_text) is False
 
 
 # ---------------------------------------------------------------------------
@@ -176,12 +363,12 @@ class TestGetSystemUpdateAuth:
 
 class TestGetSystemUpdateShape:
     def test_existing_fields_are_preserved(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Migration invariant (data-model.md): old consumers keep reading
-        current_version/latest_version/update_available/updating unchanged."""
         import hermes.shell_server.system_update as su
 
         monkeypatch.setattr(su, "_fetch_latest", lambda: None)
-        monkeypatch.setattr(rm, "_PUBKEY_HEX", "")
+        monkeypatch.setattr(rm, "_PUBKEY_TEXT_OVERRIDE", "")
+        monkeypatch.setattr(rm, "_BAKED_PUBKEY_PATH", Path("/does/not/exist"))
+        monkeypatch.setattr(rm, "_REPO_PUBKEY_PATH", Path("/does/not/exist/either"))
 
         r = _client().get("/api/v1/system/update", headers=_auth_headers())
         assert r.status_code == 200
@@ -195,7 +382,9 @@ class TestGetSystemUpdateShape:
         import hermes.shell_server.system_update as su
 
         monkeypatch.setattr(su, "_fetch_latest", lambda: None)
-        monkeypatch.setattr(rm, "_PUBKEY_HEX", "")
+        monkeypatch.setattr(rm, "_PUBKEY_TEXT_OVERRIDE", "")
+        monkeypatch.setattr(rm, "_BAKED_PUBKEY_PATH", Path("/does/not/exist"))
+        monkeypatch.setattr(rm, "_REPO_PUBKEY_PATH", Path("/does/not/exist/either"))
 
         body = _client().get("/api/v1/system/update", headers=_auth_headers()).json()
         assert body["engine_digest"] is None
@@ -213,7 +402,9 @@ class TestUpdateAvailableIsFailClosedOnManifestSignature:
 
         monkeypatch.setattr(su, "_fetch_latest", lambda: "999.0.0")
         monkeypatch.setattr(hermes, "__version__", "0.1.0", raising=False)
-        monkeypatch.setattr(rm, "_PUBKEY_HEX", "")  # no manifest can ever verify
+        monkeypatch.setattr(rm, "_PUBKEY_TEXT_OVERRIDE", "")
+        monkeypatch.setattr(rm, "_BAKED_PUBKEY_PATH", Path("/does/not/exist"))
+        monkeypatch.setattr(rm, "_REPO_PUBKEY_PATH", Path("/does/not/exist/either"))
 
         body = _client().get("/api/v1/system/update", headers=_auth_headers()).json()
         assert body["update_available"] is False
@@ -222,14 +413,15 @@ class TestUpdateAvailableIsFailClosedOnManifestSignature:
     def test_tampered_manifest_means_no_button(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import hermes.shell_server.system_update as su
 
-        private_key, pubkey_hex = _generate_keypair()
-        raw = _signed_manifest(private_key, version="999.0.0")
-        raw["engine"] = {"linux/amd64": "sha256:" + "f" * 64}  # mutated after signing
+        private_key, pubkey_text = _generate_keypair()
+        signed_bytes = _manifest_bytes(version="999.0.0")
+        minisig_text = _minisign_sign(signed_bytes, private_key)
 
         monkeypatch.setattr(su, "_fetch_latest", lambda: "999.0.0")
         monkeypatch.setattr(hermes, "__version__", "0.1.0", raising=False)
-        monkeypatch.setattr(rm, "_PUBKEY_HEX", pubkey_hex)
-        monkeypatch.setattr(rm, "_fetch_raw", lambda: raw)
+        monkeypatch.setattr(rm, "_PUBKEY_TEXT_OVERRIDE", pubkey_text)
+        monkeypatch.setattr(rm, "_fetch_raw_bytes", lambda: _manifest_bytes(version="9.9.9"))
+        monkeypatch.setattr(rm, "_fetch_text", lambda _url: minisig_text)
 
         body = _client().get("/api/v1/system/update", headers=_auth_headers()).json()
         assert body["update_available"] is False
@@ -239,18 +431,19 @@ class TestUpdateAvailableIsFailClosedOnManifestSignature:
     ) -> None:
         import hermes.shell_server.system_update as su
 
-        private_key, pubkey_hex = _generate_keypair()
-        raw = _signed_manifest(
-            private_key,
+        private_key, pubkey_text = _generate_keypair()
+        file_bytes = _manifest_bytes(
             version="999.0.0",
             engine={"linux/amd64": "sha256:" + "a" * 64},
             companion={"safent-ads": {"linux/amd64": "sha256:" + "b" * 64}},
         )
+        minisig_text = _minisign_sign(file_bytes, private_key)
 
         monkeypatch.setattr(su, "_fetch_latest", lambda: "999.0.0")
         monkeypatch.setattr(hermes, "__version__", "0.1.0", raising=False)
-        monkeypatch.setattr(rm, "_PUBKEY_HEX", pubkey_hex)
-        monkeypatch.setattr(rm, "_fetch_raw", lambda: raw)
+        monkeypatch.setattr(rm, "_PUBKEY_TEXT_OVERRIDE", pubkey_text)
+        monkeypatch.setattr(rm, "_fetch_raw_bytes", lambda: file_bytes)
+        monkeypatch.setattr(rm, "_fetch_text", lambda _url: minisig_text)
         monkeypatch.setattr(rm, "current_arch_key", lambda: "linux/amd64")
         monkeypatch.setattr(su, "current_arch_key", lambda: "linux/amd64")
 
@@ -268,13 +461,15 @@ class TestUpdateAvailableIsFailClosedOnManifestSignature:
         manifest alone, with no version bump, must not flip the button."""
         import hermes.shell_server.system_update as su
 
-        private_key, pubkey_hex = _generate_keypair()
-        raw = _signed_manifest(private_key, version="0.1.0")
+        private_key, pubkey_text = _generate_keypair()
+        file_bytes = _manifest_bytes(version="0.1.0")
+        minisig_text = _minisign_sign(file_bytes, private_key)
 
         monkeypatch.setattr(su, "_fetch_latest", lambda: "0.1.0")
         monkeypatch.setattr(hermes, "__version__", "0.1.0", raising=False)
-        monkeypatch.setattr(rm, "_PUBKEY_HEX", pubkey_hex)
-        monkeypatch.setattr(rm, "_fetch_raw", lambda: raw)
+        monkeypatch.setattr(rm, "_PUBKEY_TEXT_OVERRIDE", pubkey_text)
+        monkeypatch.setattr(rm, "_fetch_raw_bytes", lambda: file_bytes)
+        monkeypatch.setattr(rm, "_fetch_text", lambda _url: minisig_text)
 
         body = _client().get("/api/v1/system/update", headers=_auth_headers()).json()
         assert body["update_available"] is False
@@ -288,7 +483,9 @@ class TestUpdatingReflectsInstallRequests:
         import hermes.shell_server.system_update as su
 
         monkeypatch.setattr(su, "_fetch_latest", lambda: None)
-        monkeypatch.setattr(rm, "_PUBKEY_HEX", "")
+        monkeypatch.setattr(rm, "_PUBKEY_TEXT_OVERRIDE", "")
+        monkeypatch.setattr(rm, "_BAKED_PUBKEY_PATH", Path("/does/not/exist"))
+        monkeypatch.setattr(rm, "_REPO_PUBKEY_PATH", Path("/does/not/exist/either"))
 
         body = _client().get("/api/v1/system/update", headers=_auth_headers()).json()
         assert body["updating"] is False
@@ -301,17 +498,11 @@ class TestUpdatingReflectsInstallRequests:
 
         monkeypatch.setattr(ir, "_INSTANCE_DIR", tmp_path / "instance")
         monkeypatch.setattr(su, "_fetch_latest", lambda: None)
-        monkeypatch.setattr(rm, "_PUBKEY_HEX", "")
+        monkeypatch.setattr(rm, "_PUBKEY_TEXT_OVERRIDE", "")
+        monkeypatch.setattr(rm, "_BAKED_PUBKEY_PATH", Path("/does/not/exist"))
+        monkeypatch.setattr(rm, "_REPO_PUBKEY_PATH", Path("/does/not/exist/either"))
 
         ir.create_request("update_system")
 
         body = _client().get("/api/v1/system/update", headers=_auth_headers()).json()
         assert body["updating"] is True
-
-
-class TestCanonicalBytesIsStableJson:
-    def test_key_order_does_not_change_the_bytes(self) -> None:
-        a = rm.canonical_bytes({"b": 1, "a": 2})
-        b = rm.canonical_bytes({"a": 2, "b": 1})
-        assert a == b
-        assert json.loads(a) == {"a": 2, "b": 1}
