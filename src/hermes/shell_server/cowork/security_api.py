@@ -44,7 +44,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from hermes.shell_server.security.mfa import MfaStore
-from hermes.shell_server.security.owner_mfa_gate import require_owner_mfa
+from hermes.shell_server.security.owner_mfa_gate import issue_reauth_grant, require_owner_mfa
 from hermes.tasks.control_plane.domain.ports import AgentUnavailable
 
 logger = logging.getLogger("hermes.shell_server.cowork.security_api")
@@ -176,7 +176,8 @@ def create_security_router() -> APIRouter:
         ALLOW/APPROVE on a non-PASS scan is a SOVEREIGN override → requires the owner's
         TOTP (audited). Plain deny needs none. fail-hard on daemon unavailable.
         """
-        if body.decision.strip().lower() in _OVERRIDE_DECISIONS:
+        is_override = body.decision.strip().lower() in _OVERRIDE_DECISIONS
+        if is_override:
             require_owner_mfa(
                 MfaStore(),
                 body.totp or "",
@@ -184,7 +185,7 @@ def create_security_router() -> APIRouter:
             )
         proxy = request.app.state.dbus_proxy
         try:
-            return await proxy.call_mutator(
+            result = await proxy.call_mutator(
                 "record_install_decision",
                 body.scan_id,
                 body.decision,
@@ -196,6 +197,17 @@ def create_security_router() -> APIRouter:
             )
         except AgentUnavailable as exc:
             _raise_503(exc, "record_install_decision")
+
+        # A skill override just spent the owner's TOTP right here — mint a
+        # short-lived, single-use re-auth grant so the follow-up
+        # POST /skills/hub/install force=True call (SkillsView's
+        # handleScanApprove → doInstallSkill) doesn't need a SECOND code —
+        # which would fail anyway, TOTP is single-use (totp_replayed).
+        if is_override and body.kind == "skill" and body.identifier:
+            grant = issue_reauth_grant(identifier=body.identifier, action="install_hub_skill")
+            if isinstance(result, dict):
+                result = {**result, "reauth_grant": grant}
+        return result
 
     @router.get("/kill-switch")
     async def get_kill_switch(request: Request) -> dict:

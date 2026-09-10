@@ -47,6 +47,7 @@ import type {
   UnreadCountResponse,
   InstallScanResponse,
   SecurityDecisionPayload,
+  SecurityDecisionResponse,
   SkillDetails,
   UsageSummary,
   UsageByAgent,
@@ -322,10 +323,17 @@ export function listHubSkills(): Promise<HubSkillResult[]> {
   return request<HubSkillResult[]>('/skills/hub').catch(() => [])
 }
 
-export function installSkill(identifier: string, force = false): Promise<HubInstallResponse> {
+export function installSkill(
+  identifier: string,
+  force = false,
+  reauthGrant?: string,
+): Promise<HubInstallResponse> {
   return request<HubInstallResponse>('/skills/hub/install', {
     method: 'POST',
     body: JSON.stringify({ identifier, force }),
+    // Re-auth grant travels as a header, never in the body — see
+    // POST /security/decisions' reauth_grant (owner_mfa_gate.py).
+    ...(reauthGrant ? { headers: { 'X-Owner-Reauth-Grant': reauthGrant } } : {}),
   })
 }
 
@@ -632,8 +640,10 @@ export function scanInstall(kind: 'mcp' | 'skill', identifier: string): Promise<
   })
 }
 
-export function recordSecurityDecision(payload: SecurityDecisionPayload): Promise<unknown> {
-  return request<unknown>('/security/decisions', {
+export function recordSecurityDecision(
+  payload: SecurityDecisionPayload,
+): Promise<SecurityDecisionResponse> {
+  return request<SecurityDecisionResponse>('/security/decisions', {
     method: 'POST',
     body: JSON.stringify(payload),
     timeoutMs: 30_000,

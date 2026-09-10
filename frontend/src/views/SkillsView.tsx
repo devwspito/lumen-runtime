@@ -233,7 +233,7 @@ export default function SkillsView() {
     const identifier = item.identifier ?? item.slug ?? item.name ?? ''
     const name = item.name ?? identifier
     try {
-      await recordSecurityDecision({
+      const decision = await recordSecurityDecision({
         scan_id: scan.scan_id,
         decision: 'approve',
         identifier,
@@ -243,7 +243,10 @@ export default function SkillsView() {
         risks_json: JSON.stringify(scan.risks),
         totp: factors.totp,
       })
-      await doInstallSkill(identifier, name, onBtnUpdate, true)
+      // The decision above already spent the owner's ONE TOTP code for this
+      // identifier — reuse the short-lived re-auth grant it mints instead of
+      // asking for a second code (which would fail anyway: TOTP is single-use).
+      await doInstallSkill(identifier, name, onBtnUpdate, true, decision.reauth_grant)
     } catch (e) {
       show(e instanceof Error ? e.message : t('skills.err.decision'), 'error')
       onBtnUpdate('ready')
@@ -255,23 +258,32 @@ export default function SkillsView() {
     name: string,
     onBtnUpdate: (st: 'installing' | 'installed' | 'ready') => void,
     force: boolean,
+    reauthGrant?: string,
   ) {
     try {
-      const op: HubInstallResponse = await installSkill(identifier, force)
+      const op: HubInstallResponse = await installSkill(identifier, force, reauthGrant)
 
       if (op && op.blocked) {
-        const risksText = (op.risks ?? []).slice(0, 3).join('; ') || t('skills.install.risks_fallback')
-        const ok = await confirm({
-          title: t('skills.install.blocked.title').replace('{name}', name),
-          description: t('skills.install.blocked.desc').replace('{score}', String(op.score ?? '?')).replace('{risks}', risksText),
-          confirmLabel: t('skills.install.blocked.confirm'),
-          variant: 'danger',
+        // A blind confirm() dialog can't collect a TOTP, and force=true
+        // without one is a guaranteed 401 (dead end — hallazgo A). Route
+        // through the SAME InstallScanModal + MfaModal the pre-flight scan
+        // uses: ONE owner prompt, handleScanApprove records the decision and
+        // reuses its re-auth grant for the install retry below.
+        setPendingSkillInstall({
+          scan: {
+            scan_id: op.scan_id ?? '',
+            verdict: 'FAIL',
+            score: op.score ?? 0,
+            engine: 'heuristic',
+            engine_label: 'heuristic',
+            requires_owner_approval: true,
+            risks: (op.risks ?? []).map(message => ({ category: '', severity: 'HIGH', message })),
+            identifier,
+            kind: 'skill',
+          },
+          item: { identifier, name },
+          onBtnUpdate,
         })
-        if (ok) {
-          await doInstallSkill(identifier, name, onBtnUpdate, true)
-        } else {
-          onBtnUpdate('ready')
-        }
         return
       }
 

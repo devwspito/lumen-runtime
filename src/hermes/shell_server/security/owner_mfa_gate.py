@@ -12,12 +12,97 @@ solo-dueño), así que no puede abrir su propia jaula.
 from __future__ import annotations
 
 import logging
+import secrets
+import time
 
 from fastapi import HTTPException
 
 from hermes.shell_server.security.mfa import MfaStore, ProtectionLevel
 
 logger = logging.getLogger("hermes.shell_server.security.owner_mfa_gate")
+
+# ---------------------------------------------------------------------------
+# Re-auth grant — ONE owner TOTP prompt covers a chained sovereign override
+# ---------------------------------------------------------------------------
+#
+# Some flows spend the owner's TOTP once (e.g. POST /security/decisions
+# approving a FAIL scan verdict) and then need a SECOND override endpoint
+# (e.g. POST /skills/hub/install force=True) in the same breath. Re-asking for
+# a fresh code there is a dead end: TOTP is single-use (MfaStore.verify's
+# `totp_last_counter` high-water mark), so re-sending the just-spent code
+# always fails `totp_replayed`.
+#
+# This mirrors that replay-guard pattern instead of adding a second MFA path:
+# on a successful require_owner_mfa, the caller may mint a short-lived,
+# single-use grant bound to the exact (identifier, action) pair, handed back
+# to the frontend and presented on the follow-up call as a header (never in
+# the body, so it never gets logged as request payload). Stored in-process —
+# the shell-server runs a single uvicorn worker (main.py), no cross-process
+# fan-out to worry about.
+_GRANT_TTL_SECONDS = 120
+_reauth_grants: dict[str, tuple[str, str, float]] = {}  # grant -> (identifier, action, expires_at)
+
+
+def _prune_expired_grants(*, now: float) -> None:
+    expired = [g for g, (_, _, exp) in _reauth_grants.items() if exp < now]
+    for g in expired:
+        del _reauth_grants[g]
+
+
+def issue_reauth_grant(*, identifier: str, action: str) -> str:
+    """Mint a single-use re-auth grant after a fresh TOTP verify just passed.
+
+    Bound to `identifier`/`action` — unusable for any other override target.
+    """
+    now = time.time()
+    _prune_expired_grants(now=now)
+    grant = secrets.token_urlsafe(32)
+    _reauth_grants[grant] = (identifier, action, now + _GRANT_TTL_SECONDS)
+    return grant
+
+
+def require_owner_mfa_or_grant(
+    mfa_store: MfaStore,
+    totp: str,
+    grant: str | None,
+    *,
+    identifier: str,
+    action: str,
+) -> None:
+    """Accept EITHER a still-valid re-auth grant OR a fresh owner TOTP.
+
+    A grant is consumed (popped) on first presentation, valid or not, so it
+    can never be replayed — even a failed identifier/action mismatch burns it.
+    No grant presented → falls through to the normal `require_owner_mfa` bar
+    (unchanged 403/401 behaviour for a direct TOTP call).
+    """
+    if not grant:
+        require_owner_mfa(mfa_store, totp, action=action)
+        return
+
+    now = time.time()
+    entry = _reauth_grants.pop(grant, None)
+    _prune_expired_grants(now=now)
+    if entry is None:
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "code": "invalid_reauth_grant",
+                "message": f"{action[:1].upper()}{action[1:]} exige tu código MFA.",
+            },
+        )
+    got_identifier, got_action, expires_at = entry
+    if got_identifier != identifier or got_action != action or expires_at < now:
+        logger.warning(
+            "hermes.mfa.reauth_grant_denied action=%r identifier=%r", action, identifier
+        )
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "code": "invalid_reauth_grant",
+                "message": f"{action[:1].upper()}{action[1:]} exige tu código MFA.",
+            },
+        )
 
 
 def require_owner_mfa(mfa_store: MfaStore, totp: str, *, action: str) -> None:

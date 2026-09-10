@@ -36,7 +36,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from hermes.shell_server.security.mfa import MfaStore
-from hermes.shell_server.security.owner_mfa_gate import require_owner_mfa
+from hermes.shell_server.security.owner_mfa_gate import require_owner_mfa_or_grant
 from hermes.tasks.control_plane.domain.ports import AgentUnavailable
 
 logger = logging.getLogger("hermes.shell_server.cowork.skills_api")
@@ -279,17 +279,23 @@ def create_skills_hub_router(db_path: Path) -> APIRouter:
 
         When body.force=True the caller is overriding a FAIL antivirus verdict
         — a bearer-authenticated operator is not necessarily the owner, so this
-        requires the owner's TOTP (025 Top-4), same require_owner_mfa gate as
-        POST /security/decisions. Only after that passes is force forwarded to
-        the daemon, which records the override via record_install_decision
+        requires owner proof: EITHER a fresh TOTP, OR the single-use re-auth
+        grant minted by POST /security/decisions when that call already spent
+        the owner's TOTP approving the same identifier (see owner_mfa_gate.py
+        — avoids a second TOTP prompt that would fail anyway, TOTP is
+        single-use). The grant travels as a header (`X-Owner-Reauth-Grant`),
+        never in the body. Only after either check passes is force forwarded
+        to the daemon, which records the override via record_install_decision
         (same mutator /security/decisions calls — WORM install_reviews row +
         scan_records.decision=ALLOWED).
         """
         if body.force:
-            require_owner_mfa(
+            require_owner_mfa_or_grant(
                 MfaStore(),
                 body.totp or "",
-                action="instalar una skill que el antivirus bloqueó (queda auditado)",
+                request.headers.get("x-owner-reauth-grant"),
+                identifier=body.identifier,
+                action="install_hub_skill",
             )
         proxy = request.app.state.dbus_proxy
         try:

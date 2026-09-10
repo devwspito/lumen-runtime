@@ -515,6 +515,16 @@ export interface SecurityDecisionPayload {
   totp: string
 }
 
+export interface SecurityDecisionResponse {
+  ok?: boolean
+  error?: string
+  // Single-use re-auth grant (≤120s, bound to this identifier/action) minted
+  // when this decision already spent the owner's TOTP — lets a chained
+  // sovereign-override call (e.g. POST /skills/hub/install force=true) skip
+  // a second TOTP prompt. See owner_mfa_gate.py.
+  reauth_grant?: string
+}
+
 // ── Skill details ──────────────────────────────────────────────────────────────
 
 export interface SkillDetails {
