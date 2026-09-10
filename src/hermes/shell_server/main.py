@@ -18,6 +18,7 @@ Escucha SOLO en 127.0.0.1:7517. Expone:
 
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 from datetime import UTC, datetime
@@ -25,7 +26,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket
 from pydantic import BaseModel, Field
 
 from hermes import __version__ as HERMES_VERSION
@@ -632,6 +633,54 @@ def _commitment_matches(commitment: str, presented: str) -> bool:
     return _hmac.compare_digest(digest, commitment)
 
 
+def _bearer_is_valid(token: str, *, operator_token: str, webui_token: str) -> bool:
+    """The ONLY two valid /api/v1/* bearer credentials in this process: the
+    server-side operator token (internal daemon<->shell callers) or the stable
+    webui session bearer (the owner's browser). Single source of truth shared
+    by the HTTP `_require_operator_token` middleware (below, inside
+    create_app()) AND `authenticate_websocket` — a WebSocket route re-deriving
+    this OR-of-two-constant-time-compares itself risks silently accepting a
+    weaker credential or drifting out of sync with the HTTP gate.
+    """
+    if not token:
+        return False
+    return hmac.compare_digest(token, operator_token) or hmac.compare_digest(
+        token, webui_token
+    )
+
+
+async def authenticate_websocket(websocket: WebSocket) -> bool:
+    """Per-connection authenticator for /api/v1/* WebSocket routes.
+
+    Starlette only runs `@app.middleware("http")` for `scope["type"] ==
+    "http"` — it never fires for `"websocket"` — so `_require_operator_token`
+    never sees these connections and each WS route must gate itself. This is
+    the ONE place that does it: same bearer, same `_bearer_is_valid` check the
+    HTTP gate runs, read off `app.state` (populated once in create_app()) so
+    there is no second, divergent implementation per route module.
+
+    The bearer travels as `?token=`, the SAME transport already used by the
+    two SSE routes (`/api/v1/runtime/agent-stream`,
+    `/api/v1/chat/stream/{task_id}`) — `new WebSocket(url)` has no custom-
+    header API either, so query string is the one mechanism every non-fetch
+    transport here shares; one convention, one place the frontend reads the
+    bearer from (`lib/token.ts`).
+
+    On failure, closes the socket with policy code 1008 BEFORE accepting (the
+    connection is never live while unauthenticated) and returns False —
+    callers MUST `return` immediately without calling `websocket.accept()`.
+    On success, returns True and leaves accept() to the caller (some routes,
+    e.g. the noVNC bridge, still need to negotiate their OWN subprotocol).
+    """
+    token = websocket.query_params.get("token", "")
+    operator_token = getattr(websocket.app.state, "shell_auth_token", "")
+    webui_token = getattr(websocket.app.state, "shell_webui_token", "")
+    if _bearer_is_valid(token, operator_token=operator_token, webui_token=webui_token):
+        return True
+    await websocket.close(code=1008, reason="unauthorized")
+    return False
+
+
 def create_app() -> FastAPI:
     from contextlib import asynccontextmanager  # noqa: PLC0415
 
@@ -686,7 +735,6 @@ def create_app() -> FastAPI:
     # delivered to the same-origin webui via the injected index.html; the run
     # posture publishes on 127.0.0.1 only (network boundary). Closes the unauth
     # chain + the HITL bypass + SSRF reachability + the confused-deputy.
-    import hmac as _hmac_mod  # noqa: PLC0415
     import secrets as _secrets_mod  # noqa: PLC0415
     import time as _time_mod  # noqa: PLC0415
     from fastapi import Request as _Req  # noqa: PLC0415
@@ -778,9 +826,6 @@ def create_app() -> FastAPI:
     def _mint_session_token() -> str:
         return _WEBUI_TOKEN
 
-    def _session_token_valid(tok: str) -> bool:
-        return _hmac_mod.compare_digest(tok, _WEBUI_TOKEN)
-
     app.state.mint_session_token = _mint_session_token
 
     # ── Resource-level authorization (radiografía §4.1) ───────────────────────
@@ -837,10 +882,13 @@ def create_app() -> FastAPI:
                 token = request.query_params.get("token", "")
             # Accept EITHER the server-side operator token (internal daemon↔shell
             # callers) OR the stable webui bearer (the owner's browser). Both are
-            # constant-time compared. Default-deny otherwise — an uncredentialed
-            # request to the control-plane, mutating or not, gets a 401.
-            operator_ok = bool(token) and _hmac_mod.compare_digest(token, _AUTH_TOKEN)
-            if not (operator_ok or (token and _session_token_valid(token))):
+            # constant-time compared (`_bearer_is_valid` — the SAME check
+            # `authenticate_websocket` runs for the WS routes the HTTP middleware
+            # never reaches). Default-deny otherwise — an uncredentialed request
+            # to the control-plane, mutating or not, gets a 401.
+            if not _bearer_is_valid(
+                token, operator_token=_AUTH_TOKEN, webui_token=_WEBUI_TOKEN
+            ):
                 _log_rejected_unauthenticated(request)
                 return _JSONResp(
                     {"detail": "unauthorized: operator token required"},

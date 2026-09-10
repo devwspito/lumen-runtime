@@ -19,6 +19,7 @@ import re
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from hermes.security.browser_session_ports import session_ports
+from hermes.shell_server.main import authenticate_websocket
 
 logger = logging.getLogger("hermes.shell_server.cowork.vnc_proxy")
 
@@ -60,16 +61,17 @@ def _resolve_session_name(raw: str | None) -> str | None:
 def create_vnc_proxy_router() -> APIRouter:
     from hermes.shell_server.cowork.training_live import (  # noqa: PLC0415
         _try_ensure_browser_running,
-        _verify_token,
     )
 
     router = APIRouter()
 
     @router.websocket("/api/v1/vnc")
     async def vnc(websocket: WebSocket) -> None:
-        webui_token: str = getattr(websocket.app.state, "shell_webui_token", "")
-        if not _verify_token(websocket.query_params.get("token", ""), webui_token):
-            await websocket.close(code=1008, reason="unauthorized")
+        # Auth: WebSocket upgrades never reach the HTTP `_require_operator_token`
+        # middleware (Starlette only runs @app.middleware("http") for scope["type"]
+        # == "http") — `authenticate_websocket` is the shared per-connection gate
+        # (same bearer check, closes 1008 before accept on failure).
+        if not await authenticate_websocket(websocket):
             return
 
         session_name = _resolve_session_name(websocket.query_params.get("session"))
