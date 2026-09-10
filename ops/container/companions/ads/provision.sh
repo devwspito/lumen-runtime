@@ -172,10 +172,28 @@ JSON
 ensure_image() {
   if "$RUNTIME" image inspect "$SAFENT_ADS_IMAGE" >/dev/null 2>&1; then
     log "imagen '$SAFENT_ADS_IMAGE' ya está en local — OK"
-    return 0
+  else
+    log "descargando '$SAFENT_ADS_IMAGE'…"
+    "$RUNTIME" pull "$SAFENT_ADS_IMAGE" || fail "no se pudo descargar '$SAFENT_ADS_IMAGE'"
   fi
-  log "descargando '$SAFENT_ADS_IMAGE'…"
-  "$RUNTIME" pull "$SAFENT_ADS_IMAGE" || fail "no se pudo descargar '$SAFENT_ADS_IMAGE'"
+  record_provisioned_image
+}
+
+# Persist the EXACT image ref this run actually used — the single source of
+# truth `safent companion status/rotate/remove` reads back (CLI-10). Without
+# this, those verbs fell back to a hard-coded ghcr.io/…/safent-ads:latest that
+# could silently diverge from the image `run-safent.sh` actually provisioned
+# with (its own dev convenience picks up safent-ads:local when present) — a
+# `rotate` would then recreate ads-api against a DIFFERENT image than
+# ads-worker was already running, and an image whose alembic history doesn't
+# know the DB's current revision dies `Can't locate revision …`. Re-written on
+# EVERY provisioning run (this script runs on every `run-safent.sh`/`safent`
+# start, not just first install) so it always reflects the image actually in
+# use — `safent companion update` is still the only verb that CHOOSES a new
+# one; this merely records the choice already made.
+record_provisioned_image() {
+  printf '%s' "$SAFENT_ADS_IMAGE" > "$STATE/image.tmp"
+  mv -f "$STATE/image.tmp" "$STATE/image"
 }
 
 # ── 6. Postgres password (compose.yaml's ADS_POSTGRES_PASSWORD) ─────────────

@@ -190,6 +190,17 @@ class TestFirstRunWritesExpectedFiles:
         state_dir, _ = provisioned_state
         assert _mode(state_dir / "companions.json") == 0o444
 
+    def test_image_marker_records_the_image_this_run_actually_used(
+        self, provisioned_state: tuple[Path, subprocess.CompletedProcess[str]]
+    ) -> None:
+        """CLI-10: `safent companion status/rotate/remove` read this file
+        instead of falling back to a hard-coded ghcr.io/…/safent-ads:latest
+        that could silently diverge from what provisioning actually used
+        (run-safent.sh's own dev convenience picks safent-ads:local when it
+        exists locally)."""
+        state_dir, _ = provisioned_state
+        assert (state_dir / "image").read_text() == "safent-ads:test-fake"
+
     def test_no_secret_value_reaches_stdout_or_stderr(
         self, provisioned_state: tuple[Path, subprocess.CompletedProcess[str]]
     ) -> None:
@@ -444,6 +455,12 @@ case "$1" in
         echo "ADS_APPROVAL_PUBLIC_KEY=new+sso/pub-$RANDOM$RANDOM=="
         exit 0
       fi
+      if [ "$a" = "alembic" ]; then
+        # CLI-10 migration-head guard: `$image alembic history` — args are
+        # `run --rm --network none <image> alembic history`, image is $5.
+        printf '%s\n' "${FAKE_ALEMBIC_HISTORY:-}"
+        exit 0
+      fi
     done
     exit 0
     ;;
@@ -467,6 +484,14 @@ case "$1" in
         ;;
       up) [ "${FAKE_COMPOSE_UP_FAIL:-0}" = "1" ] && exit 1; exit 0 ;;
       down) exit 0 ;;
+      exec)
+        # CLI-10 migration-head guard's DB read: `exec -T ads-db psql -U ads
+        # -d ads -tAc 'SELECT version_num FROM alembic_version;'`. Empty by
+        # default (no FAKE_DB_REVISION) — matches the "brand new DB, skip
+        # the guard" path every pre-existing test in this file relies on.
+        printf '%s\n' "${FAKE_DB_REVISION:-}"
+        exit 0
+        ;;
     esac
     exit 0
     ;;
@@ -665,6 +690,24 @@ class TestCompanionUpdate:
         assert "pull safent-ads:test-fake" in log
         assert "up -d" in log
 
+    def test_persists_the_image_marker_after_a_successful_update(
+        self, tmp_path: Path, fake_cli_bin_dir: Path
+    ) -> None:
+        """`update` is the one verb allowed to CHANGE $STATE/image (CLI-10);
+        status/rotate/remove read it back via _companion_env."""
+        state_dir = _companion_state(tmp_path, provisioned=True)
+        home_dir = tmp_path / "home"
+        _companion_bin_dir(home_dir, provisioned=True)
+        result = _run_companion(
+            "update",
+            fake_bin_dir=fake_cli_bin_dir,
+            state_dir=state_dir,
+            home_dir=home_dir,
+            podman_log=tmp_path / "podman.log",
+        )
+        assert result.returncode == 0, result.stderr
+        assert (state_dir / "image").read_text() == "safent-ads:test-fake"
+
     def test_fails_loud_when_not_provisioned(
         self, tmp_path: Path, fake_cli_bin_dir: Path
     ) -> None:
@@ -695,6 +738,81 @@ class TestCompanionUpdate:
         )
         assert result.returncode != 0
         assert "Could not pull" in result.stderr
+
+
+class TestCompanionUpdateMigrationGuard:
+    """CLI-10: `ads-migrate` (`alembic upgrade head`) died loud
+    (`Can't locate revision identified by '0033_crm_bridge_health'`, exit
+    255) against the real companion when `update`'s image was older than
+    what the database had already migrated to — but only AFTER ads-api/
+    ads-worker were already recreated against it, leaving ads-api down.
+    `_refuse_if_image_predates_the_database` reads the target image's own
+    `alembic history` (no DB access needed) and the database's current
+    `alembic_version` row, refusing BEFORE `up -d` if the image never heard
+    of that revision."""
+
+    def test_refuses_when_the_image_does_not_know_the_databases_revision(
+        self, tmp_path: Path, fake_cli_bin_dir: Path
+    ) -> None:
+        state_dir = _companion_state(tmp_path, provisioned=True)
+        home_dir = tmp_path / "home"
+        _companion_bin_dir(home_dir, provisioned=True)
+        podman_log = tmp_path / "podman.log"
+        result = _run_companion(
+            "update",
+            fake_bin_dir=fake_cli_bin_dir,
+            state_dir=state_dir,
+            home_dir=home_dir,
+            podman_log=podman_log,
+            extra_env={
+                "FAKE_DB_REVISION": "0033_crm_bridge_health",
+                "FAKE_ALEMBIC_HISTORY": "0001_init -> 0002_accounts, add accounts table",
+            },
+        )
+        assert result.returncode != 0
+        assert "0033_crm_bridge_health" in result.stderr
+        assert "OLDER than the database" in result.stderr
+        # The refusal must be BEFORE recreating anything — no `up -d` issued.
+        log = podman_log.read_text()
+        assert "up -d" not in log
+
+    def test_proceeds_when_the_image_knows_the_databases_revision(
+        self, tmp_path: Path, fake_cli_bin_dir: Path
+    ) -> None:
+        state_dir = _companion_state(tmp_path, provisioned=True)
+        home_dir = tmp_path / "home"
+        _companion_bin_dir(home_dir, provisioned=True)
+        podman_log = tmp_path / "podman.log"
+        result = _run_companion(
+            "update",
+            fake_bin_dir=fake_cli_bin_dir,
+            state_dir=state_dir,
+            home_dir=home_dir,
+            podman_log=podman_log,
+            extra_env={
+                "FAKE_DB_REVISION": "0033_crm_bridge_health",
+                "FAKE_ALEMBIC_HISTORY": "0032_x -> 0033_crm_bridge_health, add health cols",
+            },
+        )
+        assert result.returncode == 0, result.stderr
+        assert (state_dir / "image").read_text() == "safent-ads:test-fake"
+
+    def test_a_brand_new_database_skips_the_guard(
+        self, tmp_path: Path, fake_cli_bin_dir: Path
+    ) -> None:
+        """No alembic_version row yet (fresh DB) is not "older" — it just
+        has not been migrated yet; ads-migrate will populate it."""
+        state_dir = _companion_state(tmp_path, provisioned=True)
+        home_dir = tmp_path / "home"
+        _companion_bin_dir(home_dir, provisioned=True)
+        result = _run_companion(
+            "update",
+            fake_bin_dir=fake_cli_bin_dir,
+            state_dir=state_dir,
+            home_dir=home_dir,
+            podman_log=tmp_path / "podman.log",
+        )
+        assert result.returncode == 0, result.stderr
 
 
 class TestCompanionRotate:
@@ -743,6 +861,37 @@ class TestCompanionRotate:
         assert "run --rm --network none" in log
         assert "up -d --force-recreate ads-api" in log
         assert "restart safent" in result.stdout.lower()
+
+    def test_rotate_uses_the_persisted_image_not_a_stray_ambient_env_var(
+        self, tmp_path: Path, fake_cli_bin_dir: Path
+    ) -> None:
+        """CLI-10 root cause, reproduced exactly: a companion provisioned
+        with `safent-ads:local` (persisted to $STATE/image by provision.sh)
+        must have `rotate` reuse THAT image — never a stray SAFENT_ADS_IMAGE
+        left over in the caller's shell (here, `_run_companion` itself
+        always sets one, standing in for exactly that stray-env shape) and
+        never the historical ghcr.io/…/safent-ads:latest default. Mixing
+        images is what made `ads-migrate` die `Can't locate revision …`
+        against the real companion."""
+        state_dir = _companion_state(tmp_path, provisioned=True)
+        (state_dir / "image").write_text("localhost/safent-ads:persisted-v2")
+        home_dir = tmp_path / "home"
+        _companion_bin_dir(home_dir, provisioned=True)
+        podman_log = tmp_path / "podman.log"
+
+        result = _run_companion(
+            "rotate",
+            fake_bin_dir=fake_cli_bin_dir,
+            state_dir=state_dir,
+            home_dir=home_dir,
+            podman_log=podman_log,
+            extra_env={"SAFENT_ADS_IMAGE": "ghcr.io/devwspito/safent-ads:latest"},
+        )
+
+        assert result.returncode == 0, result.stderr
+        log = podman_log.read_text()
+        assert "localhost/safent-ads:persisted-v2" in log
+        assert "ghcr.io/devwspito/safent-ads:latest" not in log
 
     def test_fails_loud_when_sso_keygen_fails(
         self, tmp_path: Path, fake_cli_bin_dir: Path

@@ -726,18 +726,58 @@ cmd_agent() {
   done
 }
 
-# Exports the three vars compose.yaml interpolates (SAFENT_STATE,
-# SAFENT_ADS_IMAGE, ADS_POSTGRES_PASSWORD), same values `provision.sh` used to
-# bring the companion up. Shared by every `$RT compose ...` call site below so
-# there is exactly ONE place that resolves them, never copy-pasted per verb.
-_companion_env() {
+# Halves of the companion env shared by every resolution below — never the
+# image, which resolves differently per verb (see _companion_env vs
+# _companion_update_env).
+_companion_env_common() {
   SAFENT_STATE="$COMPANION_STATE"
-  SAFENT_ADS_IMAGE="${SAFENT_ADS_IMAGE:-ghcr.io/devwspito/safent-ads:latest}"
   if [ -f "$COMPANION_STATE/pg_password" ]; then
     ADS_POSTGRES_PASSWORD="$(cat "$COMPANION_STATE/pg_password" 2>/dev/null || true)"
   else
     ADS_POSTGRES_PASSWORD="unused-for-down"
   fi
+}
+
+# The image ref `provision.sh` persisted at $COMPANION_STATE/image on the
+# last provisioning run (CLI-10) — falls back to the historical hard-coded
+# default only for a companion provisioned before that fix ever wrote the
+# marker.
+_persisted_ads_image() {
+  if [ -f "$COMPANION_STATE/image" ]; then
+    cat "$COMPANION_STATE/image"
+  else
+    echo "ghcr.io/devwspito/safent-ads:latest"
+  fi
+}
+
+# Exports the three vars compose.yaml interpolates (SAFENT_STATE,
+# SAFENT_ADS_IMAGE, ADS_POSTGRES_PASSWORD). Shared by every `$RT compose ...`
+# call site below so there is exactly ONE place that resolves them, never
+# copy-pasted per verb.
+#
+# SAFENT_ADS_IMAGE is ALWAYS the persisted ref (never an ambient env var) —
+# status/rotate/remove must reuse the EXACT image already running, or a
+# rotate recreates ads-api against a DIFFERENT image than ads-worker still
+# runs, and an image whose alembic history doesn't know the database's
+# current revision dies `Can't locate revision …` (CLI-10, verified live:
+# ghcr.io/devwspito/safent-ads:latest got pulled and mixed in even though
+# run-safent.sh had actually provisioned with safent-ads:local). `safent
+# companion update` is the ONE verb allowed to pick a NEW image — see
+# _companion_update_env — and the only one that overwrites the marker.
+_companion_env() {
+  _companion_env_common
+  SAFENT_ADS_IMAGE="$(_persisted_ads_image)"
+  export SAFENT_STATE SAFENT_ADS_IMAGE ADS_POSTGRES_PASSWORD
+}
+
+# `safent companion update`'s own resolution: an explicit SAFENT_ADS_IMAGE
+# from the caller's env WINS (that is how an owner asks for a specific new
+# image); with none given, keep whatever is already persisted — a plain
+# re-pull/refresh of the same tag, never a silent switch to the hard-coded
+# default.
+_companion_update_env() {
+  _companion_env_common
+  SAFENT_ADS_IMAGE="${SAFENT_ADS_IMAGE:-$(_persisted_ads_image)}"
   export SAFENT_STATE SAFENT_ADS_IMAGE ADS_POSTGRES_PASSWORD
 }
 
@@ -821,6 +861,42 @@ cmd_companion_status() {
   fi
 }
 
+# CLI-10 guard: `ads-migrate` (`alembic upgrade head`) dies loud
+# (`Can't locate revision identified by '<rev>'`, exit 255) when *image*'s
+# migration set never heard of the revision already applied to the database
+# — but only AFTER ads-api/ads-worker have already been recreated against
+# that mismatched image, leaving ads-api down (verified live). `alembic
+# history` reads only the image's own migration scripts (no DB connection,
+# no --network needed) — if the database's current revision never appears
+# in it, *image* cannot possibly upgrade past it: refuse before recreating
+# anything. A DB with no alembic_version row yet (brand new) or a history
+# command we can't run for an unrelated reason are NOT treated as "older" —
+# this is a targeted safety rail for the one failure mode CLI-10 reproduced,
+# not a general substitute for `provision.sh`'s own idempotent DB setup.
+_refuse_if_image_predates_the_database() {
+  image="$1"
+  db_rev="$("$RT" compose -p safent-ads -f "$COMPANION_COMPOSE" exec -T ads-db \
+    psql -U ads -d ads -tAc 'SELECT version_num FROM alembic_version;' 2>/dev/null \
+    | tr -d '[:space:]')"
+  if [ -z "$db_rev" ]; then
+    echo "[*] No alembic_version row yet — skipping the migration-head guard."
+    return 0
+  fi
+  history="$("$RT" run --rm --network none "$image" alembic history 2>/dev/null || true)"
+  if [ -z "$history" ]; then
+    echo "[!] Could not read '$image' migration history — proceeding without the guard." >&2
+    return 0
+  fi
+  case "$history" in
+    *"$db_rev"*) return 0 ;;
+    *)
+      echo "[x] '$image' does not know revision '$db_rev' (already applied to the database)." >&2
+      echo "    That image is OLDER than the database — refusing to update (it would break ads-api/ads-worker)." >&2
+      exit 1
+      ;;
+  esac
+}
+
 # Pull the owner's published companion image and recreate its containers —
 # ONLY the companion, never Safent itself (that coupling was exactly T193's
 # gap: `safent update` re-provisioned the companion as a SIDE EFFECT of
@@ -830,12 +906,15 @@ cmd_companion_update() {
     echo "[x] Companion not provisioned yet. Run 'safent update' first." >&2
     exit 1
   fi
-  _companion_env
+  _companion_update_env
   echo "[*] Pulling $SAFENT_ADS_IMAGE..."
   "$RT" pull "$SAFENT_ADS_IMAGE" || { echo "[x] Could not pull the companion image." >&2; exit 1; }
+  _refuse_if_image_predates_the_database "$SAFENT_ADS_IMAGE"
   echo "[*] Recreating the companion containers..."
   "$RT" compose -p safent-ads -f "$COMPANION_COMPOSE" up -d \
     || { echo "[x] Companion update failed." >&2; exit 1; }
+  printf '%s' "$SAFENT_ADS_IMAGE" > "$COMPANION_STATE/image.tmp"
+  mv -f "$COMPANION_STATE/image.tmp" "$COMPANION_STATE/image"
   echo "[ok] Companion updated."
 }
 
