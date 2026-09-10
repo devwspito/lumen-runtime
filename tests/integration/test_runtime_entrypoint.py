@@ -4,6 +4,17 @@ Comprueba:
 - build_runtime_components() devuelve un CapabilityBroker genuino (no stub).
 - El broker tiene agent_state cableado (Paso 0 kill-switch funciona).
 - No usa _FailClosedBroker ni FakeCapabilityBroker.
+
+Requiere entorno real (contenedor Safent, NO un dev host / runner de CI
+desnudo): _build_real_broker() cablea build_default_scan_service(), que
+construye SQLiteScanRepo() con un _DB_PATH hardcodeado en
+/var/lib/hermes/security/scans.db SIN override por env var (a diferencia de
+HERMES_AUDIT_ANCHOR_DIR/HERMES_TSA_TOKEN_DIR, que sí son configurables). Ese
+directorio solo existe, escribible por el usuario de servicio, dentro del
+contenedor (ops/container/Containerfile: `chown -R hermes:hermes
+/var/lib/hermes`). En un dev host sin ese árbol, build_default_scan_service
+levanta PermissionError y el broker nunca se construye — no es el
+comportamiento bajo prueba, es la ausencia del entorno.
 """
 
 from __future__ import annotations
@@ -17,11 +28,32 @@ import pytest
 pytestmark = pytest.mark.integration
 
 
+def _var_lib_hermes_writable() -> bool:
+    """True solo dentro del contenedor Safent (o un host con el árbol horneado).
+
+    No-op sobre un dev host: NUNCA crea /var/lib/hermes (eso requeriría
+    permisos que un runner desnudo no tiene y sería un side-effect de
+    collection). Solo comprueba el árbol ya horneado por el Containerfile.
+    """
+    probe = Path("/var/lib/hermes")
+    return probe.is_dir() and os.access(probe, os.W_OK)
+
+
+_HAS_RUNTIME_ENV = bool(os.environ.get("SAFENT_RUNTIME_E2E")) or _var_lib_hermes_writable()
+
+_SKIP_REASON = (
+    "requiere /var/lib/hermes escribible (contenedor Safent) — "
+    "build_default_scan_service()->SQLiteScanRepo() no tiene override por env var. "
+    "Fuerza la ejecución con SAFENT_RUNTIME_E2E=1 dentro del contenedor."
+)
+
+
 def _make_audit_key() -> str:
     import secrets
     return secrets.token_bytes(32).hex()
 
 
+@pytest.mark.skipif(not _HAS_RUNTIME_ENV, reason=_SKIP_REASON)
 class TestRuntimeEntrypointWiring:
     def test_build_real_broker_returns_capability_broker(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

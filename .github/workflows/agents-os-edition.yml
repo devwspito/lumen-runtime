@@ -110,7 +110,23 @@ jobs:
             | tar -xz --strip-components=1 -C /tmp/hermes-agent-src
           pip install -e /tmp/hermes-agent-src
           pip install -e . pytest pytest-asyncio cryptography
-      - run: pytest tests/integration/agents_os/ -m integration -q
+      - name: Run integration tests
+        # tests/integration/agents_os/ only ever held the always-skipped spec-003
+        # bootstrap test; it was deleted and the dir collects 0 tests (pytest exit
+        # 5) — the real integration coverage lives across tests/integration/. Point
+        # at the full tree. `pip install -e .` (Install step above) makes `hermes`
+        # importable without PYTHONPATH, same as the unit-tests job.
+        # `-p no:cacheprovider`: matches local repro, no stale .pytest_cache state.
+        run: |
+          set +e
+          pytest tests/integration -m integration -q -p no:cacheprovider
+          rc=$?
+          set -e
+          if [ "$rc" -eq 5 ]; then
+            echo "::error::pytest exit 5 — 0 integration tests collected. That is a CI bug (broken path/marker selection), not a pass; failing explicitly instead of letting an empty suite go green." >&2
+            exit 1
+          fi
+          exit "$rc"
 
   # ---------------------------------------------------------------
   # 2) Build wheel (needed by Containerfile.base).
