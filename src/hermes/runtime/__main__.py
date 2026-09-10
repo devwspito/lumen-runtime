@@ -2934,37 +2934,84 @@ def _apply_runtime_landlock() -> None:
     """P0-2: el daemon se AUTOCONFINA con Landlock — defense-in-depth, 2ª capa LSM.
 
     OS-NATIVO: confinamiento a nivel kernel vía syscalls Landlock, aplicado por el
-    propio daemon a su proceso (NADA de backend/HTTP). Igual o superior a NemoHermes
-    (fail-closed, no best-effort). No-fatal: si Landlock no está o el ruleset falla,
-    el daemon sigue confinado por systemd (ProtectSystem=strict + ProtectHome +
-    ReadWritePaths + CapabilityBoundingSet vacío + SystemCallFilter). Se desactiva
-    con HERMES_RUNTIME_LANDLOCK=0 (CI/dev sin kernel Landlock).
+    propio daemon a su proceso (NADA de backend/HTTP). Igual o superior a NemoHermes.
+
+    FAIL-CLOSED por defecto (spec 025 hallazgo #4): si Landlock no queda REALMENTE
+    aplicado y enforcing (kernel sin soporte, arquitectura sin tabla de syscalls,
+    seccomp lo bloquea, error duro, o el self-test de /boot demuestra que es
+    teatro), el daemon SE NIEGA a arrancar los agent planes (consent manager,
+    tools registry, broker…) — `sys.exit(1)` antes de que _run() siga. Esto
+    reemplaza el degrade silencioso previo (siempre `return`, solo un
+    logger.warning, nunca abortaba), que dejaba correr el daemon "solo con
+    systemd" sin que el dueño lo supiera nunca.
+
+    Dos vías, ambas explícitas y logueadas:
+      - HERMES_RUNTIME_LANDLOCK=0        — desactiva el intento por completo
+        (CI/dev sin kernel Landlock). Comportamiento previo, sin cambios.
+      - HERMES_RUNTIME_LANDLOCK_ALLOW_DEGRADE=1 — Landlock SÍ se intenta, pero si
+        degrada, el dueño ha autorizado explícitamente seguir solo con el
+        confinamiento systemd (ProtectSystem=strict + ProtectHome +
+        ReadWritePaths + CapabilityBoundingSet vacío + SystemCallFilter).
     """
     if os.environ.get("HERMES_RUNTIME_LANDLOCK", "1") != "1":
+        logger.warning(
+            "runtime_landlock.disabled HERMES_RUNTIME_LANDLOCK=0 — daemon arranca SIN "
+            "Landlock de kernel (solo confinamiento systemd)"
+        )
         return
-    try:
-        from hermes.security.landlock_loader import load_and_apply
 
-        rc = load_and_apply("runtime")
-        # Self-test funcional: /boot NO está en el ruleset RUNTIME → debe denegar.
-        # Sin Landlock /boot es world-readable; con Landlock enforcing → EACCES.
-        # Es la prueba de que el confinamiento es REAL, no teatro ("escrito pero
-        # no cargado" era el patrón raíz del red-team).
-        try:
-            os.listdir("/boot")
-            enforcing = False
-        except PermissionError:
-            enforcing = True
-        except OSError:
-            enforcing = None
-        if enforcing is True:
-            logger.info("runtime_landlock.applied rc=%d ENFORCING — /boot denied (EACCES) ✓", rc)
-        elif enforcing is False:
-            logger.warning("runtime_landlock.applied rc=%d NOT_ENFORCING — /boot legible (¿degrade?)", rc)
-        else:
-            logger.info("runtime_landlock.applied rc=%d (self-test inconcluso)", rc)
-    except Exception as exc:  # noqa: BLE001 — jamás debe tumbar el daemon
-        logger.warning("runtime_landlock.skipped error=%r (sigue el confinamiento systemd)", exc)
+    from hermes.security.landlock_loader import (  # noqa: PLC0415
+        LandlockOutcome,
+        apply_runtime_landlock,
+    )
+
+    try:
+        result = apply_runtime_landlock("runtime")
+    except Exception as exc:  # noqa: BLE001 — un bug del loader no debe crashear con traceback
+        logger.error("runtime_landlock.loader_crashed error=%r — tratado como NO aplicado", exc)
+        result = None
+
+    # Self-test funcional: /boot NO está en el ruleset RUNTIME → debe denegar.
+    # Sin Landlock /boot es world-readable; con Landlock enforcing → EACCES.
+    # Es la prueba de que el confinamiento es REAL, no teatro ("escrito pero
+    # no cargado" era el patrón raíz del red-team) — así que incluso un
+    # outcome=APPLIED que no supere el self-test cuenta como degrade.
+    try:
+        os.listdir("/boot")
+        enforcing = False
+    except PermissionError:
+        enforcing = True
+    except OSError:
+        enforcing = None
+
+    if result is not None and result.outcome is LandlockOutcome.APPLIED and enforcing is not False:
+        logger.info(
+            "runtime_landlock.applied outcome=%s enforcing=%s ✓", result.outcome.value, enforcing
+        )
+        return
+
+    detail = (
+        f"outcome={result.outcome.value if result is not None else 'loader_crashed'} "
+        f"enforcing={enforcing}"
+    )
+
+    if os.environ.get("HERMES_RUNTIME_LANDLOCK_ALLOW_DEGRADE", "0") == "1":
+        logger.warning(
+            "runtime_landlock.degraded_ALLOWED %s — HERMES_RUNTIME_LANDLOCK_ALLOW_DEGRADE=1: "
+            "arranque autorizado explícitamente SIN Landlock de kernel enforcing "
+            "(solo confinamiento systemd). Elección del dueño, registrada aquí.",
+            detail,
+        )
+        return
+
+    logger.error(
+        "runtime_landlock.degraded_REFUSED %s — REFUSING to start the agent planes "
+        "(fail-closed). Set HERMES_RUNTIME_LANDLOCK_ALLOW_DEGRADE=1 to run without kernel "
+        "Landlock enforcement (systemd confinement only), or HERMES_RUNTIME_LANDLOCK=0 to "
+        "disable this check entirely.",
+        detail,
+    )
+    sys.exit(1)
 
 
 def main() -> int:

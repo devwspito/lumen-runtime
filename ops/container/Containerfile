@@ -64,9 +64,13 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/b
 # /opt tree died with EACCES on `import hermes_cli` (spec 023 boot smoke). /usr is
 # read-only under ProtectSystem=strict, so bytecode is precompiled here (no
 # __pycache__ writes at runtime). Pruned dirs are dev/research only.
-ARG HERMES_AGENT_COMMIT=2237be355906fbe6065ce1815711eee52b2d646e
+# SINGLE SOURCE OF TRUTH for the pinned commit: repo-root `ops/hermes-agent.lock`
+# (one line, the commit SHA). CI (.github/workflows/agents-os-edition.yml) reads
+# the same file — never hand-copy the SHA into a second place.
 ENV HERMES_AGENT_SRC=/usr/lib/hermes-agent
-RUN mkdir -p "${HERMES_AGENT_SRC}" \
+COPY ops/hermes-agent.lock /tmp/hermes-agent.lock
+RUN HERMES_AGENT_COMMIT="$(tr -d ' \t\n\r' < /tmp/hermes-agent.lock)" \
+    && mkdir -p "${HERMES_AGENT_SRC}" \
     && curl -fsSL "https://github.com/NousResearch/hermes-agent/archive/${HERMES_AGENT_COMMIT}.tar.gz" \
        | tar -xz --strip-components=1 -C "${HERMES_AGENT_SRC}" \
     && rm -rf "${HERMES_AGENT_SRC}/tests" "${HERMES_AGENT_SRC}/website" "${HERMES_AGENT_SRC}/contributors" \
