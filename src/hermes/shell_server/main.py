@@ -1509,12 +1509,19 @@ def create_app() -> FastAPI:
 
     app.include_router(create_instance_router(_DB_PATH, vault))
 
-    # UI-triggered update: GET reports current/latest version, POST drops a marker the
-    # host-side `safent agent` watches to apply the update (the sandbox can't self-update).
+    # UI-triggered update: GET reports current/latest version + verified
+    # manifest digests (T005). Requesting the update/uninstall/companion
+    # actions themselves is install_requests' job (T006) — POST/GET
+    # /api/v1/system/requests, plus the /system/update and /system/uninstall
+    # POST aliases existing installs already call.
+    from hermes.shell_server.install_requests import (  # noqa: PLC0415
+        create_install_requests_router,
+    )
     from hermes.shell_server.system_update import (  # noqa: PLC0415
         create_system_update_router,
     )
     app.include_router(create_system_update_router())
+    app.include_router(create_install_requests_router())
 
 
     # ------------------------------------------------------------------

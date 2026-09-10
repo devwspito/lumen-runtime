@@ -18,6 +18,7 @@ Constitution Principle IV ("manifiesto sin firma valida -> sin boton").
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -277,6 +278,35 @@ class TestUpdateAvailableIsFailClosedOnManifestSignature:
 
         body = _client().get("/api/v1/system/update", headers=_auth_headers()).json()
         assert body["update_available"] is False
+
+
+class TestUpdatingReflectsInstallRequests:
+    """T006 extracted the marker mechanism to install_requests.py; `updating`
+    must still track it exactly via the shared `is_verb_live` read."""
+
+    def test_false_with_no_live_request(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import hermes.shell_server.system_update as su
+
+        monkeypatch.setattr(su, "_fetch_latest", lambda: None)
+        monkeypatch.setattr(rm, "_PUBKEY_HEX", "")
+
+        body = _client().get("/api/v1/system/update", headers=_auth_headers()).json()
+        assert body["updating"] is False
+
+    def test_true_once_an_update_system_request_is_live(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import hermes.shell_server.install_requests as ir
+        import hermes.shell_server.system_update as su
+
+        monkeypatch.setattr(ir, "_INSTANCE_DIR", tmp_path / "instance")
+        monkeypatch.setattr(su, "_fetch_latest", lambda: None)
+        monkeypatch.setattr(rm, "_PUBKEY_HEX", "")
+
+        ir.create_request("update_system")
+
+        body = _client().get("/api/v1/system/update", headers=_auth_headers()).json()
+        assert body["updating"] is True
 
 
 class TestCanonicalBytesIsStableJson:

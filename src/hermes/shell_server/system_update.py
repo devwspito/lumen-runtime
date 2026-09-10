@@ -1,24 +1,25 @@
-"""system_update — let the user update Safent FROM THE UI (no terminal).
+"""system_update — is there a new version, from the UI (no terminal).
 
-The container is sandboxed and cannot recreate itself (touching the host podman would
-defeat the cage). So the flow is: the UI calls POST /api/v1/system/update, which drops
-an "update requested" marker into the daemon-owned instance dir; a host-side agent
-(`safent agent`, installed once by get-safent.sh as a launchd/systemd unit) watches for
-that marker and runs the same `safent update` (prune-before-pull + recreate). GET reports
-the current version and, best-effort, the latest published version so the UI can show an
-"update available" hint.
+GET reports the current version, the best-effort latest published version,
+and (T005) the signed runtime-manifest.json's verified digests, so the UI
+can show an honest "update available" hint. The WRITE side — requesting an
+update or uninstall, and every other host action the UI can trigger — moved
+to `hermes.shell_server.install_requests` (T006): this module now only
+answers "what version, and is one already in flight", via
+`install_requests.is_verb_live`, the single source of truth for "is there a
+live request for this verb".
 """
 
 from __future__ import annotations
 
 import logging
 import os
-import time
 import urllib.request
 
 from fastapi import APIRouter, HTTPException, Request
 
 import hermes
+from hermes.shell_server.install_requests import is_verb_live
 from hermes.shell_server.runtime_manifest import (
     current_arch_key,
     fetch_verified_manifest,
@@ -26,35 +27,6 @@ from hermes.shell_server.runtime_manifest import (
 )
 
 logger = logging.getLogger("hermes.shell_server.system_update")
-
-# Daemon-owned dir (uid 880 can write here; the parent /var/lib/hermes is root:root
-# 0755). The host `safent agent` watches this exact path.
-_INSTANCE_DIR = "/var/lib/hermes/instance"
-_UPDATE_FLAG = os.path.join(_INSTANCE_DIR, ".update-requested")
-# Uninstall marker — same mechanism as update: the sandboxed UI can't touch the host,
-# so it drops this marker and the host `safent agent` runs `safent uninstall` (removes
-# the container + data volume + the CLI + the agent). podman/docker are left installed.
-_UNINSTALL_FLAG = os.path.join(_INSTANCE_DIR, ".uninstall-requested")
-
-# A CLI update takes ~2-5 min. If the flag is older than this, no host watcher
-# picked it up (agent not installed / dead) — treat it as stale and clear it so
-# the UI stops showing an eternal "Updating…" and offers the button again.
-_FLAG_STALE_S = 15 * 60
-
-
-def _updating() -> bool:
-    try:
-        st = os.stat(_UPDATE_FLAG)
-    except OSError:
-        return False
-    if time.time() - st.st_mtime > _FLAG_STALE_S:
-        try:
-            os.remove(_UPDATE_FLAG)
-        except OSError:
-            pass
-        logger.warning("hermes.system_update.flag_stale_cleared (no host agent picked it up)")
-        return False
-    return True
 
 # Source of truth for "what's the latest version" — the repo VERSION file on main.
 _LATEST_URL = os.environ.get(
@@ -92,7 +64,7 @@ def create_system_update_router() -> APIRouter:
             raise HTTPException(status_code=401, detail="unauthorized")
 
     @router.get("/api/v1/system/update")
-    async def system_update_status(request: Request) -> dict:
+    async def system_update_status(request: Request) -> dict[str, object]:
         _auth(request)
         current = str(getattr(hermes, "__version__", "0"))
         latest = _fetch_latest()
@@ -101,7 +73,7 @@ def create_system_update_router() -> APIRouter:
         # is no longer enough on its own — the signed manifest must ALSO
         # verify, or no button is shown, regardless of what the unsigned
         # VERSION file claims (contracts/update.md §2.3).
-        available = bool(latest) and _parse(latest) > _parse(current) and manifest is not None
+        available = latest is not None and _parse(latest) > _parse(current) and manifest is not None
         arch_key = current_arch_key()
         engine_digest = manifest.engine.get(arch_key) if manifest else None
         companion_digest = None
@@ -112,34 +84,10 @@ def create_system_update_router() -> APIRouter:
             "current_version": current,
             "latest_version": latest,
             "update_available": available,
-            "updating": _updating(),
+            "updating": is_verb_live("update_system"),
             "engine_digest": engine_digest,
             "companion_digest": companion_digest,
             "pieces": pieces,
         }
-
-    @router.post("/api/v1/system/update")
-    async def system_update_request(request: Request) -> dict:
-        _auth(request)
-        try:
-            os.makedirs(_INSTANCE_DIR, exist_ok=True)
-            with open(_UPDATE_FLAG, "w", encoding="utf-8") as fh:
-                fh.write("requested\n")
-        except OSError as exc:
-            logger.warning("hermes.system_update.flag_write_failed: %s", exc)
-            raise HTTPException(status_code=500, detail="could not request update")
-        return {"ok": True, "updating": True}
-
-    @router.post("/api/v1/system/uninstall")
-    async def system_uninstall_request(request: Request) -> dict:
-        _auth(request)
-        try:
-            os.makedirs(_INSTANCE_DIR, exist_ok=True)
-            with open(_UNINSTALL_FLAG, "w", encoding="utf-8") as fh:
-                fh.write("requested\n")
-        except OSError as exc:
-            logger.warning("hermes.system_update.uninstall_flag_write_failed: %s", exc)
-            raise HTTPException(status_code=500, detail="could not request uninstall")
-        return {"ok": True}
 
     return router
