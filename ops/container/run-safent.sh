@@ -13,6 +13,17 @@
 #   entirely (FR-6) — Safent starts with no --network/binds for it. Use this
 #   to keep the pre-024 self-hosted-URL path (Herramientas -> Safent Ads).
 #
+# Graceful stop: the container is started with --stop-signal=SIGRTMIN+3 (PID1
+#   is systemd; SIGTERM alone never triggers an orderly shutdown of its units)
+#   and --stop-timeout (default 30s, override with SAFENT_STOP_TIMEOUT_S) —
+#   both apply automatically to a bare `podman stop`/`restart` on this
+#   container, no extra flags needed at stop time.
+#
+# Backup/restore: not this script's job — use the `safent` CLI's own
+#   `safent backup [dir]` / `safent restore <archive> [--force]`, which stop
+#   this container cleanly, archive/restore the data volume + companion state
+#   + seccomp cache, and restart it.
+#
 # --codex-auth <path>: OPTIONAL. Bind-mounts an EXISTING, host-side OpenAI
 #   Codex CLI auth.json (from a `codex login` the owner already did on the
 #   HOST) read-only into the container at $HOME/.codex/auth.json (HOME is
@@ -56,7 +67,12 @@ NO_COMPANION=0
 _positional_index=0
 
 usage() {
-  sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'
+  # Print the leading comment block (everything up to the first non-#
+  # line after the shebang) instead of a hardcoded line range — a fixed
+  # range silently truncates usage() mid-sentence every time a note is
+  # added to the header (as happened here: item #2's stop-signal/timeout
+  # note pushed the block past the old '2,45p').
+  awk 'NR==1{next} /^#/{print; next} {exit}' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [ $# -gt 0 ]; do

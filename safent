@@ -208,6 +208,16 @@ _run() {
   _active_image="$(_image)"
   "$RT" rm -f "$NAME" >/dev/null 2>&1 || true
   if [ -n "$PORT_PIN" ]; then publish="127.0.0.1:${PORT_PIN}:7517"; else publish="127.0.0.1::7517"; fi
+  # AppArmor (Linux hosts only — Ubuntu/Debian ship it enforcing by default; see
+  # run-safent.sh for the full rationale): under an enforcing profile, rootful
+  # podman applies containers-default-*, which denies the mount(2)/proc-write set
+  # systemd needs as PID1 with CAP_SYS_ADMIN — PID1 dies before it writes a single
+  # log line and the container exits 255 immediately. No-op where AppArmor is
+  # absent/disabled (macOS, most non-Ubuntu Linux).
+  apparmor_arg=""
+  if [ "$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null || true)" = "Y" ]; then
+    apparmor_arg="--security-opt=apparmor=unconfined"
+  fi
   "$RT" run -d --name "$NAME" --systemd=always \
     -p "$publish" \
     --stop-signal="$STOP_SIGNAL" --stop-timeout="$STOP_TIMEOUT_S" \
@@ -216,6 +226,7 @@ _run() {
     --security-opt seccomp="$SECCOMP" \
     --security-opt unmask=/sys/kernel/security \
     --security-opt label=disable \
+    ${apparmor_arg:+$apparmor_arg} \
     -v /sys/kernel/security:/sys/kernel/security:ro \
     -v "$DATA_VOLUME":/var/lib/hermes \
     --shm-size=1g \
@@ -461,6 +472,154 @@ cmd_update() {
   # container recreated) → reclaim it too, same surgical path.
   _reclaim_space
   _open_and_print
+}
+
+# ---- backup / restore --------------------------------------------------------
+# safent backup [dir]              stop cleanly, export the data volume + the
+#                                   companion state (secrets included) + the
+#                                   seccomp cache into ONE 0600 archive with a
+#                                   manifest (versions, sha256), then restart
+#                                   IF it was running before.
+# safent restore <archive> [--force]
+#                                   stop cleanly, verify the manifest
+#                                   checksums, import the volume + state
+#                                   (refuses to overwrite an EXISTING volume
+#                                   without --force), then restart.
+_BACKUP_DEFAULT_DIR="$HOME/.safent/backups"
+# Companion state (~/.safent/companions/ads) and the seccomp cache
+# ($SECCOMP_DIR/safent-seccomp.json) are both already under $SECCOMP_DIR —
+# one root to archive.
+_STATE_ROOT="$SECCOMP_DIR"
+
+_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+  else shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
+# Portable "get this JSON key's string value" for the manifest WE generate
+# below (fixed, known shape — no general JSON parser needed in POSIX sh).
+_manifest_field() {
+  sed -n "s/.*\"$2\": *\"\([^\"]*\)\".*/\1/p" "$1" | head -1
+}
+
+cmd_backup() {
+  _dir="${1:-$_BACKUP_DEFAULT_DIR}"
+  mkdir -p "$_dir" || { echo "[x] Could not create $_dir"; exit 1; }
+
+  if ! "$RT" volume exists "$DATA_VOLUME" 2>/dev/null; then
+    echo "[x] No data volume ($DATA_VOLUME) to back up — nothing to do."
+    exit 1
+  fi
+
+  _was_running=0
+  if _exists && _running; then _was_running=1; fi
+  echo "[*] Stopping Safent for a consistent backup..."
+  cmd_stop >/dev/null 2>&1 || true
+
+  _work="$(mktemp -d)" || { echo "[x] Could not create a temp workdir."; exit 1; }
+  trap 'rm -rf "$_work"' EXIT INT TERM
+
+  echo "[*] Exporting the data volume ($DATA_VOLUME)..."
+  "$RT" volume export "$DATA_VOLUME" -o "$_work/data-volume.tar"
+
+  echo "[*] Archiving companion state + seccomp cache..."
+  _state_items=""
+  [ -d "$_STATE_ROOT/companions/ads" ] && _state_items="companions/ads"
+  _seccomp_base="$(basename "$SECCOMP")"
+  [ -f "$_STATE_ROOT/$_seccomp_base" ] && _state_items="$_state_items $_seccomp_base"
+  if [ -n "$_state_items" ]; then
+    ( cd "$_STATE_ROOT" && tar -cf "$_work/state.tar" $_state_items )
+  else
+    tar -cf "$_work/state.tar" -T /dev/null  # valid, empty archive — nothing to include
+  fi
+
+  _ts="$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null || date +%Y%m%dT%H%M%SZ)"
+  cat > "$_work/manifest.json" <<MANIFEST
+{
+  "safent_cli_rev": $_CLI_REV,
+  "image": "$(_image)",
+  "data_volume": "$DATA_VOLUME",
+  "created_at": "$_ts",
+  "sha256": {
+    "data-volume.tar": "$(_sha256 "$_work/data-volume.tar")",
+    "state.tar": "$(_sha256 "$_work/state.tar")"
+  }
+}
+MANIFEST
+
+  _archive="$_dir/safent-backup-${_ts}.tar.gz"
+  ( cd "$_work" && tar -czf "$_archive" manifest.json data-volume.tar state.tar )
+  chmod 0600 "$_archive"  # secrets live in state.tar (companion bearer + TLS key)
+
+  if [ "$_was_running" = 1 ]; then
+    echo "[*] Restarting Safent..."
+    cmd_start >/dev/null 2>&1 || true
+  fi
+  echo "[ok] Backup written to $_archive"
+}
+
+cmd_restore() {
+  _archive=""
+  _force=0
+  for _a in "$@"; do
+    case "$_a" in
+      --force) _force=1 ;;
+      "") : ;;
+      *) _archive="$_a" ;;
+    esac
+  done
+  if [ -z "$_archive" ]; then
+    echo "[x] Usage: safent restore <archive> [--force]"; exit 1
+  fi
+  [ -f "$_archive" ] || { echo "[x] Archive not found: $_archive"; exit 1; }
+
+  # Refuse BEFORE touching anything (no stop, no extraction) — a plain
+  # `safent restore x.tar.gz` against an existing volume must be a safe no-op.
+  if "$RT" volume exists "$DATA_VOLUME" 2>/dev/null && [ "$_force" != 1 ]; then
+    echo "[x] Volume '$DATA_VOLUME' already exists — refusing to overwrite it."
+    echo "    Re-run with --force to replace it (its current contents are lost)."
+    exit 1
+  fi
+
+  _work="$(mktemp -d)" || { echo "[x] Could not create a temp workdir."; exit 1; }
+  trap 'rm -rf "$_work"' EXIT INT TERM
+  echo "[*] Extracting $_archive..."
+  tar -xzf "$_archive" -C "$_work"
+  for _f in manifest.json data-volume.tar state.tar; do
+    [ -f "$_work/$_f" ] || { echo "[x] Archive is missing $_f — refusing to restore."; exit 1; }
+  done
+
+  echo "[*] Verifying checksums..."
+  for _f in data-volume.tar state.tar; do
+    _expect="$(_manifest_field "$_work/manifest.json" "$_f")"
+    _actual="$(_sha256 "$_work/$_f")"
+    if [ -z "$_expect" ] || [ "$_expect" != "$_actual" ]; then
+      echo "[x] Checksum mismatch for $_f — archive is corrupt or tampered. Refusing to restore."
+      exit 1
+    fi
+  done
+
+  if _exists && _running; then
+    echo "[*] Stopping Safent..."
+    cmd_stop >/dev/null 2>&1 || true
+  fi
+
+  if "$RT" volume exists "$DATA_VOLUME" 2>/dev/null; then
+    [ "$_force" = 1 ] || { echo "[x] Volume exists and --force was not given — aborting."; exit 1; }
+    "$RT" volume rm -f "$DATA_VOLUME" >/dev/null 2>&1 || true
+  fi
+  "$RT" volume create "$DATA_VOLUME" >/dev/null
+  echo "[*] Importing the data volume..."
+  "$RT" volume import "$DATA_VOLUME" "$_work/data-volume.tar"
+
+  echo "[*] Restoring companion state + seccomp cache..."
+  mkdir -p "$_STATE_ROOT"
+  tar -xf "$_work/state.tar" -C "$_STATE_ROOT" 2>/dev/null || true
+
+  echo "[*] Starting Safent..."
+  cmd_start >/dev/null 2>&1 || true
+  echo "[ok] Restored from $_archive"
 }
 
 # ---- enterprise pairing -----------------------------------------------------
@@ -765,6 +924,14 @@ safent - control your local Safent
   safent unpair        remove the enterprise association (reverts to community edition)
   safent uninstall     remove Safent (container + data + CLI + agent; keeps podman/docker)
 
+  safent backup [dir]             stop cleanly, archive the data volume + companion
+                                   state (secrets) + seccomp cache into one 0600 file
+                                   (default dir: ~/.safent/backups), then restart
+  safent restore <archive> [--force]
+                                   stop cleanly, verify + restore a backup made with
+                                   `safent backup`, then restart. Refuses to overwrite
+                                   an existing data volume unless --force is given
+
   safent companion status            is the companion up? containers, /mcp/health
   safent companion update            pull the latest companion image and recreate it
   safent companion rotate            issue a new /mcp bearer on both sides, restart ads-api
@@ -790,6 +957,8 @@ case "${1:-open}" in
   pair|vincular)               cmd_pair "${2:-}" ;;
   unpair|desvincular)          cmd_unpair ;;
   uninstall|desinstalar)       cmd_uninstall ;;
+  backup|respaldo)             cmd_backup "${2:-}" ;;
+  restore|restaura)            shift; cmd_restore "$@" ;;
   -h|--help|help|ayuda)        usage ;;
   *) echo "Unknown command: $1"; echo; usage; exit 1 ;;
 esac
