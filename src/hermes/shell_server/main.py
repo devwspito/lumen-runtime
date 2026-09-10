@@ -954,6 +954,10 @@ def create_app() -> FastAPI:
 
     app.include_router(create_remote_access_tunnel_router())
 
+    from hermes.shell_server.tailnet.api import create_tailnet_router  # noqa: PLC0415
+
+    app.include_router(create_tailnet_router(vault=vault))
+
     from hermes.shell_server.remote_control.api import (
         create_remote_control_router,
     )

@@ -29,6 +29,7 @@ from hermes.capabilities.domain.provenance_taint import (
     is_sensitive_path_read_under_taint,
 )
 from hermes.runtime.nous_tool_risk_map import NousRisk, classify_nous_tool
+from hermes.tailnet_ssh.tool_names import TAILNET_SSH_TOOL_NAMES
 
 
 class SensitivityCategory(StrEnum):
@@ -45,6 +46,7 @@ class SensitivityCategory(StrEnum):
     PII_READ = "pii_read"      # reads personally-identifiable data
     NEW_EGRESS = "new_egress"  # would reach a domain outside the owner's grant
     SPEND = "spend"            # moves/authorizes money on the owner's behalf
+    REMOTE_EXEC = "remote_exec"  # runs a command on / transfers a file to another host
 
 
 # Domain-bearing arg keys, checked in priority order — the first present,
@@ -104,6 +106,10 @@ _SPEND_TOOLS: frozenset[str] = frozenset({
     "PAYPAL_CREATE_PAYOUT",
 }) | frozenset(f"mcp__{_SAFENT_ADS_SLUG}__{tool}" for tool in _SAFENT_ADS_WRITE_TOOLS)
 
+# spec 022 v2 — governed tailnet SSH. Single source: hermes.tailnet_ssh.tool_names
+# (never re-listed here — see that module's docstring on why it has zero deps).
+_REMOTE_EXEC_TOOLS: frozenset[str] = TAILNET_SSH_TOOL_NAMES
+
 
 def sensitivity(
     tool_name: str,
@@ -125,6 +131,8 @@ def sensitivity(
             categories.add(SensitivityCategory.NEW_EGRESS)
         if tool_name in _SPEND_TOOLS:
             categories.add(SensitivityCategory.SPEND)
+        if tool_name in _REMOTE_EXEC_TOOLS:
+            categories.add(SensitivityCategory.REMOTE_EXEC)
         return frozenset(categories)
     except Exception:  # noqa: BLE001 — fail-soft: classification error => empty set
         return frozenset()
