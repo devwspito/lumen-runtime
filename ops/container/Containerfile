@@ -173,6 +173,7 @@ RUN useradd --system --no-create-home --shell /usr/sbin/nologin --uid 880 hermes
     useradd --system --no-create-home --shell /usr/sbin/nologin --uid 882 hermes-whisper && \
     useradd --system --no-create-home --shell /usr/sbin/nologin --uid 883 hermes-cp && \
     useradd --system --no-create-home --shell /usr/sbin/nologin --uid 885 hermes-egress && \
+    useradd --system --no-create-home --shell /usr/sbin/nologin --uid 887 hermes-tailscale && \
     useradd --create-home --uid 1000 --groups hermes,systemd-journal hermes-user
 
 # hermes-sandbox (uid 886): the user the AGENT's sandboxed exec runs as — the
@@ -339,6 +340,32 @@ RUN ARCH="$(uname -m)"; \
       && /usr/bin/trivy --version \
       && echo "INFO: trivy installed — Security Center will use engine=trivy" ) \
     || echo "WARN: trivy install failed — Security Center will use engine=heuristic (honest fallback)"
+
+# ── Tailscale (governed tailnet egress for the agent) — pinned static tarball ──
+# Baked but INERT: tailscaled runs ONLY in userspace-networking mode (no /dev/net/tun,
+# no NET_ADMIN, no seccomp change) as user hermes-tailscale, off by default. It exposes a
+# loopback HTTP-CONNECT proxy that ONLY the host-netns egress-proxy can reach (agent netns
+# drop 127.0.0.0/8 + Tailscale CGNAT 100.64.0.0/10), so agent tailnet access is forced
+# through the audited egress allowlist. See specs/022-tailnet-connectivity/plan.md.
+# Static binary = no deps = works offline under the cage. Pinned + no `latest`.
+ARG TAILSCALE_VERSION=1.102.3
+RUN ARCH="$(uname -m)"; \
+    case "$ARCH" in \
+      x86_64)  TS_ARCH="amd64" ;; \
+      aarch64) TS_ARCH="arm64" ;; \
+      armv7l)  TS_ARCH="arm"   ;; \
+      *)       echo "WARN: tailscale — unknown arch $ARCH, skipping"; exit 0 ;; \
+    esac; \
+    TS_URL="https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_${TS_ARCH}.tgz"; \
+    echo "▸ tailscale install: arch=${TS_ARCH} ver=${TAILSCALE_VERSION}"; \
+    ( curl -LsSf "$TS_URL" -o /tmp/ts.tgz \
+      && tar -xzf /tmp/ts.tgz -C /tmp \
+      && install -m 0755 /tmp/tailscale_${TAILSCALE_VERSION}_${TS_ARCH}/tailscaled /usr/sbin/tailscaled \
+      && install -m 0755 /tmp/tailscale_${TAILSCALE_VERSION}_${TS_ARCH}/tailscale  /usr/bin/tailscale \
+      && rm -rf /tmp/ts.tgz /tmp/tailscale_${TAILSCALE_VERSION}_${TS_ARCH} \
+      && /usr/sbin/tailscaled --version \
+      && echo "INFO: tailscaled installed (userspace mode; off by default)" ) \
+    || echo "WARN: tailscale install failed — the tailnet capability will be unavailable"
 # Pre-warm the trivy vuln DB so `trivy fs` works OFFLINE under the cage (runtime
 # egress is denied). Without a baked DB trivy would fetch at scan time, fail, and
 # the cve slot would be unanalyzable. TRIVY_CACHE_DIR set above (ENV) so all trivy
@@ -528,6 +555,12 @@ LABEL org.opencontainers.image.revision="${GIT_SHA}"
 # effect without a reboot. The CE image runs in associate mode, so gating on
 # build-time SAFENT_EDITION would (and did) leave paired CE instances without sync.
 RUN systemctl enable hermes-config-sync.service hermes-config-sync.path 2>&1 | tail -3 || true
+
+# Governed tailnet egress (spec 022): enable the .path watchers so opt-in takes effect live.
+# The .service units are ConditionPathExists-gated (off by default) — nothing runs until the
+# owner connects a tailnet from the UI. hermes-tailscaled.service also installs into
+# hermes-workspace.target (WantedBy) so it comes up on later boots once enabled.
+RUN systemctl enable hermes-tailscaled.path hermes-tailscale-control.path 2>&1 | tail -3 || true
 
 # podman-machine (macOS) compat: systemd's per-unit MemoryPressureWatch tries to bind the
 # unit's cgroup memory.pressure into its namespace; in the Mac podman VM's cgroup view this
