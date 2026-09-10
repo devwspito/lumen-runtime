@@ -87,9 +87,8 @@ class ConnectResponse(BaseModel):
 def create_integrations_router(db_path: Path) -> APIRouter:
     """Create the integrations API router.
 
-    Follows the same factory pattern as create_training_router so that
-    the db_path is bound at construction time and tests can inject a
-    temp path without patching globals.
+    db_path is bound at construction time so tests can inject a temp path
+    without patching globals.
     """
     _init_schema(db_path)
     router = APIRouter(prefix="/api/v1/integrations", tags=["integrations"])
