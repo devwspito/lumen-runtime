@@ -27,13 +27,22 @@ const SELFTEST_JS: &str = r#"(async () => {
   b.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:2147483647;background:#0b0d10;color:#5b8cff;font:600 18px/1.4 system-ui,sans-serif;padding:12px 16px;border-bottom:2px solid #5b8cff';
   b.textContent = 'SSE self-test: starting…';
   document.body.appendChild(b);
+  // Every /api/v1/* request now requires the bearer (resource-level authz, incl.
+  // GET/SSE) — same token the web UI itself uses: window.__SAFENT_TOKEN__ was
+  // injected into this page's index.html by the ?k= bootstrap handshake
+  // (window.navigate already loaded the URL with ?k=), same source
+  // frontend/src/lib/token.ts reads; localStorage is the fallback it persists to.
+  const __safentToken = window.__SAFENT_TOKEN__ || (() => { try { return localStorage.getItem('safent_token') || ''; } catch (_) { return ''; } })();
   try {
-    const r = await fetch('/api/v1/chat', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_message:'Responde solo: pong.'})});
+    if (!__safentToken) { b.textContent = 'SSE self-test: FAIL — no bearer (window.__SAFENT_TOKEN__ unset)'; b.style.color = '#ff6b6b'; return; }
+    const r = await fetch('/api/v1/chat', {method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer ' + __safentToken},body:JSON.stringify({user_message:'Responde solo: pong.'})});
     const j = await r.json().catch(() => ({}));
     const task = j.task_id;
     if (!task) { b.textContent = 'SSE self-test: FAIL — no task_id (http ' + r.status + ')'; b.style.color = '#ff6b6b'; return; }
     let events = 0, deltas = 0, done = false;
-    const es = new EventSource('/api/v1/chat/stream/' + task);
+    // EventSource cannot set an Authorization header — same ?token= transport
+    // the web UI's chat stream uses (see client.ts openTaskStream).
+    const es = new EventSource('/api/v1/chat/stream/' + task + '?token=' + encodeURIComponent(__safentToken));
     const tick = () => { b.textContent = 'SSE self-test: streaming… task=' + task.slice(0,8) + ' events=' + events + ' deltas=' + deltas; };
     es.onmessage = (e) => { events++; try { const d = JSON.parse(e.data); if (d.kind === 'delta' || d.delta) deltas++; if (d.kind === 'done') { done = true; es.close(); } } catch (_) {} tick(); };
     es.onerror = () => {};

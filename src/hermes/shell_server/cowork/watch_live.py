@@ -37,8 +37,8 @@ from hermes.shell_server.cowork.training_live import (
     _send_frames,
     _stop_playwright_safe,
     _try_ensure_browser_running,
-    _verify_token,
 )
+from hermes.shell_server.main import authenticate_websocket
 
 logger = logging.getLogger("hermes.shell_server.cowork.watch_live")
 
@@ -98,12 +98,11 @@ def create_watch_live_router() -> APIRouter:
 
     @router.websocket("/api/v1/watch/agent/live")
     async def watch_agent_live(websocket: WebSocket) -> None:
-        # Auth: same stable webui bearer as training_live (WS upgrades bypass the
-        # POST-only HTTP middleware), passed as ?token=.
-        webui_token: str = getattr(websocket.app.state, "shell_webui_token", "")
-        candidate: str = websocket.query_params.get("token", "")
-        if not _verify_token(candidate, webui_token):
-            await websocket.close(code=1008, reason="unauthorized")
+        # Auth: WebSocket upgrades never reach the HTTP `_require_operator_token`
+        # middleware (Starlette only runs @app.middleware("http") for scope["type"]
+        # == "http") — `authenticate_websocket` is the shared per-connection gate
+        # (same bearer check, closes 1008 before accept on failure).
+        if not await authenticate_websocket(websocket):
             return
 
         await websocket.accept()

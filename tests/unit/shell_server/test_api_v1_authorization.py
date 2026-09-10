@@ -16,8 +16,12 @@ toca este middleware porque viven fuera del prefijo por diseño.
 Excepción documentada: las 3 rutas WebSocket bajo /api/v1/* (training/{id}/
 live, watch/agent/live, vnc) NO pasan por este middleware — Starlette sólo
 aplica `@app.middleware("http")` al scope "http", nunca a "websocket" — y
-quedan FUERA de este test a propósito (hueco preexistente, ni introducido ni
-cerrado por este fix; ver recomendaciones del informe).
+quedan FUERA de este test a propósito. watch/agent/live y vnc SÍ están
+cubiertas por su propio gate por-conexión (`authenticate_websocket`, mismo
+`_bearer_is_valid` que este middleware) — ver
+tests/unit/shell_server/test_websocket_authorization.py. training/{id}/live
+sigue sin autenticador compartido (se está retirando en otro carril, fuera de
+alcance aquí).
 """
 
 from __future__ import annotations
@@ -132,15 +136,6 @@ def app(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
 
     master_key = os.urandom(32)
     from hermes.shell_server import main as shell_main
-
-    # `_DB_PATH` is read from the env ONCE at module-import time (main.py:42),
-    # not per create_app() call — the env var above only takes effect if this
-    # is the FIRST test in the process to import the module. Patching the
-    # already-bound module attribute makes this fixture order-independent
-    # (safe whether this file runs alone or inside the full shell_server
-    # suite, where some earlier test already imported hermes.shell_server.main
-    # against the real HERMES_SHELL_DB default).
-    monkeypatch.setattr(shell_main, "_DB_PATH", tmp_path / "shell-state.db")
 
     original_vault = shell_main.SecretsVault
 
