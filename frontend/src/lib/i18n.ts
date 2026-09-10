@@ -975,16 +975,22 @@ const translations = {
     'reconnect.hint':                  'Ciérrala y vuelve a abrirla desde el icono de Safent.',
     'reconnect.action':                'Reintentar',
 
-    // System update
+    // System update (028) — "Actualizar" only renders when a newer version is
+    // actually confirmed (contracts/update.md §3); otherwise the footer shows
+    // sysupdate.current quietly, with no button at all.
     'sysupdate.current':        'Versión {v}',
     'sysupdate.action':         'Actualizar',
     'sysupdate.updating':       'Actualizando…',
     'sysupdate.available':      'Hay una versión nueva',
     'sysupdate.confirm.title':  '¿Actualizar Safent?',
-    'sysupdate.confirm.body':   'Se instalará la última versión. Puede tardar unos minutos y la app se recargará sola.',
+    'sysupdate.confirm.body':   'Se instalará la última versión. Puede tardar unos minutos; la app se cerrará y volverá a abrirse sola para terminar.',
     'sysupdate.confirm.ok':     'Actualizar',
     'sysupdate.toast.started':  'Actualizando… vuelve en un par de minutos.',
     'sysupdate.err.start':      'No se pudo iniciar la actualización.',
+    'sysupdate.relaunch_notice':'Se cerrará y volverá a abrirse sola para terminar.',
+    'sysupdate.retry':          'Reintentar',
+    'sysupdate.err.generic':    'No se pudo completar la actualización. Puedes reintentarlo.',
+    'sysupdate.expired':        'Nadie atendió la actualización. Puedes intentarlo de nuevo.',
     'sysuninstall.action':      'Desinstalar',
     'sysuninstall.confirm.title': '¿Desinstalar Safent?',
     'sysuninstall.confirm.body': 'Se eliminarán Safent, TODOS tus datos locales (configuración, agentes, habilidades, memoria) y el contenedor. No se puede deshacer. (Podman/Docker se conservan.)',
@@ -1945,16 +1951,22 @@ const translations = {
     'reconnect.hint':                  'Close it and open it again from the Safent icon.',
     'reconnect.action':                'Retry',
 
-    // System update
+    // System update (028) — "Update" only renders when a newer version is
+    // actually confirmed (contracts/update.md §3); otherwise the footer shows
+    // sysupdate.current quietly, with no button at all.
     'sysupdate.current':        'Version {v}',
     'sysupdate.action':         'Update',
     'sysupdate.updating':       'Updating…',
     'sysupdate.available':      'A new version is available',
     'sysupdate.confirm.title':  'Update Safent?',
-    'sysupdate.confirm.body':   'The latest version will be installed. It may take a few minutes and the app will reload on its own.',
+    'sysupdate.confirm.body':   'The latest version will be installed. It may take a few minutes; the app will close and reopen on its own to finish.',
     'sysupdate.confirm.ok':     'Update',
     'sysupdate.toast.started':  'Updating… come back in a couple of minutes.',
     'sysupdate.err.start':      'Could not start the update.',
+    'sysupdate.relaunch_notice':'It will close and reopen on its own to finish.',
+    'sysupdate.retry':          'Retry',
+    'sysupdate.err.generic':    'Could not finish the update. You can retry.',
+    'sysupdate.expired':        'Nobody picked up the update. You can try again.',
     'sysuninstall.action':      'Uninstall',
     'sysuninstall.confirm.title': 'Uninstall Safent?',
     'sysuninstall.confirm.body': 'This removes Safent, ALL your local data (config, agents, skills, memory) and the container. It cannot be undone. (Podman/Docker are kept.)',

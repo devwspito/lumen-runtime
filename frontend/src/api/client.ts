@@ -61,6 +61,8 @@ import type {
   HostVerb,
   InstallRequestResponse,
   InstallRequestsListResponse,
+  VersionSet,
+  UpdatePiece,
 } from './types'
 
 // Mirrors the timeout strategy in vanilla api.js: snappy GETs fail fast;
@@ -1035,11 +1037,20 @@ export function getInstanceFeatures(): Promise<InstanceFeatures> {
 
 // ── System update ─────────────────────────────────────────────────────────────
 
+// Rich shape per contracts/update.md §3 — "current_version", "latest_version" and
+// "update_available" are the pre-028 fields (conserved for back-compat: expandir
+// → contraer, never a hard cutover); "current"/"to"/"pieces"/"checked_at" mirror
+// the window.__safentUpdate object the Tauri host shell injects once it has
+// actually checked (the daemon's own check can be blocked by the egress cage).
 export interface SystemUpdateStatus {
   current_version: string
   latest_version: string | null
   update_available: boolean
   updating: boolean
+  current?: VersionSet
+  to?: VersionSet
+  pieces?: UpdatePiece[]
+  checked_at?: string
 }
 
 /** Falls back to a "nothing to see here" shape so a transient failure never surfaces a false update prompt. */
@@ -1050,11 +1061,6 @@ export function getSystemUpdate(): Promise<SystemUpdateStatus> {
     update_available: false,
     updating: false,
   }))
-}
-
-/** Drops a marker for the host agent to pick up; it applies the update and the container recreates on its own. */
-export function requestSystemUpdate(): Promise<{ ok: boolean; updating: boolean }> {
-  return request('/system/update', { method: 'POST', body: JSON.stringify({}) })
 }
 
 /** Drops an uninstall marker; the host `safent agent` runs `safent uninstall` (removes the

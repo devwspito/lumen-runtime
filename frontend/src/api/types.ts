@@ -747,3 +747,27 @@ export interface InstallRequestResponse {
 export interface InstallRequestsListResponse {
   requests: InstallRequestStatus[]
 }
+
+// ── System update (028, contracts/update.md) ───────────────────────────────────
+
+export interface VersionSet {
+  app: string
+  engine: string
+  companion: string | null
+}
+
+export type UpdatePieceKind = 'app' | 'engine' | 'companion'
+
+export interface UpdatePiece {
+  kind: UpdatePieceKind
+  size_bytes?: number
+}
+
+/** The rich shape the Tauri host shell injects once it has checked for real (contract §3). */
+export interface SafentUpdateGlobal {
+  available: boolean
+  current: VersionSet
+  to?: VersionSet
+  pieces?: UpdatePiece[]
+  checked_at: string
+}
