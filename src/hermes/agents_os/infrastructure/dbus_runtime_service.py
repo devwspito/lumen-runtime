@@ -4765,8 +4765,10 @@ class DbusRuntimeServiceWiring:
     def delete_memory_entry(self, *, entry_id: str, sender_uid: int) -> dict:
         """Olvida (borra) una entrada de memoria por su id compuesto '{target}:{index}'.
 
-        Operación idempotente: si la entrada ya no existe devuelve {ok: true}
-        (sin lanzar) para que el frontend pueda hacer DELETE seguro.
+        Si la entrada no existe (nunca existió o ya se borró — no hay
+        tombstone, es el mismo estado) devuelve {ok:false, code:"not_found"}
+        para que la capa REST responda 404, igual que GET/PUT sobre el mismo
+        id (specs/025-safent-repaso MEM-06).
         PII: el contenido NUNCA se loguea, sólo el target e índice (metadatos).
         authZ: operador (sender_uid).
         """
@@ -4806,8 +4808,14 @@ class DbusRuntimeServiceWiring:
             return {"ok": False, "error": f"cannot read target {target!r}: {exc}"}
 
         if entry_index >= len(entries):
-            # Idempotent: already gone.
-            return {"ok": True, "deleted": False, "reason": "entry not found (already removed)"}
+            # specs/025-safent-repaso MEM-06: this used to be treated as
+            # idempotent-success ({ok:true, deleted:false}) — but there is no
+            # tombstone here (removal just shrinks the list), so "never
+            # existed" and "already removed" are the SAME state and both must
+            # read as not-found, matching GET (404) and PUT (400) for the
+            # same id instead of silently reporting a delete that never
+            # happened as a success.
+            return {"ok": False, "code": "not_found", "error": "memory entry not found"}
 
         old_text = entries[entry_index]
         result = store.remove(target, old_text)

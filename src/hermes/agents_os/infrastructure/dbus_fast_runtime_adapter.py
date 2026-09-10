@@ -1558,7 +1558,8 @@ class Runtime1ServiceInterface(ServiceInterface):
     async def ForgetMemoryEntry(self, entry_id: "s") -> "s":  # noqa: N802,F821,UP037
         """Olvida (borra) una entrada de memoria por su id '{target}:{index}'.
 
-        Idempotente: devuelve {ok:true} aunque la entrada ya haya sido borrada.
+        {ok:false, code:"not_found"} si la entrada no existe (nunca existió o
+        ya se borró) — la capa REST lo traduce a 404.
         authZ: operador (sender_uid del bus, CWE-862).
         PII: el contenido NUNCA cruza el bus ni se loguea.
         """
