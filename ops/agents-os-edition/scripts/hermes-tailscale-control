@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # hermes-tailscale-control — privileged root oneshot that connects/disconnects the
-# governed tailnet on behalf of the shell-server (User=hermes) and refreshes the
-# names-only status the egress lane reads.
+# governed tailnet on behalf of the shell-server (User=hermes).
 #
 # Triggered by hermes-tailscale-control.path watching
 # /run/hermes/tailscale-control/request.json (0700 hermes:hermes — the DAEMON
@@ -9,27 +8,34 @@
 #
 # This script MUST run as root (hermes-tailscale-control.service).
 #
-# Contract (staged JSON, written atomically by the shell-server, mirrors
-# remote_access_tunnel/api.py's _write_staged_request exactly):
-#   {"action": "connect",    "password": "<device password>", "auth_key": "tskey-auth-..."}
+# Contract: specs/022-tailnet-connectivity/contracts.md §3 (binding — the egress
+# lane's shell_server/tailnet/api.py is already implemented against this exact
+# shape). Staged JSON, written atomically by the shell-server:
+#   {"action": "connect",    "auth_key": "tskey-auth-..."}
 #   {"action": "disconnect", "password": "<device password>"}
-#   {"action": "status"}
 #
 # Security invariants (spec 022):
-#   - The auth key NEVER touches argv/env/Environment=/git/logs. It is staged by
-#     the daemon into the 0600 request file, read here, written to a FRESH
-#     0600 root-owned tmpfs file (AUTHKEY_FILE) so `tailscale up --auth-key=
-#     file:<path>` can read it, then shredded in a finally block — win or lose.
-#   - connect/disconnect both require the SAME device-password PAM gate as
-#     hermes-remote-access-control (ONE password, verified ONE way — plan.md
-#     "Auth key custody"). status is read-only, no gate.
-#   - status.json carries NAMES ONLY (MagicDNS suffix, node DNS name, backend
-#     state) — never a key, never raw IPs.
-#   - The staged request file is shredded in main()'s finally block whether
-#     the action succeeds, fails, or the JSON fails to parse.
-#   - The agent (hermes-sandbox) cannot reach this: /run/hermes/tailscale-control
-#     is 0700 hermes:hermes, and hermes-runtime.service's InaccessiblePaths keeps
-#     the agent out of hermes's own runtime dirs (same isolation as remote-control).
+#   - connect needs ONLY a valid auth_key — pasting a real Tailscale key IS the
+#     authorization (contracts.md §3.1/§6: POST /connect body is {auth_key}, no
+#     password field). disconnect DOES require the device-password PAM gate
+#     (contracts.md §3.2 — same ONE password, same ONE way, as
+#     hermes-remote-access-control).
+#   - The staged file is read then IMMEDIATELY shredded (contracts.md §3.1 step
+#     1) — before any privileged action is attempted, not after, so the raw
+#     auth_key never lingers on disk for the duration of `tailscale up`'s retries.
+#   - The auth key NEVER touches argv/env/Environment=/git/logs. It is written to
+#     a FRESH 0600 file under this unit's OWN PrivateTmp=yes (never back into the
+#     shared /run/hermes/tailscale — contracts.md §3.1 step 2) so
+#     `tailscale up --auth-key=file:<path>` can read it, then shredded in a
+#     finally block — win or lose.
+#   - status.json is NOT this script's job — the low-privilege
+#     hermes-tailscale-status-watcher owns it (contracts.md §2/§7). This script
+#     only removes it on disconnect so a reader never sees a stale "online: true"
+#     for a tailnet that was just deliberately left.
+#   - The agent (hermes-sandbox) cannot reach any of this: /run/hermes/tailscale-
+#     control is 0700 hermes:hermes, and hermes-runtime.service's InaccessiblePaths
+#     keeps the agent out of hermes's own runtime dirs (same isolation as
+#     remote-control).
 
 from __future__ import annotations
 
@@ -42,7 +48,6 @@ import stat
 import subprocess
 import sys
 import time
-from datetime import UTC, datetime
 from pathlib import Path
 
 logging.basicConfig(
@@ -66,9 +71,15 @@ RUNTIME_DIR = Path(os.environ.get("HERMES_TAILSCALE_RUNTIME_DIR", "/run/hermes/t
 STATE_DIR = Path(os.environ.get("HERMES_TAILSCALE_STATE_DIR", "/var/lib/hermes/tailscale"))
 
 TS_SOCKET = Path(os.environ.get("HERMES_TAILSCALE_SOCKET", str(RUNTIME_DIR / "tailscaled.sock")))
-AUTHKEY_FILE = RUNTIME_DIR / "authkey"
 STATUS_FILE = RUNTIME_DIR / "status.json"
 ENABLED_MARKER = STATE_DIR / "enabled"
+
+# Private tmp location the helper itself controls (contracts.md §3.1 step 2) —
+# under PrivateTmp=yes this /tmp is a fresh, isolated mount, invisible to every
+# other process on the host (root included) once the unit exits. NEVER
+# /run/hermes/tailscale (shared, readable-by-path since it went 0711 for
+# status.json — contracts.md §2).
+AUTHKEY_FILE = Path(os.environ.get("HERMES_TAILSCALE_AUTHKEY_PATH", "/tmp/hermes-tailscale-authkey"))
 
 _TS_BIN = os.environ.get("HERMES_TAILSCALE_BIN", "tailscale")
 _TAILSCALED_UNIT = "hermes-tailscaled.service"
@@ -78,7 +89,7 @@ _TAILSCALED_UNIT = "hermes-tailscaled.service"
 LOGIN_USER = "hermes-user"
 
 _EXPECTED_FILE_MODE = 0o600
-_KNOWN_ACTIONS = frozenset({"connect", "disconnect", "status"})
+_KNOWN_ACTIONS = frozenset({"connect", "disconnect"})
 _AUTH_KEY_MAX_LEN = 512
 
 # `tailscale up` races the .path -> .service start of tailscaled: retry with
@@ -87,7 +98,6 @@ _UP_MAX_ATTEMPTS = 5
 _UP_BASE_DELAY = 0.5
 _UP_MAX_DELAY = 4.0
 _UP_SUBPROCESS_TIMEOUT = 15.0
-_STATUS_SUBPROCESS_TIMEOUT = 10.0
 _LOGOUT_SUBPROCESS_TIMEOUT = 15.0
 
 
@@ -170,12 +180,12 @@ def _shred(path: Path) -> None:
 
 
 def _write_authkey_file(auth_key: str) -> None:
-    """Write the raw key to a FRESH 0600 root-owned tmpfs file for `--auth-key=file:`.
+    """Write the raw key to a FRESH 0600 file under this unit's OWN PrivateTmp.
 
-    Never the staged request file itself — a dedicated, minimal-lifetime copy that
-    is shredded the instant `tailscale up` returns (success or failure).
+    A dedicated, minimal-lifetime copy — shredded the instant `tailscale up`
+    returns (success or failure). Never the shared /run/hermes/tailscale.
     """
-    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    AUTHKEY_FILE.parent.mkdir(parents=True, exist_ok=True)
     tmp = AUTHKEY_FILE.with_suffix(".tmp")
     fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
     try:
@@ -194,19 +204,6 @@ def _write_enabled_marker() -> None:
     tmp.write_text("1\n", encoding="utf-8")
     os.chmod(tmp, 0o644)
     tmp.rename(ENABLED_MARKER)
-
-
-def _now_iso() -> str:
-    return datetime.now(tz=UTC).isoformat()
-
-
-def _write_status_json(payload: dict) -> None:
-    """Atomic write, 0644 — readable by the host-netns egress lane. Names only."""
-    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = STATUS_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-    os.chmod(tmp, 0o644)
-    tmp.rename(STATUS_FILE)
 
 
 # --------------------------------------------------------------------------
@@ -239,7 +236,7 @@ def _verify_password_pam(username: str, password: str) -> bool:
     if not _account_has_real_password(username):
         logger.warning(
             "cuenta %s sin contraseña válida (passwordless/locked) — "
-            "gate de conexión FAIL-CLOSED (configura una en el onboarding)",
+            "gate de desconexión FAIL-CLOSED (configura una en el onboarding)",
             username,
         )
         return False
@@ -332,35 +329,8 @@ def _tailscale_up_with_retry() -> bool:
     return False
 
 
-def _refresh_status() -> None:
-    """Refresh status.json from `tailscale status --json` — names/online only, never keys."""
-    payload: dict = {"connected": False, "backend_state": "Unknown", "updated_at": _now_iso()}
-    result = _run_tailscale(["status", "--json"], timeout=_STATUS_SUBPROCESS_TIMEOUT)
-    if result is not None and result.returncode == 0:
-        try:
-            data = json.loads(result.stdout)
-        except (json.JSONDecodeError, TypeError):
-            data = {}
-        if isinstance(data, dict):
-            backend_state = data.get("BackendState")
-            if isinstance(backend_state, str) and backend_state:
-                payload["backend_state"] = backend_state
-                payload["connected"] = backend_state == "Running"
-            self_info = data.get("Self")
-            if isinstance(self_info, dict):
-                dns_name = self_info.get("DNSName")
-                if isinstance(dns_name, str) and dns_name:
-                    payload["node_name"] = dns_name.rstrip(".")
-            tailnet_info = data.get("CurrentTailnet")
-            if isinstance(tailnet_info, dict):
-                suffix = tailnet_info.get("MagicDNSSuffix")
-                if isinstance(suffix, str) and suffix:
-                    payload["magicdns_suffix"] = suffix
-    _write_status_json(payload)
-
-
 # --------------------------------------------------------------------------
-# Actions
+# Actions (contracts.md §3.1 / §3.2)
 # --------------------------------------------------------------------------
 
 
@@ -375,13 +345,12 @@ def _connect(staged: dict) -> bool:
         logger.error("connect action: auth_key field missing or invalid — aborting")
         return False
 
-    _write_enabled_marker()
     _write_authkey_file(auth_key)
     try:
+        _write_enabled_marker()
         ok = _tailscale_up_with_retry()
     finally:
         _shred(AUTHKEY_FILE)
-    _refresh_status()
     if ok:
         logger.info("tailnet connect: tailscale up succeeded")
     else:
@@ -393,7 +362,11 @@ def _disconnect() -> bool:
     _run_tailscale(["logout"], timeout=_LOGOUT_SUBPROCESS_TIMEOUT)
     ENABLED_MARKER.unlink(missing_ok=True)
     ok = _systemctl(["stop", _TAILSCALED_UNIT])
-    _refresh_status()
+    # The status watcher is BindsTo=hermes-tailscaled.service and dies with it —
+    # it never gets a last tick to report "offline". Remove status.json directly
+    # so a reader sees "missing -> not configured" immediately, not a stale
+    # "online: true" until some future reconnect overwrites it.
+    STATUS_FILE.unlink(missing_ok=True)
     if ok:
         logger.info("tailnet disconnect: stopped %s", _TAILSCALED_UNIT)
     return ok
@@ -413,24 +386,24 @@ def _apply(staged: dict) -> int:
         )
         return 1
 
-    if action == "status":
-        _refresh_status()
-        return 0
+    if action == "connect":
+        # No password gate: a valid Tailscale auth_key IS the authorization
+        # (contracts.md §3.1/§6 — POST /connect body is {auth_key} only).
+        return 0 if _connect(staged) else 1
 
-    # connect / disconnect both mutate state — same device-password PAM gate
-    # everywhere (plan.md open question, answered: yes).
+    # disconnect mutates state away from a tailnet the owner is actively on —
+    # same device-password PAM gate as hermes-remote-access-control.
     password = staged.get("password", "")
     if not isinstance(password, str) or not password:
-        logger.error("%s action: password field missing or empty — aborting", action)
+        logger.error("disconnect action: password field missing or empty — aborting")
         return 1
 
     if not _verify_password_pam(LOGIN_USER, password):
-        logger.warning("%s action: PAM verification FAILED for user '%s' — aborting", action, LOGIN_USER)
+        logger.warning("disconnect action: PAM verification FAILED for user '%s' — aborting", LOGIN_USER)
         return 1
 
-    logger.info("%s action: PAM verification passed", action)
-    ok = _connect(staged) if action == "connect" else _disconnect()
-    return 0 if ok else 1
+    logger.info("disconnect action: PAM verification passed")
+    return 0 if _disconnect() else 1
 
 
 def main() -> int:
@@ -449,11 +422,12 @@ def main() -> int:
         _shred(STAGE_FILE)
         return 1
 
-    try:
-        return _apply(staged)
-    finally:
-        # Always shred — the auth_key field (if present) must not persist on disk.
-        _shred(STAGE_FILE)
+    # Shred IMMEDIATELY after a successful read (contracts.md §3.1 step 1) —
+    # before any privileged action is attempted, so the raw auth_key/password
+    # never lingers on disk for the duration of `tailscale up`'s retries.
+    _shred(STAGE_FILE)
+
+    return _apply(staged)
 
 
 if __name__ == "__main__":

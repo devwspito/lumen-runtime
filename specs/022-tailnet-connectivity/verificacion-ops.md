@@ -177,8 +177,104 @@ prueba (loopback del host, igual que `run-safent.sh` en producción).
   (excluido explícitamente de este encargo) — no se tocó ni se verificó aquí.
 - `100.64.0.0/10` solo verificado por texto de regla, no por una IP tailnet real
   asignada (requiere login real, alcance del owner).
-- El flujo `connect` de éxito (con clave real y contraseña real) no se pudo
-  ejercitar end-to-end en el sistema real (requiere onboarding + clave `tskey-auth-`
-  del owner) — cubierto en cambio por `tests/unit/ops/test_tailscale_control.py`
-  con un binario `tailscale` falso que prueba exactamente las mismas propiedades
-  (flag `--auth-key=file:`, fichero destruido, status.json sin claves).
+- El flujo `connect` de éxito (con clave real) no se pudo ejercitar end-to-end en
+  el sistema real (requiere una clave `tskey-auth-` real del owner) — cubierto en
+  cambio por `tests/unit/ops/test_tailscale_control.py` con un binario `tailscale`
+  falso que prueba exactamente las mismas propiedades (flag `--auth-key=file:`,
+  fichero destruido, sin secreto en argv/log).
+
+---
+
+## Addendum — corrección de contrato cruzado (misma sesión, tras la 1ª pasada)
+
+Durante la verificación, la lane egress-proxy (rama `tailnet-egress`, ya con su
+lado implementado) fijó `specs/022-tailnet-connectivity/contracts.md` — el
+contrato vinculante entre lanes. Dos diferencias frente al diseño inicial de
+esta lane, corregidas ANTES de dar la tarea por cerrada (no quedan como deuda):
+
+1. **`connect` NO lleva contraseña de dispositivo** (solo `{"action":"connect",
+   "auth_key":...}` — contracts.md §3.1/§6): pegar una clave real de Tailscale
+   YA es la autorización. `disconnect` SÍ la lleva (§3.2, igual que
+   `hermes-remote-access-control`). Se retiró la acción `status` del script de
+   control (ya no forma parte del contrato) y se movió el shred del staged file
+   a INMEDIATAMENTE después de leerlo — antes de intentar nada privilegiado, no
+   al final — para no dejar la clave en `/run/hermes/tailscale-control/` durante
+   los reintentos de `tailscale up`.
+2. **`/run/hermes/tailscale` pasa de 0700 a 0711** (contracts.md §2 REQUIRED
+   CHANGE): a 0700 ningún otro uid puede ni siquiera atravesar el directorio,
+   así que el shell-server (`hermes`) y el egress-proxy (`hermes-egress`) no
+   podían leer `status.json` sin importar el modo del propio fichero.
+3. **`status.json` deja de ser cosa del script de control** — pasa a un sidecar
+   NUEVO de baja privilegio (`hermes-tailscale-status-watcher`, `User=hermes-
+   tailscale`, `BindsTo=hermes-tailscaled.service`) que hace polling de
+   `tailscale status --json` cada ~20s y escribe el esquema exacto del
+   contrato (`node_name`, `magicdns_suffix`, `tailnet`, `online`, `peers`). El
+   script de control solo BORRA `status.json` al desconectar (el watcher muere
+   CON tailscaled — `BindsTo` — y nunca tendría un último tick para reportar
+   "offline").
+4. La clave efímera para `--auth-key=file:` deja de escribirse en
+   `/run/hermes/tailscale` (ahora 0711, legible por más uids) y pasa a vivir
+   bajo el `PrivateTmp=yes` PROPIO del unit (`/tmp/hermes-tailscale-authkey`,
+   invisible fuera de ese mount namespace incluso para otro proceso root).
+
+### Ficheros añadidos/cambiados por la corrección
+
+- `ops/agents-os-edition/tmpfiles/hermes.conf` — `/run/hermes/tailscale` 0700→0711.
+- `ops/agents-os-edition/scripts/hermes-tailscale-control` — reescrito: sin acción
+  `status`, `connect` sin password, shred inmediato, authkey bajo PrivateTmp.
+- `ops/agents-os-edition/scripts/hermes-tailscale-status-watcher` (NUEVO).
+- `ops/agents-os-edition/systemd/hermes-tailscale-status-watcher.service` (NUEVO).
+- `ops/agents-os-edition/systemd/hermes-tailscaled.service` — `Wants=hermes-
+  tailscale-status-watcher.service`.
+- `ops/container/Containerfile` — COPY del watcher + (encargo aparte del
+  coordinador) `openssh-client` en el `apt-get install` de la línea ~36 para la
+  lane `tailnet-ssh` (v2, `ssh` ProxyCommand sobre el SOCKS5 de tailscaled; sin
+  netcat, el ProxyCommand es Python puro). Capa de paquetes reconstruida
+  (invalida cache aguas abajo, sin cambiar el orden de capas).
+
+### Segunda pasada completa (imagen reconstruida desde cero, mismo protocolo aislado)
+
+- **tmpfiles aplicados correctamente en el contenedor**: `/run/hermes/tailscale`
+  → `711 hermes-tailscale:hermes-tailscale` (confirmado con `stat`).
+- **`status.json` real, escrito por el watcher, esquema exacto del contrato**:
+  ```json
+  {"magicdns_suffix": "", "node_name": "1abad3bcfadb", "online": false, "peers": [], "tailnet": ""}
+  ```
+  (`node_name` cae al hostname de la máquina — comportamiento real de tailscaled
+  antes de cualquier login, confirma el fallback `HostName`→`DNSName` contra
+  datos REALES, no solo mockeados.)
+- **Legible por los DOS uids lectores sin ser dueños del directorio**:
+  `podman exec --user hermes cat status.json` → rc=0; `--user hermes-egress` →
+  rc=0. **`ls` del directorio sigue denegado** para esos mismos uids
+  (`Permission denied` — 0711 = solo tránsito a ruta conocida, nunca listado).
+- **El watcher arranca solo, tirado por `Wants=` de `hermes-tailscaled.service`**
+  (nunca `systemctl enable`d por separado — confirmado `Loaded: ... static`).
+- **`connect` sin contraseña, con clave falsa bien formada**: el helper reintentó
+  `tailscale up` 5 veces (dos de ellas agotaron el timeout de 15s — una clave
+  con forma válida pero falsa hace que tailscaled intente hablar de verdad con
+  el control-plane de Tailscale antes de rechazarla, a diferencia de una
+  contraseña PAM que falla al instante en local) y terminó `Failed` tras
+  agotar los reintentos — comportamiento correcto y observable, sin
+  intervención manual. El fichero `authkey` efímero (bajo `PrivateTmp`) quedó
+  destruido tanto durante como después del intento (`find` global sin
+  resultados). Cero apariciones de la clave falsa en el journal completo.
+- **`disconnect` con contraseña incorrecta (cuenta sin contraseña real en esta
+  instancia efímera → fail-closed, mismo invariante que antes)**: rechazado
+  antes de tocar `status.json`/marker/watcher — los tres quedaron intactos
+  (`hermes-tailscaled.service` y el watcher siguieron `active`). Cero
+  apariciones de la contraseña falsa en el journal completo.
+- **RED-TEAM invariant (ítem 2) repetido contra la imagen reconstruida**: las
+  4 combinaciones (2 netns × 2 puertos) siguen en `Connection refused`.
+- **Teardown limpio** de nuevo (`podman ps -a` / `volume ls` vacíos).
+
+### Resumen actualizado frente al contrato
+
+| Punto del contrato (contracts.md) | Resultado |
+|---|---|
+| §2 `/run/hermes/tailscale` 0711 + `status.json` legible por `hermes`/`hermes-egress` | PASA (verificado en vivo, no solo por permisos estáticos) |
+| §2 esquema exacto de `status.json` (nombres/online únicamente) | PASA (`status_document()` cubierto por 15 tests puros + 1 con binario real) |
+| §3.1 `connect` sin password, shred inmediato, authkey en `PrivateTmp` | PASA |
+| §3.2 `disconnect` PAM-gated, borra `status.json`, para el unit | PASA |
+| §4 forma del unit (capabilities, `RestrictAddressFamilies=AF_UNIX`, `PrivateTmp=yes`) | PASA |
+| §7 "el watcher de estado" como entregable propio de esta lane | PASA (sidecar nuevo, `BindsTo`, `User=hermes-tailscale`) |
+| `openssh-client` para la lane `tailnet-ssh` (encargo del coordinador) | PASA (`ssh -V` funciona en la imagen reconstruida) |

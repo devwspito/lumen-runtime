@@ -13,6 +13,10 @@
 Description=Hermes tailscaled (userspace tailnet egress — governed via the egress proxy)
 After=network-online.target
 Wants=network-online.target
+# Pull in the status-mirror sidecar together with tailscaled (it BindsTo= this
+# unit on its own side, so it stops the instant tailscaled does too — see
+# hermes-tailscale-status-watcher.service, contracts.md §2/§7).
+Wants=hermes-tailscale-status-watcher.service
 # Off until the owner opts in. systemd won't start a condition-skipped unit, so the
 # companion hermes-tailscaled.path is what makes opt-in take effect live (no reboot).
 ConditionPathExists=/var/lib/hermes/tailscale/enabled

@@ -35,13 +35,18 @@ _TAILSCALED_SERVICE = _SYSTEMD / "hermes-tailscaled.service"
 _TAILSCALED_PATH = _SYSTEMD / "hermes-tailscaled.path"
 _CONTROL_SERVICE = _SYSTEMD / "hermes-tailscale-control.service"
 _CONTROL_PATH = _SYSTEMD / "hermes-tailscale-control.path"
-_ALL_UNITS = [_TAILSCALED_SERVICE, _TAILSCALED_PATH, _CONTROL_SERVICE, _CONTROL_PATH]
+_WATCHER_SERVICE = _SYSTEMD / "hermes-tailscale-status-watcher.service"
+_ALL_UNITS = [_TAILSCALED_SERVICE, _TAILSCALED_PATH, _CONTROL_SERVICE, _CONTROL_PATH, _WATCHER_SERVICE]
+_SERVICE_UNITS = [_TAILSCALED_SERVICE, _CONTROL_SERVICE, _WATCHER_SERVICE]
+_PATH_UNITS = [_TAILSCALED_PATH, _CONTROL_PATH]
 
 _TAILSCALED_TEXT = _TAILSCALED_SERVICE.read_text(encoding="utf-8")
 _CONTROL_SERVICE_TEXT = _CONTROL_SERVICE.read_text(encoding="utf-8")
+_WATCHER_SERVICE_TEXT = _WATCHER_SERVICE.read_text(encoding="utf-8")
 _BROWSER_HOST_NFT = (_NETNS / "browser-host.nft").read_text(encoding="utf-8")
 _MCP_HOST_NFT = (_NETNS / "mcp-host.nft").read_text(encoding="utf-8")
 _CONTAINERFILE_TEXT = (_ROOT / "ops/container/Containerfile").read_text(encoding="utf-8")
+_TMPFILES_TEXT = (_ROOT / "ops/agents-os-edition/tmpfiles/hermes.conf").read_text(encoding="utf-8")
 
 # Golden-text (mirrors test_companion_nft_generation.py style): the EXACT
 # anti-pivot daddr set both host-side nft tables must keep, verbatim.
@@ -110,11 +115,11 @@ class TestStructuralFallback:
             if s.startswith("["):
                 assert s.endswith("]"), f"{unit.name}: malformed section header {s!r}"
 
-    @pytest.mark.parametrize("unit", [_TAILSCALED_SERVICE, _CONTROL_SERVICE], ids=lambda p: p.name)
+    @pytest.mark.parametrize("unit", _SERVICE_UNITS, ids=lambda p: p.name)
     def test_service_units_declare_exec_start(self, unit: Path) -> None:
         assert "ExecStart=" in unit.read_text(encoding="utf-8")
 
-    @pytest.mark.parametrize("unit", [_TAILSCALED_PATH, _CONTROL_PATH], ids=lambda p: p.name)
+    @pytest.mark.parametrize("unit", _PATH_UNITS, ids=lambda p: p.name)
     def test_path_units_declare_path_exists_and_unit(self, unit: Path) -> None:
         text = unit.read_text(encoding="utf-8")
         assert "PathExists=" in text
@@ -188,7 +193,7 @@ class TestTailscaleddHardeningPresent:
 class TestControlServiceHardeningPresent:
     @pytest.mark.parametrize(
         "line",
-        ["ProtectSystem=strict", "RestrictAddressFamilies=AF_UNIX"],
+        ["ProtectSystem=strict", "RestrictAddressFamilies=AF_UNIX", "PrivateTmp=yes"],
     )
     def test_directive_present_verbatim(self, line: str) -> None:
         assert _exact_line(_CONTROL_SERVICE_TEXT, line)
@@ -205,6 +210,62 @@ class TestControlServiceHardeningPresent:
             "/var/lib/hermes/tailscale",
         ):
             assert path in rw_line, f"hermes-tailscale-control.service ReadWritePaths missing {path}"
+
+
+class TestStatusWatcherWiring:
+    """contracts.md §2/§7: a LOW-privilege sidecar owns status.json, bound to
+    tailscaled's own lifecycle (never independently enabled)."""
+
+    def test_tailscaled_wants_the_watcher(self) -> None:
+        assert _exact_line(_TAILSCALED_TEXT, "Wants=hermes-tailscale-status-watcher.service")
+
+    def test_watcher_binds_to_and_follows_tailscaled(self) -> None:
+        assert _exact_line(_WATCHER_SERVICE_TEXT, "BindsTo=hermes-tailscaled.service")
+        assert _exact_line(_WATCHER_SERVICE_TEXT, "After=hermes-tailscaled.service")
+
+    def test_watcher_runs_as_the_low_privilege_tailscale_uid_not_root(self) -> None:
+        assert _exact_line(_WATCHER_SERVICE_TEXT, "User=hermes-tailscale")
+        assert _exact_line(_WATCHER_SERVICE_TEXT, "Group=hermes-tailscale")
+
+    def test_watcher_has_zero_capabilities(self) -> None:
+        assert _exact_line(_WATCHER_SERVICE_TEXT, "CapabilityBoundingSet=")
+
+    def test_watcher_never_independently_enabled(self) -> None:
+        assert not _exact_line(_WATCHER_SERVICE_TEXT, "[Install]")
+
+    def test_watcher_cannot_read_the_control_staging_dir(self) -> None:
+        """Least privilege: the watcher only ever reads tailscaled's own state —
+        it has no business anywhere near the daemon's connect/disconnect staging."""
+        inaccessible = next(
+            line for line in _WATCHER_SERVICE_TEXT.splitlines() if line.startswith("InaccessiblePaths=")
+        )
+        assert "/run/hermes/tailscale-control" in inaccessible
+
+
+class TestTmpfilesStatusJsonDirIsTraversable:
+    """contracts.md §2 REQUIRED CHANGE: 0700 blocks traversal for every uid but
+    the owner — status.json would be unreachable by the shell-server/egress-proxy
+    no matter its own file mode. 0711 = owner rwx, execute-only for everyone else
+    (traversal of a KNOWN path only — no readdir, no write)."""
+
+    def test_run_hermes_tailscale_dir_is_0711(self) -> None:
+        line = next(
+            raw
+            for raw in _TMPFILES_TEXT.splitlines()
+            if raw.split()[:2] == ["d", "/run/hermes/tailscale"]
+        )
+        fields = line.split()
+        assert fields[2] == "0711", f"expected mode 0711, got {fields[2]!r} in: {line!r}"
+
+    def test_control_staging_dir_stays_0700(self) -> None:
+        """Only the tailscale dir relaxed — the control staging dir (which holds
+        the raw auth_key/password briefly) must stay owner-only."""
+        line = next(
+            raw
+            for raw in _TMPFILES_TEXT.splitlines()
+            if raw.split()[:2] == ["d", "/run/hermes/tailscale-control"]
+        )
+        assert line.split()[2] == "0700"
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +310,12 @@ class TestContainerfileBakesAndEnablesTailnetControl:
             "scripts/hermes-tailscale-control /usr/libexec/hermes/hermes-tailscale-control"
             in _CONTAINERFILE_TEXT
         ), "the script ships in ops/ but is never baked into the image"
+
+    def test_status_watcher_script_is_copied_into_the_image(self) -> None:
+        assert (
+            "scripts/hermes-tailscale-status-watcher /usr/libexec/hermes/hermes-tailscale-status-watcher"
+            in _CONTAINERFILE_TEXT
+        ), "the status watcher ships in ops/ but is never baked into the image"
 
     def test_both_path_units_are_enabled_in_the_same_run_line(self) -> None:
         enable_line = next(
