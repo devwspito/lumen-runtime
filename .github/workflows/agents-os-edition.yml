@@ -59,8 +59,25 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install
+        # hermes-agent==0.21.1 (pyproject.toml Requires-Dist) is NOT on PyPI (max
+        # published is 0.19.0) — `pip install -e .` alone 404s and this job has been
+        # red since 2026-07-10. hermes-agent only ships as a GitHub source tarball,
+        # the SAME one ops/container/Containerfile installs into the runtime image.
+        # SINGLE SOURCE OF TRUTH for that pinned commit: repo-root
+        # `ops/hermes-agent.lock` (one line, the commit SHA) — read here AND by the
+        # Containerfile, never duplicated. Install it editable FIRST (upstream's
+        # setup.py refuses bdist_wheel/sdist outside Nix; editable is the supported
+        # path — mirrors the Containerfile comment above `HERMES_AGENT_SRC`), so its
+        # dist reports 0.21.1 and `pip install -e .` finds the pin already satisfied
+        # instead of resolving it from PyPI.
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
+          HERMES_AGENT_COMMIT="$(tr -d ' \t\n\r' < ops/hermes-agent.lock)"
+          mkdir -p /tmp/hermes-agent-src
+          curl -fsSL "https://github.com/NousResearch/hermes-agent/archive/${HERMES_AGENT_COMMIT}.tar.gz" \
+            | tar -xz --strip-components=1 -C /tmp/hermes-agent-src
+          pip install -e /tmp/hermes-agent-src
           pip install -e . pytest pytest-asyncio cryptography
         # Enterprise paths (config_sync applier/delegation/remote-approval, pairing/
         # association/license, capabilities/access_scope, jail hardening) were NOT in
@@ -81,8 +98,17 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
-      - run: |
+      - name: Install
+        # Same pinned hermes-agent tarball as the unit-tests job above — see the
+        # comment there. Single source of truth: ops/hermes-agent.lock.
+        run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
+          HERMES_AGENT_COMMIT="$(tr -d ' \t\n\r' < ops/hermes-agent.lock)"
+          mkdir -p /tmp/hermes-agent-src
+          curl -fsSL "https://github.com/NousResearch/hermes-agent/archive/${HERMES_AGENT_COMMIT}.tar.gz" \
+            | tar -xz --strip-components=1 -C /tmp/hermes-agent-src
+          pip install -e /tmp/hermes-agent-src
           pip install -e . pytest pytest-asyncio cryptography
       - run: pytest tests/integration/agents_os/ -m integration -q
 
