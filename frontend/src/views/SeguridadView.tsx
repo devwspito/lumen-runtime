@@ -51,6 +51,7 @@ import InboundDelegationCard from '../components/InboundDelegationCard'
 import MfaEnroll from '../components/MfaEnroll'
 import MfaModal from '../components/MfaModal'
 import type { MfaFactors } from '../components/MfaModal'
+import DevicePasswordModal from '../components/DevicePasswordModal'
 import { Button } from '../components/ui/Button'
 import { PageHeader } from '../components/ui/PageHeader'
 import { EmptyState } from '../components/ui/EmptyState'
@@ -1685,12 +1686,17 @@ function SecurityCenterSection() {
  * bearer (one click, it's a brake); releasing is a sovereign action gated by
  * MfaModal/TOTP, same pattern as EgressSection's mode toggle above.
  */
-function KillSwitchSection() {
+export function KillSwitchSection() {
   const t = useT()
   const [status, setStatus] = useState<KillSwitchStatus | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [confirmRelease, setConfirmRelease] = useState(false)
+  // 025 hallazgo C: release needs TOTP when MFA is enrolled, the device
+  // password otherwise (sovereign fallback — a brake engaged before the
+  // owner ever enrolled TOTP used to have NO release path at all). null
+  // while loading = don't show the wrong dialog for a beat.
+  const [mfaEnrolled, setMfaEnrolled] = useState<boolean | null>(null)
 
   const load = useCallback(async () => {
     const res = await getKillSwitch()
@@ -1699,6 +1705,9 @@ function KillSwitchSection() {
   }, [])
 
   useEffect(() => { void load() }, [load])
+  useEffect(() => {
+    mfaStatus().then(s => setMfaEnrolled(!!s.enrolled)).catch(() => setMfaEnrolled(false))
+  }, [])
 
   async function handleEngage() {
     setBusy(true)
@@ -1713,11 +1722,11 @@ function KillSwitchSection() {
     }
   }
 
-  async function handleReleaseSign(factors: MfaFactors) {
+  async function handleReleaseWith(proof: { totp: string } | { devicePassword: string }) {
     setConfirmRelease(false)
     setBusy(true)
     try {
-      await releaseKillSwitch(factors.totp)
+      await releaseKillSwitch(proof)
       sileo.success({ title: tNew(t, 'seg.killswitch.released.ok', 'Freno de emergencia liberado') })
       await load()
     } catch (err) {
@@ -1728,15 +1737,30 @@ function KillSwitchSection() {
   }
 
   const engaged = !!status?.engaged
+  const releaseLabel = mfaEnrolled === false
+    ? tNew(t, 'seg.killswitch.release.password', 'Liberar (requiere contraseña del dispositivo)')
+    : tNew(t, 'seg.killswitch.release', 'Liberar (requiere TOTP)')
 
   return (
     <section className="cv-section" aria-label={tNew(t, 'seg.killswitch.label', 'Freno de emergencia')}>
       <div className={s.sectionLabel}>{tNew(t, 'seg.killswitch.label', 'Freno de emergencia')}</div>
 
-      {confirmRelease && (
+      {confirmRelease && mfaEnrolled === false && (
+        <DevicePasswordModal
+          title={tNew(t, 'seg.killswitch.release.title', 'Liberar el freno de emergencia')}
+          description={tNew(
+            t,
+            'seg.killswitch.release.password_hint',
+            'El MFA no está configurado en esta instancia — libera el freno con la contraseña de tu dispositivo.',
+          )}
+          onSign={password => { void handleReleaseWith({ devicePassword: password }) }}
+          onCancel={() => setConfirmRelease(false)}
+        />
+      )}
+      {confirmRelease && mfaEnrolled !== false && (
         <MfaModal
           title={tNew(t, 'seg.killswitch.release.title', 'Liberar el freno de emergencia')}
-          onSign={handleReleaseSign}
+          onSign={factors => { void handleReleaseWith({ totp: factors.totp }) }}
           onCancel={() => setConfirmRelease(false)}
         />
       )}
@@ -1762,7 +1786,7 @@ function KillSwitchSection() {
               </span>
             </div>
             <Button variant="secondary" size="sm" loading={busy} onClick={() => setConfirmRelease(true)}>
-              {tNew(t, 'seg.killswitch.release', 'Liberar (requiere TOTP)')}
+              {releaseLabel}
             </Button>
           </div>
         ) : (

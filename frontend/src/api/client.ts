@@ -790,11 +790,20 @@ export function engageKillSwitch(reason: string): Promise<unknown> {
   })
 }
 
-/** Release the brake — requires the owner's TOTP (sovereign action). */
-export function releaseKillSwitch(totp: string): Promise<unknown> {
+/**
+ * Release the brake — requires owner proof: the TOTP when MFA is enrolled,
+ * or (025 hallazgo C) the device password when it isn't — same PAM
+ * root-helper path as disconnectTailnet. Pass whichever proof applies; the
+ * caller decides based on getMfaStatus().enrolled.
+ */
+export function releaseKillSwitch(proof: { totp: string } | { devicePassword: string }): Promise<unknown> {
+  const body =
+    'totp' in proof
+      ? { engaged: false, totp: proof.totp }
+      : { engaged: false, device_password: proof.devicePassword }
   return request<unknown>('/security/kill-switch', {
     method: 'POST',
-    body: JSON.stringify({ engaged: false, totp }),
+    body: JSON.stringify(body),
   })
 }
 
