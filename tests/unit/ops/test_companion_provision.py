@@ -333,6 +333,7 @@ class TestSecondRunIsIdempotent:
         vendor_env.write_text(
             "# owner-provided vendor credentials\n"
             "GOOGLE_ADS_CLIENT_ID=vendor-client-id\n"
+            "GOOGLE_ADS_UNKNOWN=must-not-be-copied\n"
             "META_APP_ID=vendor-meta-app-id\n"
         )
         vendor_env.chmod(0o600)
@@ -341,6 +342,7 @@ class TestSecondRunIsIdempotent:
         assert second.returncode == 0, second.stderr
         broker_env_after_merge = (state_dir / "secrets" / "broker.env").read_text()
         assert "GOOGLE_ADS_CLIENT_ID=vendor-client-id" in broker_env_after_merge
+        assert "GOOGLE_ADS_UNKNOWN" not in broker_env_after_merge
         assert "META_APP_ID=vendor-meta-app-id" in broker_env_after_merge
         hash_after_merge = hashlib.sha256(
             (state_dir / "secrets" / "broker.env").read_bytes()
