@@ -357,3 +357,94 @@ class TestAgentTick:
         log = podman_log.read_text()
         assert "companion_reload_cli" not in log
         assert "compose " not in log or "up" not in log
+
+
+# =============================================================================
+# Desktop integration requirement: the desktop adapter treats >15s without an
+# NDJSON event as a stall and fails the bootstrap. `_run_with_heartbeat`
+# (T016) is what stands between a multi-minute image pull and that watchdog —
+# this proves it end to end through `safent companion install --porcelain`
+# against a `podman pull` that genuinely takes long enough to matter, not
+# just a fast fake that never exercises the heartbeat loop for real.
+# =============================================================================
+
+_FAKE_PODMAN_SLOW_PULL = _FAKE_PODMAN.replace(
+    "  pull) exit 0 ;;\n",
+    "  image)\n"
+    '    [ "$2" = "inspect" ] && exit 1  # never "already local" -> ensure_image must pull\n'
+    "    exit 0\n"
+    "    ;;\n"
+    "  pull)\n"
+    '    _slept=0\n'
+    '    while [ "$_slept" -lt "${FAKE_PULL_SLEEP_S:-0}" ]; do sleep 1; _slept=$((_slept + 1)); done\n'
+    "    exit 0\n"
+    "    ;;\n",
+)
+
+
+@pytest.fixture()
+def fake_bin_dir_slow_pull(tmp_path: Path) -> Path:
+    bin_dir = tmp_path / "fakebin-slow"
+    bin_dir.mkdir()
+    podman = bin_dir / "podman"
+    podman.write_text(_FAKE_PODMAN_SLOW_PULL)
+    podman.chmod(0o755)
+    curl = bin_dir / "curl"
+    curl.write_text(_FAKE_CURL)
+    curl.chmod(0o755)
+    return bin_dir
+
+
+class TestHeartbeatDuringASlowPull:
+    def test_progress_events_never_gap_more_than_five_seconds(
+        self, tmp_path: Path, fake_bin_dir_slow_pull: Path
+    ) -> None:
+        import json as _json  # noqa: PLC0415
+        import time as _time  # noqa: PLC0415
+
+        state_home = tmp_path / "state-home"
+        _seed_state_home(state_home)
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(tmp_path, fake_bin_dir_slow_pull, state_home, podman_log)
+        env["FAKE_PULL_SLEEP_S"] = "20"
+
+        started = _time.monotonic()
+        proc = subprocess.Popen(
+            ["sh", str(_SAFENT_CLI), "companion", "install", "--porcelain"],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        events: list[tuple[float, dict]] = []
+        assert proc.stdout is not None
+        try:
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                events.append((_time.monotonic() - started, _json.loads(line)))
+        finally:
+            proc.wait(timeout=60)
+
+        assert proc.returncode == 0, proc.stderr.read() if proc.stderr else ""
+        assert len(events) >= 2, "expected at least one heartbeat during the slow pull"
+
+        gaps = [events[i][0] - events[i - 1][0] for i in range(1, len(events))]
+        assert max(gaps) < 15.0, f"a gap of {max(gaps):.1f}s exceeds the desktop's 15s stall threshold: {gaps}"
+
+    def test_every_stdout_line_is_valid_json_even_during_the_slow_pull(
+        self, tmp_path: Path, fake_bin_dir_slow_pull: Path
+    ) -> None:
+        import json as _json  # noqa: PLC0415
+
+        state_home = tmp_path / "state-home"
+        _seed_state_home(state_home)
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(tmp_path, fake_bin_dir_slow_pull, state_home, podman_log)
+        env["FAKE_PULL_SLEEP_S"] = "6"
+
+        result = subprocess.run(
+            ["sh", str(_SAFENT_CLI), "companion", "install", "--porcelain"],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        for line in result.stdout.splitlines():
+            _json.loads(line)  # raises if any line is not valid NDJSON

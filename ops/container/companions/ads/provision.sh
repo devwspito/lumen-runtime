@@ -77,7 +77,16 @@ readonly SAFENT_ADS_IMAGE="${SAFENT_ADS_IMAGE:-ghcr.io/devwspito/safent-ads:late
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE="${SAFENT_COMPANION_STATE:-$HOME/.safent/companions/ads}"
-RUNTIME="$(command -v podman || command -v docker)"
+# SAFENT_PODMAN wins over PATH resolution — same rule as the `safent` CLI
+# (contracts/app-engine.md §1): the desktop app ships its OWN pinned podman
+# binary and this script must never fall back to whatever a terminal user
+# happens to have on PATH once it is invoked from the embedded CLI
+# (`safent companion install|repair`, T016).
+if [ -n "${SAFENT_PODMAN:-}" ]; then
+  RUNTIME="$SAFENT_PODMAN"
+else
+  RUNTIME="$(command -v podman || command -v docker)"
+fi
 [ -n "$RUNTIME" ] || { echo "provision.sh: need podman or docker" >&2; exit 1; }
 
 SCAFFOLD_ONLY=0

@@ -529,6 +529,70 @@ class TestScaffoldMode:
         assert _mode(state_dir / "sso" / "ads-sso.key") == 0o400
 
 
+class TestHonoursSafentPodmanOverPath:
+    """contracts/app-engine.md §1: SAFENT_PODMAN wins over PATH resolution
+    — the desktop app ships its OWN pinned podman and this script must
+    never fall back to whatever happens to be on PATH once invoked from
+    the embedded CLI (`safent companion install|repair`, T016)."""
+
+    def test_scaffold_uses_the_pinned_binary_never_the_one_on_path(
+        self, tmp_path: Path
+    ) -> None:
+        # Two DISTINCT fake podmans, each logging to its own file: one on
+        # PATH (as a terminal user's own install would have), one pinned
+        # via SAFENT_PODMAN (as the desktop app ships). Only the pinned one
+        # may ever be called. The real system PATH is kept (appended) so
+        # openssl/sed/etc. still resolve normally — only podman resolution
+        # itself is under test.
+        # Each fake writes to a path baked directly into ITS OWN script —
+        # never the shared FAKE_PODMAN_LOG env var — so calling the WRONG
+        # binary is observable regardless of what env either one sees.
+        bin_dir = tmp_path / "fakebin"
+        bin_dir.mkdir()
+        path_podman_log = tmp_path / "path-podman.log"
+        path_podman = bin_dir / "podman"
+        path_podman.write_text(
+            f'#!/usr/bin/env bash\necho "$@" >> {path_podman_log}\nexit 0\n'
+        )
+        path_podman.chmod(0o755)
+        curl = bin_dir / "curl"
+        curl.write_text(_FAKE_CURL)
+        curl.chmod(0o755)
+
+        pinned_dir = tmp_path / "pinned"
+        pinned_dir.mkdir()
+        pinned_podman_log = tmp_path / "pinned-podman.log"
+        pinned_podman = pinned_dir / "podman"
+        pinned_podman.write_text(
+            f'#!/usr/bin/env bash\necho "$@" >> {pinned_podman_log}\n'
+            'case "$1 $2" in\n'
+            '  "network inspect") echo "10.201.0.0/24"; exit 0 ;;\n'
+            '  "network create") exit 0 ;;\n'
+            "esac\n"
+            "exit 0\n"
+        )
+        pinned_podman.chmod(0o755)
+
+        state_dir = tmp_path / "state"
+        result = subprocess.run(
+            ["bash", str(_PROVISION_SH), "--scaffold"],
+            env={
+                **os.environ,
+                "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
+                "SAFENT_PODMAN": str(pinned_podman),
+                "SAFENT_COMPANION_STATE": str(state_dir),
+                "SAFENT_ADS_IMAGE": "safent-ads:test-fake",
+            },
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        assert pinned_podman_log.exists(), "the pinned SAFENT_PODMAN binary was never invoked"
+        assert not path_podman_log.exists(), "podman on PATH was called despite SAFENT_PODMAN being set"
+        assert (state_dir / "companions.json").exists()
+
+
 class TestComposeConfigRenders:
     """`podman compose config` / `docker compose config` with a dummy state
     — proves compose.yaml's variable interpolation and bind mounts resolve
