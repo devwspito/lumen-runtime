@@ -106,7 +106,39 @@ source "$SCRIPT_DIR/lib/normalize-staged-tree.sh"
 # shellcheck source=lib/patch-containers-conf.sh
 source "$SCRIPT_DIR/lib/patch-containers-conf.sh"
 
-TARGET="${1:-}"
+# MAC-02 (verificacion-mac-1.md): the signing pipeline re-writes every
+# Mach-O's bytes AFTER this script normally staged+hashed them (cdhash
+# identity, sha256 no longer matches — same failure the lock already
+# documents for AppImage, now hitting the notarized DMG, the primary
+# delivery). `--refresh-bundle-json <target>` re-scans an ALREADY-staged
+# $DEST in place and rewrites runtime-bundle.json (fresh sha256 + a real
+# cdhash for every Mach-O, via `_write_runtime_bundle_manifest` — defined
+# below, actually INVOKED near the bottom of this script once every
+# function it needs exists) — downloads NOTHING; the pipeline calls it
+# once, right after codesign, never before staging has happened for real.
+# Argument validation happens NOW (fail fast on bad usage); $DEST's
+# existence is re-checked at the bottom, right before the actual call,
+# since nothing between here and there may create it in refresh mode.
+REFRESH_ONLY=0
+if [ "${1:-}" = "--refresh-bundle-json" ]; then
+  REFRESH_ONLY=1
+  TARGET="${2:-}"
+  case "$TARGET" in
+    aarch64-apple-darwin|x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu) ;;
+    *)
+      echo "[x] usage: $0 --refresh-bundle-json <aarch64-apple-darwin|x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu>" >&2
+      exit "$EXIT_USAGE"
+      ;;
+  esac
+  [ -f "$LOCKFILE" ] || { echo "[x] missing $LOCKFILE" >&2; exit "$EXIT_USAGE"; }
+  DEST="$RESOURCES_ROOT/$TARGET"
+  [ -d "$DEST" ] || {
+    echo "[x] $DEST does not exist — stage $TARGET normally first; this mode never downloads" >&2
+    exit "$EXIT_USAGE"
+  }
+fi
+
+[ "$REFRESH_ONLY" -eq 1 ] || TARGET="${1:-}"
 case "$TARGET" in
   aarch64-apple-darwin|x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu) ;;
   x86_64-apple-darwin)
@@ -132,7 +164,12 @@ for tool in curl jq tar; do
 done
 
 [ -f "$LOCKFILE" ] || { echo "[x] missing $LOCKFILE" >&2; exit "$EXIT_USAGE"; }
-case "$TARGET" in
+# --refresh-bundle-json touches no pkgutil/download logic at all (it only
+# re-hashes+cdhashes files ALREADY staged by a real prior macOS run) — the
+# platform guard below is for the NORMAL staging path only, so this mode's
+# own logic stays testable on any host (it depends on $CODESIGN being
+# present, checked lazily, only if a Mach-O file is actually found).
+[ "$REFRESH_ONLY" -eq 1 ] || case "$TARGET" in
   *-apple-darwin)
     if [ "$(uname -s)" != Darwin ]; then
       echo "[x] $TARGET must be staged on a macOS host/runner (uses pkgutil to" >&2
@@ -195,12 +232,17 @@ _already_staged() {
   return 0
 }
 
-if _already_staged; then
-  echo "[ok] $TARGET already staged under $DEST with matching sha256 for every entry — skipping download."
-  exit 0
+# --refresh-bundle-json re-scans whatever a prior REAL staging run already
+# left under $DEST (now signed, out-of-band) — wiping it here would defeat
+# the entire point ("no re-downloading").
+if [ "$REFRESH_ONLY" -eq 0 ]; then
+  if _already_staged; then
+    echo "[ok] $TARGET already staged under $DEST with matching sha256 for every entry — skipping download."
+    exit 0
+  fi
+  rm -rf "$DEST"
+  mkdir -p "$DEST" "$CACHE_DIR"
 fi
-rm -rf "$DEST"
-mkdir -p "$DEST" "$CACHE_DIR"
 
 # ---- x86_64/aarch64-unknown-linux-gnu: static tarball, extract a curated subset --
 _stage_linux() {
@@ -418,6 +460,26 @@ _stage_app_files() {
 # packaging pipeline ever sets. `null` (repo absent, or digest not yet
 # pinned) ships through unchanged — a legitimate "not fixed yet" state the
 # wrapper fails closed on, not a staging error.
+# MAC-02 (verificacion-mac-1.md): a Mach-O's own bytes change the instant it
+# is (re-)signed, so sha256 recorded here BEFORE signing (this script's
+# normal run) stops matching the moment the pipeline's signing step
+# rewrites the shipped binaries — the exact failure the lock already
+# documents for AppImage, hitting the notarized DMG (the primary delivery)
+# instead. Portable magic-byte sniff (no `file`/`lipo` dependency) so the
+# SAME classification runs identically whether this script is staging a
+# real macOS bundle or being exercised by a fixture-driven test on any
+# other host — only the LATER `codesign` call (real signature/cdhash
+# extraction, only reached for a file this classifies as Mach-O) is
+# macOS-specific, and even that is overridable for tests (SAFENT_CODESIGN).
+CODESIGN="${SAFENT_CODESIGN:-codesign}"
+_is_macho() {
+  magic="$(od -An -tx1 -N 4 "$1" 2>/dev/null | tr -d ' \n')"
+  case "$magic" in
+    cafebabe|feedface|cefaedfe|feedfacf|cffaedfe) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 _write_runtime_bundle_manifest() {
   local podman_version out engine_repo engine_digest companion_repo companion_digest
   podman_version="$(jq -r '.targets[$t].podman_version' --arg t "$TARGET" "$LOCKFILE")"
@@ -432,7 +494,31 @@ _write_runtime_bundle_manifest() {
     b="$(basename "$f")"
     s="$(SHA256 "$f")"
     m="$(stat -c '%a' "$f" 2>/dev/null || stat -f '%Lp' "$f")"
-    printf '{"path":"%s","sha256":"%s","mode":"0%s"}\n' "$b" "$s" "$m"
+    cdhash=null
+    if _is_macho "$f"; then
+      command -v "$CODESIGN" >/dev/null 2>&1 \
+        || { echo "[x] '$CODESIGN' not found on PATH — needed to classify Mach-O file $b" >&2; exit "$EXIT_STAGE"; }
+      # Not-yet-signed (a local dev build that never runs the signing
+      # pipeline) reports nothing here on purpose — cdhash stays null and
+      # cmd_stage_runtime falls back to sha256, still accurate for THAT
+      # exact, untouched file.
+      # `|| true` on the WHOLE pipeline (not just the last stage) — with
+      # pipefail (this script's own `set -eo pipefail`), an unsigned file's
+      # `codesign -dvvv` exiting non-zero would otherwise abort the ENTIRE
+      # script right here instead of gracefully falling back to null.
+      real_cdhash="$("$CODESIGN" -dvvv "$f" 2>/dev/null | sed -n 's/^CDHash=\(.*\)$/\1/p' | head -1 || true)"
+      # `if`, not a standalone `&&` — under `set -e`, the common "not yet
+      # signed" case (real_cdhash empty, the condition below is false)
+      # would otherwise abort the WHOLE script right here (a bare `test &&
+      # assignment` statement's own exit status is the test's, and `&&`
+      # short-circuiting on false is exactly what set -e treats as a
+      # command failure) — caught by this MAC-02 test's own "unsigned
+      # Mach-O" case.
+      if [ -n "$real_cdhash" ]; then
+        cdhash="\"$real_cdhash\""
+      fi
+    fi
+    printf '{"path":"%s","sha256":"%s","cdhash":%s,"mode":"0%s"}\n' "$b" "$s" "$cdhash" "$m"
   done | jq -s \
     --arg v "$podman_version" \
     --arg er "$engine_repo" --arg ed "$engine_digest" \
@@ -478,6 +564,16 @@ _record_app_files_in_lock() {
     "$LOCKFILE" > "$tmp"
   mv "$tmp" "$LOCKFILE"
 }
+
+if [ "$REFRESH_ONLY" -eq 1 ]; then
+  # $DEST was NOT wiped (see the `_already_staged`/`rm -rf "$DEST"` guard
+  # above, skipped in this mode) — every file _write_runtime_bundle_
+  # manifest is about to re-scan is exactly what a prior real staging run
+  # (now signed, out-of-band) left behind.
+  _write_runtime_bundle_manifest
+  echo "[ok] $TARGET: runtime-bundle.json refreshed in place (no download, no re-stage)"
+  exit 0
+fi
 
 case "$TARGET" in
   x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu) _stage_linux ;;

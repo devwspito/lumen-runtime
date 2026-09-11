@@ -57,10 +57,29 @@ Dos escrituras distintas, con semántica distinta:
    cada ejecución, **dentro del árbol staged** (gitignorado, viaja con el
    paquete). Es lo que `cmd_stage_runtime` (`safent`) lee de verdad en el
    equipo del dueño — `bundle_dir/runtime-bundle.json`, sentado junto al
-   propio script una vez aplanado — para copiar y verificar por sha256 cada
-   fichero (podman **y** estos cinco) hacia `$SAFENT_STATE_HOME/runtime/
-   <versión>/` antes del primer uso real (data-model.md, invariante
-   `RuntimeBundle`: «un binario que no verifica no se ejecuta jamás»).
+   propio script una vez aplanado — para copiar y verificar cada fichero
+   hacia `$SAFENT_STATE_HOME/runtime/<versión>/` antes del primer uso real
+   (data-model.md, invariante `RuntimeBundle`: «un binario que no verifica
+   no se ejecuta jamás»). También carga `engine_image`/`companion_image`
+   (repo+digest, copiados de `runtime-manifest.lock`'s campos del mismo
+   nombre) — `boot.rs`/`selftest.rs` los leen de aquí, nunca de un env var.
+
+   **Verificación por fichero** (MAC-02, verificacion-mac-1.md): cada
+   entrada trae `sha256` **y** `cdhash` (`null` si no aplica/aún no
+   firmado). Un Mach-O (`podman`, `vfkit`, `krunkit`, `gvproxy`, y los
+   cuatro `.dylib` de krunkit) cambia de bytes en el momento en que se
+   firma — su `sha256` pre-firma deja de coincidir para siempre en cuanto
+   el pipeline de firma reescribe el binario (el mismo fallo que este lock
+   ya documentaba para AppImage, aplicado ahora al DMG notarizado). Para
+   esos ficheros `cmd_stage_runtime` verifica `codesign --verify --strict`
+   + igualdad de `cdhash` en vez de sha256; todo lo demás (scripts, YAML,
+   la imagen de máquina, el firmware EFI) sigue verificándose por sha256
+   exactamente como antes. `stage-runtime.sh <triple>` (staging normal, PRE
+   firma) escribe `cdhash: null` para cada Mach-O — codesign aún no tiene
+   nada que reportar en ese momento. `stage-runtime.sh --refresh-bundle-json
+   <triple>` — invocado por el pipeline justo DESPUÉS de firmar, nunca
+   antes — re-escanea el `$DEST` YA STAGEADO (sin descargar nada) y
+   reescribe `runtime-bundle.json` con el `cdhash` real de cada Mach-O.
 
 `normalize-staged-tree.sh`'s `_EXECUTABLE_BASENAMES` incluye `safent`,
 `run-safent.sh` y `provision.sh` (0755); `compose.yaml`/`caps.template.yaml`

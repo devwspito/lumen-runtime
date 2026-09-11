@@ -1765,15 +1765,33 @@ cmd_stage_runtime() {
 
   paths="$(grep -o '"path": *"[^"]*"' "$manifest" | sed -E 's/.*"([^"]*)"$/\1/')"
   total="$(printf '%s\n' "$paths" | grep -c .)"
+  codesign_bin="${SAFENT_CODESIGN:-codesign}"
   done_n=0
   for path in $paths; do
     entry_block="$(awk -v p="\"path\": \"$path\"" 'index($0,p){f=1} f{print; if(/}/){exit}}' "$manifest")"
     sha="$(printf '%s\n' "$entry_block" | sed -n 's/.*"sha256": *"\([^"]*\)".*/\1/p' | head -1)"
+    cdhash="$(printf '%s\n' "$entry_block" | sed -n 's/.*"cdhash": *"\([^"]*\)".*/\1/p' | head -1)"
     mode="$(printf '%s\n' "$entry_block" | sed -n 's/.*"mode": *"\([^"]*\)".*/\1/p' | head -1)"
     mode="${mode:-0755}"
     src="$bundle_dir/$path"
     [ -f "$src" ] || _die_porcelain runtime_hash_mismatch "Falta $path en el paquete" false
-    [ "$(_sha256 "$src")" = "$sha" ] || _die_porcelain runtime_hash_mismatch "$path no coincide con el manifiesto" false
+    if [ -n "$cdhash" ]; then
+      # MAC-02 (verificacion-mac-1.md): codesigning rewrites a Mach-O's own
+      # bytes, so sha256 (still recorded above, but no longer the check for
+      # THIS file) never matches a real signed package again — verify
+      # identity+integrity the way the platform itself does instead.
+      "$codesign_bin" --verify --strict "$src" >/dev/null 2>&1 \
+        || _die_porcelain runtime_hash_mismatch "$path no supera codesign --verify" false
+      # `|| true` on the WHOLE pipeline — under `set -e`, a corrupt/edge-
+      # case signature making `codesign -dvvv` exit non-zero here must
+      # still reach the explicit, porcelain-aware comparison below (an
+      # honest runtime_hash_mismatch), never a raw, uncaught shell abort
+      # with no `failed` event at all.
+      real_cdhash="$("$codesign_bin" -dvvv "$src" 2>/dev/null | sed -n 's/^CDHash=\(.*\)$/\1/p' | head -1 || true)"
+      [ "$real_cdhash" = "$cdhash" ] || _die_porcelain runtime_hash_mismatch "$path no coincide con el cdhash del manifiesto" false
+    else
+      [ "$(_sha256 "$src")" = "$sha" ] || _die_porcelain runtime_hash_mismatch "$path no coincide con el manifiesto" false
+    fi
     dst="$target/$path"
     mkdir -p "$(dirname "$dst")" 2>/dev/null || true
     cp "$src" "$dst" && chmod "$mode" "$dst"

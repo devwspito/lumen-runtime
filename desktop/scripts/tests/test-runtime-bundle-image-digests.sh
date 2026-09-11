@@ -24,12 +24,21 @@ trap 'rm -rf "$WORK"' EXIT INT TERM
 # shellcheck source=../lib/fetch-verified.sh
 source "$SCRIPTS_DIR/lib/fetch-verified.sh"
 
-# Extract ONLY _write_runtime_bundle_manifest's real, current source — the
-# function's closing brace is the first column-0 `}` after its opening line
-# (every brace belonging to the embedded jq filter is indented), so this
-# range is exact, not a fragile line-count guess.
-FUNC_SRC="$(sed -n '/^_write_runtime_bundle_manifest() {$/,/^}$/p' "$SCRIPTS_DIR/stage-runtime.sh")"
-[ -n "$FUNC_SRC" ] || fail "could not extract _write_runtime_bundle_manifest from stage-runtime.sh — did it get renamed?"
+# Extract CODESIGN=/_is_macho()/_write_runtime_bundle_manifest() as ONE
+# contiguous fragment — MAC-02 added a call from the latter to _is_macho,
+# so this test needs it defined too, or it silently degrades (an
+# undefined _is_macho just makes every `if _is_macho "$f"` false under
+# `set -e`'s if-condition exemption, no error, no cdhash — irrelevant to
+# THIS test's own image_engine/companion_image assertions, but wrong).
+# Stops at the first column-0 `}` seen AFTER _write_runtime_bundle_
+# manifest's own opening line, regardless of exact line numbers.
+FUNC_SRC="$(awk '
+  /^CODESIGN=/ { printing=1 }
+  printing { print }
+  /^_write_runtime_bundle_manifest\(\) \{$/ { in_target=1 }
+  in_target && /^}$/ { exit }
+' "$SCRIPTS_DIR/stage-runtime.sh")"
+[ -n "$FUNC_SRC" ] || fail "could not extract the CODESIGN/_is_macho/_write_runtime_bundle_manifest fragment from stage-runtime.sh — did it get renamed?"
 eval "$FUNC_SRC"
 
 run_case() {
