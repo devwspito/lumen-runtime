@@ -21,6 +21,17 @@ trap 'rm -rf "$WORK"' EXIT INT TERM
 
 # shellcheck source=../lib/fetch-verified.sh
 source "$SCRIPTS_DIR/lib/fetch-verified.sh"
+# resolve_image_digest()/platform_for_target() — _write_runtime_bundle_
+# manifest calls both directly, same as it calls SHA256() above.
+# shellcheck source=../lib/resolve-image-digest.sh
+source "$SCRIPTS_DIR/lib/resolve-image-digest.sh"
+
+# _write_runtime_bundle_manifest exits "$EXIT_USAGE" (never `return`) on a
+# rejected digest injection — matches stage-runtime.sh's own top-level
+# constant (EXIT_USAGE=1), read only inside the extracted, eval'd fragment
+# below, so static analysis reports a false "assigned but never read".
+# shellcheck disable=SC2034
+EXIT_USAGE=1
 
 # Extracts CODESIGN=..., _is_macho(), and _write_runtime_bundle_manifest()
 # as ONE contiguous fragment, regardless of exact line numbers: starts at
@@ -149,5 +160,64 @@ refreshed_safent_sha="$(jq -r '.entries[] | select(.path=="safent") | .sha256' "
 [ "$refreshed_safent_sha" = "$(SHA256 "$fake_dest/safent")" ] || \
   fail "--refresh-bundle-json must recompute sha256 for non-Mach-O files too"
 pass "--refresh-bundle-json <target> rewrites the ALREADY-staged manifest in place with a real post-sign cdhash, no download"
+
+# Case 4: --refresh-bundle-json must PRESERVE a digest injected on the
+# ORIGINAL staging run even when this later invocation (its own separate
+# process, e.g. a signing step further down the pipeline) re-exports
+# NEITHER SAFENT_ENGINE_DIGEST NOR SAFENT_COMPANION_DIGEST and the lock
+# itself still has not pinned one — $out's own prior recording is the only
+# remaining copy of what was injected the first time.
+ENGINE_DIGEST_ORIGINAL="sha256:$(printf 'e%.0s' {1..64})"
+ENGINE_DIGEST_RESUPPLIED="sha256:$(printf 'd%.0s' {1..64})"
+
+fake_repo2="$WORK/fake-repo-preserve"
+mkdir -p "$fake_repo2/desktop/scripts"
+cp -R "$SCRIPTS_DIR/lib" "$fake_repo2/desktop/scripts/lib"
+cp "$SCRIPTS_DIR/stage-runtime.sh" "$fake_repo2/desktop/scripts/stage-runtime.sh"
+fake_dest2="$fake_repo2/desktop/src-tauri/resources/runtime/aarch64-apple-darwin"
+mkdir -p "$fake_dest2"
+printf '\xcf\xfa\xed\xfe' > "$fake_dest2/podman"
+echo "already staged" > "$fake_dest2/safent"
+cat > "$fake_dest2/runtime-bundle.json" <<JSON
+{"podman_version":"6.1.1","entries":[
+  {"path":"podman","sha256":"stale","cdhash":null,"mode":"0755"},
+  {"path":"safent","sha256":"stale","cdhash":null,"mode":"0755"}
+],
+"engine_image":{"repo":"ghcr.io/devwspito/safent","digest":"$ENGINE_DIGEST_ORIGINAL","platform":"linux/arm64"}}
+JSON
+printf '%s' '{"targets": {"aarch64-apple-darwin": {"podman_version": "6.1.1"}},
+  "engine_image": {"repo": "ghcr.io/devwspito/safent", "digest": null}}' \
+  > "$fake_repo2/desktop/runtime-manifest.lock"
+rm -rf "$FAKE_CDHASHES_DIR"
+mkdir -p "$FAKE_CDHASHES_DIR"
+echo "anothercdhash0123456789abcdef0123456789abcdef01" > "$FAKE_CDHASHES_DIR/podman"
+
+# 4a: refresh with NEITHER env var set — the original injected digest must
+# survive, not regress to null just because this process didn't repeat it.
+env -u SAFENT_ENGINE_DIGEST -u SAFENT_COMPANION_DIGEST \
+  timeout 10 bash "$fake_repo2/desktop/scripts/stage-runtime.sh" \
+  --refresh-bundle-json aarch64-apple-darwin >"$WORK/refresh-preserve.out" 2>&1
+rc=$?
+[ "$rc" -eq 0 ] || fail "--refresh-bundle-json (preserve case) exited $rc: $(cat "$WORK/refresh-preserve.out")"
+preserved="$(jq -r '.engine_image.digest' "$fake_dest2/runtime-bundle.json")"
+[ "$preserved" = "$ENGINE_DIGEST_ORIGINAL" ] || \
+  fail "--refresh-bundle-json must preserve the previously-injected engine digest, got: $preserved"
+preserved_platform="$(jq -r '.engine_image.platform' "$fake_dest2/runtime-bundle.json")"
+[ "$preserved_platform" = "linux/arm64" ] || \
+  fail "--refresh-bundle-json must preserve/recompute the platform alongside the preserved digest, got: $preserved_platform"
+pass "--refresh-bundle-json preserves a previously-injected engine digest when re-run without the env var"
+
+# 4b: refresh WITH a freshly re-supplied (different) env var — the fresh,
+# explicit input for THIS invocation must win over the merely-remembered
+# prior value, never be blocked by it as though it were a lock mismatch.
+SAFENT_ENGINE_DIGEST="$ENGINE_DIGEST_RESUPPLIED" \
+  timeout 10 bash "$fake_repo2/desktop/scripts/stage-runtime.sh" \
+  --refresh-bundle-json aarch64-apple-darwin >"$WORK/refresh-resupply.out" 2>&1
+rc=$?
+[ "$rc" -eq 0 ] || fail "--refresh-bundle-json (resupply case) exited $rc: $(cat "$WORK/refresh-resupply.out")"
+resupplied="$(jq -r '.engine_image.digest' "$fake_dest2/runtime-bundle.json")"
+[ "$resupplied" = "$ENGINE_DIGEST_RESUPPLIED" ] || \
+  fail "a freshly re-supplied SAFENT_ENGINE_DIGEST on refresh must win over the prior recorded value, got: $resupplied"
+pass "--refresh-bundle-json honors a freshly re-supplied SAFENT_ENGINE_DIGEST over the prior recorded value"
 
 echo "[ok] test-runtime-bundle-machobinary-cdhash.sh: all cases passed"

@@ -17,6 +17,24 @@
 #   x86_64-apple-darwin is a RECOGNIZED triple that is deliberately rejected
 #   (see below) — everything else is an unrecognized triple, rejected loudly.
 #
+# Optional per-build digest injection (both env vars, see lib/
+# resolve-image-digest.sh for the exact override-or-match contract):
+#   SAFENT_ENGINE_DIGEST      sha256:<64 lowercase hex> — the engine
+#                             container image the release actually published
+#   SAFENT_COMPANION_DIGEST   same format — the companion image, if any
+# Both OVERRIDE runtime-manifest.lock's engine_image/companion_image.digest
+# ONLY when the lock has null (not yet pinned); if the lock already pins a
+# digest, the env var MUST match it exactly or this script exits EXIT_USAGE
+# — a released, pinned build can never be silently repointed at a different
+# image by an env var. Recorded in runtime-bundle.json alongside a
+# `platform` field (linux/arm64 or linux/amd64 — the Linux VM architecture
+# THIS target's engine container actually runs, see
+# lib/resolve-image-digest.sh's platform_for_target) so boot.rs can refuse a
+# digest recorded for the wrong platform instead of trusting it blindly.
+# `--refresh-bundle-json <target>` (below) preserves whatever digest an
+# earlier staging run already recorded even if THIS invocation re-exports
+# neither env var — see _write_runtime_bundle_manifest's own fallback.
+#
 # Exit codes (every non-zero exit in this script and in lib/fetch-verified.sh
 # uses one of these — "the install never fails" means failing LOUDLY and
 # distinguishably, not silently or ambiguously):
@@ -105,6 +123,8 @@ source "$SCRIPT_DIR/lib/fetch-verified.sh"
 source "$SCRIPT_DIR/lib/normalize-staged-tree.sh"
 # shellcheck source=lib/patch-containers-conf.sh
 source "$SCRIPT_DIR/lib/patch-containers-conf.sh"
+# shellcheck source=lib/resolve-image-digest.sh
+source "$SCRIPT_DIR/lib/resolve-image-digest.sh"
 
 # MAC-02 (verificacion-mac-1.md): the signing pipeline re-writes every
 # Mach-O's bytes AFTER this script normally staged+hashed them (cdhash
@@ -481,13 +501,41 @@ _is_macho() {
 }
 
 _write_runtime_bundle_manifest() {
-  local podman_version out engine_repo engine_digest companion_repo companion_digest
+  local podman_version out engine_repo engine_digest companion_repo companion_digest platform
   podman_version="$(jq -r '.targets[$t].podman_version' --arg t "$TARGET" "$LOCKFILE")"
   engine_repo="$(jq -r '.engine_image.repo // empty' "$LOCKFILE")"
-  engine_digest="$(jq -r '.engine_image.digest // empty' "$LOCKFILE")"
   companion_repo="$(jq -r '.companion_image.repo // empty' "$LOCKFILE")"
-  companion_digest="$(jq -r '.companion_image.digest // empty' "$LOCKFILE")"
+  platform="$(platform_for_target "$TARGET")" || exit "$EXIT_USAGE"
   out="$DEST/runtime-bundle.json"
+
+  # SAFENT_ENGINE_DIGEST/SAFENT_COMPANION_DIGEST: per-build injection for a
+  # release the lock has not pinned yet (null) — overrides null, but a
+  # digest the lock ALREADY pins must match exactly (mismatch = hard error,
+  # see lib/resolve-image-digest.sh's own header for why). Validated+
+  # resolved the same way whether this is a normal staging run or
+  # --refresh-bundle-json, since both call this same function.
+  engine_digest="$(resolve_image_digest "SAFENT_ENGINE_DIGEST" \
+    "$(jq -r '.engine_image.digest // empty' "$LOCKFILE")" \
+    "${SAFENT_ENGINE_DIGEST:-}")" || exit "$EXIT_USAGE"
+  companion_digest="$(resolve_image_digest "SAFENT_COMPANION_DIGEST" \
+    "$(jq -r '.companion_image.digest // empty' "$LOCKFILE")" \
+    "${SAFENT_COMPANION_DIGEST:-}")" || exit "$EXIT_USAGE"
+
+  # --refresh-bundle-json runs as its OWN process (a later pipeline step,
+  # after signing) and may not re-export the same SAFENT_ENGINE_DIGEST/
+  # SAFENT_COMPANION_DIGEST the original staging run used — with the lock
+  # itself still null, both resolve empty above, and $out (about to be
+  # overwritten below) is the ONLY remaining record of what was injected
+  # the first time. A normal (non-refresh) run never reaches this with a
+  # pre-existing $out: `_already_staged` either short-circuits before ever
+  # calling this function, or `rm -rf "$DEST"` wiped it first — so this
+  # only ever fires for a genuine re-scan of an already-staged tree, never
+  # masks a fresh checkout's own missing digest with stale leftovers.
+  if [ -f "$out" ]; then
+    [ -n "$engine_digest" ] || engine_digest="$(jq -r '.engine_image.digest // empty' "$out" 2>/dev/null || true)"
+    [ -n "$companion_digest" ] || companion_digest="$(jq -r '.companion_image.digest // empty' "$out" 2>/dev/null || true)"
+  fi
+
   {
     find "$DEST" -type f ! -name 'runtime-bundle.json' -print0
   } | while IFS= read -r -d '' f; do
@@ -523,13 +571,14 @@ _write_runtime_bundle_manifest() {
     --arg v "$podman_version" \
     --arg er "$engine_repo" --arg ed "$engine_digest" \
     --arg cr "$companion_repo" --arg cd "$companion_digest" \
+    --arg p "$platform" \
     '{
       podman_version: $v,
       entries: .,
       engine_image: (if $er == "" then null
-                      else {repo: $er, digest: (if $ed == "" then null else $ed end)} end),
+                      else {repo: $er, digest: (if $ed == "" then null else $ed end), platform: $p} end),
       companion_image: (if $cr == "" then null
-                          else {repo: $cr, digest: (if $cd == "" then null else $cd end)} end)
+                          else {repo: $cr, digest: (if $cd == "" then null else $cd end), platform: $p} end)
     }' > "$out"
   chmod 0644 "$out"
   echo "    wrote runtime-bundle.json ($(jq '.entries | length' "$out") entries)"

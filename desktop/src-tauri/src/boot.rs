@@ -700,11 +700,18 @@ fn app_version() -> SemVer {
 /// One entry of `runtime-bundle.json`'s `engine_image`/`companion_image`
 /// fields (MAC-03, verificacion-mac-1.md) — `digest` is `Option` because an
 /// UNSET one is a real, expected state (a checkout the release pipeline has
-/// not pinned yet), not a parse error.
+/// not pinned yet), not a parse error. `platform` (added alongside
+/// `SAFENT_ENGINE_DIGEST`/`SAFENT_COMPANION_DIGEST` build-time injection,
+/// `stage-runtime.sh`'s `platform_for_target`) is the Linux VM architecture
+/// (`linux/arm64`/`linux/amd64`) the recorded digest was actually published
+/// for — `Option` too, so an older bundle staged before this field existed
+/// still parses (no platform recorded -> no cross-check, same as before).
 #[derive(serde::Deserialize)]
 struct BundleImageRef {
     repo: String,
     digest: Option<String>,
+    #[serde(default)]
+    platform: Option<String>,
 }
 
 /// The subset of `runtime-bundle.json` (`stage-runtime.sh`'s
@@ -728,6 +735,23 @@ fn engine_digest_missing(message: impl Into<String>) -> FailureCause {
     }
 }
 
+/// True if `recorded` (a `BundleImageRef.platform`) is either absent (an
+/// older bundle staged before `stage-runtime.sh` recorded this field at
+/// all — no cross-check possible, same trust as before that field existed)
+/// or matches the Linux VM architecture THIS running binary's engine
+/// actually needs. `update::container_platform_key()` is the SAME OS/arch
+/// convention `stage-runtime.sh`'s own `platform_for_target` used to write
+/// it in the first place (linux/arm64 on both aarch64-apple-darwin's VM
+/// guest and aarch64-unknown-linux-gnu's native host; linux/amd64 on
+/// x86_64-unknown-linux-gnu) — reused, not reimplemented, so the two never
+/// silently drift apart.
+fn platform_matches(recorded: &Option<String>) -> bool {
+    match recorded {
+        None => true,
+        Some(p) => *p == crate::update::container_platform_key(),
+    }
+}
+
 /// Reads the engine/companion image references straight from the shipped
 /// `runtime-bundle.json` (`runtime_dir.join("runtime-bundle.json")` — the
 /// SAME directory `resolve_runtime_dir`/`resolve_config_with_fallback`
@@ -735,7 +759,12 @@ fn engine_digest_missing(message: impl Into<String>) -> FailureCause {
 /// digests into `runtime-manifest.lock`'s `engine_image`/`companion_image`
 /// (mirroring the existing `machine_image` entry's pattern — a human/
 /// ops-release-publisher fact, never queried live here); `stage-runtime.sh`
-/// copies them into `runtime-bundle.json` at staging time.
+/// copies them into `runtime-bundle.json` at staging time, alongside a
+/// `platform` recording which Linux VM architecture that digest is
+/// actually for (SAFENT_ENGINE_DIGEST/SAFENT_COMPANION_DIGEST build-time
+/// injection can, in principle, be handed the wrong platform's digest by a
+/// misconfigured pipeline step — this refuses to trust it rather than
+/// pulling the wrong image).
 fn images_from_runtime_bundle(
     runtime_dir: &Path,
 ) -> Result<(ImageRef, Option<ImageRef>), FailureCause> {
@@ -751,6 +780,14 @@ fn images_from_runtime_bundle(
     let engine = manifest
         .engine_image
         .ok_or_else(|| engine_digest_missing("runtime-bundle.json no trae engine_image"))?;
+    if !platform_matches(&engine.platform) {
+        return Err(engine_digest_missing(format!(
+            "runtime-bundle.json.engine_image.platform ({:?}) no coincide con la \
+             arquitectura de este equipo ({}) — el paquete no es para esta plataforma",
+            engine.platform,
+            crate::update::container_platform_key()
+        )));
+    }
     let engine_digest = engine.digest.ok_or_else(|| {
         engine_digest_missing(
             "runtime-bundle.json.engine_image.digest es null — el pipeline de release \
@@ -760,8 +797,12 @@ fn images_from_runtime_bundle(
     let engine_image = ImageRef::new(engine.repo, engine_digest).map_err(|_| {
         engine_digest_missing("runtime-bundle.json.engine_image.digest no tiene forma sha256:...")
     })?;
+    // Companion is best-effort (matches its existing Option semantics): a
+    // platform mismatch degrades to "no companion pinned", same as an
+    // absent/malformed digest already did, never a hard boot failure.
     let companion_image = manifest
         .companion_image
+        .filter(|c| platform_matches(&c.platform))
         .and_then(|c| c.digest.map(|d| (c.repo, d)))
         .and_then(|(repo, digest)| ImageRef::new(repo, digest).ok());
     Ok((engine_image, companion_image))
@@ -1401,6 +1442,112 @@ mod desired_state_from_runtime_tests {
         assert_eq!(
             desired.engine_image.reference(),
             "ghcr.io/devwspito/safent@sha256:from-env-override"
+        );
+    }
+
+    /// A digest recorded for THIS machine's own platform (what
+    /// `stage-runtime.sh`'s `platform_for_target` writes for a native build)
+    /// resolves exactly like a manifest with no `platform` field at all —
+    /// the field is a cross-check, never an additional requirement to opt
+    /// into.
+    #[test]
+    fn an_engine_platform_matching_this_machine_resolves_normally() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: ENV_LOCK held for the whole test body.
+        unsafe { clear_digest_env() };
+        let dir = unique_dir("platform-match");
+        let here = crate::update::container_platform_key();
+        write_bundle_json(
+            &dir,
+            &format!(
+                r#"{{"podman_version":"6.1.1","entries":[],
+                    "engine_image":{{"repo":"ghcr.io/devwspito/safent","digest":"sha256:engine-good","platform":"{here}"}}}}"#
+            ),
+        );
+
+        let desired = desired_state_from_runtime(&dir)
+            .expect("a platform recorded for THIS machine's own arch must resolve");
+
+        assert_eq!(
+            desired.engine_image.reference(),
+            "ghcr.io/devwspito/safent@sha256:engine-good"
+        );
+    }
+
+    /// The scenario this whole cross-check exists for: a digest injected by
+    /// SAFENT_ENGINE_DIGEST/stage-runtime.sh for the WRONG Linux VM
+    /// architecture (e.g. a cross-compiled x86_64 build accidentally handed
+    /// an arm64 pin, or vice versa) must never be trusted just because it
+    /// parses — `wrong` is deliberately a REAL platform string, not garbage,
+    /// so this proves the two real values are told apart, not merely that
+    /// malformed input is rejected.
+    #[test]
+    fn an_engine_platform_for_a_different_machine_fails_closed_instead_of_pulling_the_wrong_image()
+    {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: ENV_LOCK held for the whole test body.
+        unsafe { clear_digest_env() };
+        let dir = unique_dir("platform-mismatch");
+        let wrong = if crate::update::container_platform_key() == "linux/arm64" {
+            "linux/amd64"
+        } else {
+            "linux/arm64"
+        };
+        write_bundle_json(
+            &dir,
+            &format!(
+                r#"{{"podman_version":"6.1.1","entries":[],
+                    "engine_image":{{"repo":"ghcr.io/devwspito/safent","digest":"sha256:engine-good","platform":"{wrong}"}}}}"#
+            ),
+        );
+
+        let cause = desired_state_from_runtime(&dir)
+            .expect_err("a digest pinned for a different platform must never be trusted");
+
+        assert_eq!(cause.code, FailureCode::EngineDigestMissing);
+        assert!(!cause.retryable);
+        assert!(
+            cause.message.contains("plataforma"),
+            "message should call out the platform mismatch specifically, got: {}",
+            cause.message
+        );
+    }
+
+    /// Companion mirrors its existing best-effort `Option` semantics
+    /// (already true for an absent/malformed digest): a platform mismatch
+    /// degrades to "no companion pinned", never a hard boot failure — only
+    /// the engine image is load-bearing enough to fail closed on.
+    #[test]
+    fn a_companion_platform_mismatch_silently_drops_the_companion_but_the_engine_still_resolves() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: ENV_LOCK held for the whole test body.
+        unsafe { clear_digest_env() };
+        let dir = unique_dir("companion-platform-mismatch");
+        let here = crate::update::container_platform_key();
+        let wrong = if here == "linux/arm64" {
+            "linux/amd64"
+        } else {
+            "linux/arm64"
+        };
+        write_bundle_json(
+            &dir,
+            &format!(
+                r#"{{"podman_version":"6.1.1","entries":[],
+                    "engine_image":{{"repo":"ghcr.io/devwspito/safent","digest":"sha256:engine-good","platform":"{here}"}},
+                    "companion_image":{{"repo":"ghcr.io/devwspito/safent-ads","digest":"sha256:ads-good","platform":"{wrong}"}}}}"#
+            ),
+        );
+
+        let desired = desired_state_from_runtime(&dir)
+            .expect("a companion platform mismatch must never fail the whole boot");
+
+        assert_eq!(
+            desired.engine_image.reference(),
+            "ghcr.io/devwspito/safent@sha256:engine-good"
+        );
+        assert!(
+            desired.companion_image.is_none(),
+            "a companion pinned for the wrong platform must degrade to None, not be trusted"
         );
     }
 }
