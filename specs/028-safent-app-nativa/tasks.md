@@ -218,8 +218,12 @@ cuentas conectadas.
   runtime empaquetado** (podman fijado + imagen de máquina) antes de `tauri-action`
 - **Quitar** `continue-on-error: true` del paso de notarización y **quitar** el
   comentario «403 hasta que el titular acepte»: el acuerdo de Apple **ya está
-  aceptado**. Notarizar + **grapar** el DMG pasa a ser condición de release; se
-  reintenta ante fallo transitorio, no se degrada
+  aceptado**. Notarizar + **grapar el DMG Y el `.app`** (dos operaciones de
+  grapado independientes, la misma notarización — MAC2-12,
+  verificacion-mac-2.md: grapar el DMG NO grapa lo que hay dentro; el `.app`
+  suelto que este mismo pipeline publica como `macos/Safent.app.tar.gz` para
+  el actualizador no tiene, si no, ninguna vía offline de validarse) pasa a
+  ser condición de release; se reintenta ante fallo transitorio, no se degrada
 - Pasar `TAURI_SIGNING_PRIVATE_KEY` y publicar `latest.json`
   (`includeUpdaterJson: true`) **y** `runtime-manifest.json` firmado
 - Gate de publicación: si falta cualquiera de los cuatro artefactos, **no hay release**
