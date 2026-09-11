@@ -84,6 +84,28 @@ seguir esta única tabla si el vocabulario alguna vez crece:
 | `Linux` | `linux` | `Linux` |
 | cualquier otro | el valor crudo de `uname -s` | `Unsupported` |
 
+**Vocabulario de `HostFacts.machines[]`** (MAC2-01, verificacion-mac-2.md): el
+CLI deriva `provider`/`cpus`/`memoryBytes` de `podman machine list --format
+json` — **nunca** `machine inspect`, que en el podman real (6.1.1) no expone
+NINGÚN campo de proveedor/tamaño (`--format '{{.VMType}}'` sobre `inspect`
+falla con «can't evaluate field VMType in type machine.InspectInfo»; sólo
+`list` lo tiene). `rootful`/`running` siguen viniendo de `machine inspect`
+(el único sitio que los tiene). No existe `osVersion`: podman no tiene ningún
+concepto de «versión del SO» por máquina en ninguno de los dos comandos, así
+que `MachineSpec` no lo compara — compararlo era comparar un valor que el CLI
+jamás podía informar de verdad, y `is_satisfied_by` no coincidía **nunca**
+(MAC2-01/MAC2-06: cada arranque trataba la máquina recién creada como a la
+deriva permanente).
+
+| Campo | Origen | Vocabulario |
+|---|---|---|
+| `provider` | `machine list --format json` → `.VMType` | `applehv` · `qemu` · `hyperv` · `wsl` · `libkrun` · cualquier otro string tal cual |
+| `cpus` | `machine list --format json` → `.CPUs` | entero |
+| `memoryBytes` | `machine list --format json` → `.Memory` (bytes, como string) | entero (bytes) |
+| `rootful` | `machine inspect <name> --format '{{.Rootful}}'` | booleano |
+| `running` | `machine inspect <name> --format '{{.State}}'` == `running` | booleano |
+| `ours` | `$SAFENT_STATE_HOME/machine.json`'s `name` == esta máquina | booleano |
+
 ## 4. Verbos
 
 | Verbo | Qué hace | Idempotente | Etapas que emite |

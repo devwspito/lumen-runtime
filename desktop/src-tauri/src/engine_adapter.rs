@@ -105,6 +105,19 @@ impl EmbeddedCliDriver {
         if let Some(secret) = secret {
             secret.install(&mut cmd);
         }
+        // MAC2-04 (verificacion-mac-2.md): a real Mac run left TWO orphaned
+        // `podman run` processes alive, still downloading 2.7 GB, minutes
+        // after the wrapper had already declared the boot failed —
+        // `kill_and_timeout`/the cancel path kill only this DIRECT child
+        // (`/bin/sh safent`); a grandchild it spawned in its own right
+        // (`_ensure_seccomp`'s `podman run`, or `cmd_ensure_images`'s
+        // backgrounded `podman pull`) is reparented to init and keeps
+        // running. Giving this child its OWN new process group (leader =
+        // its own pid) means `kill_child_group` below can signal the WHOLE
+        // group at once — SIGKILL is never catchable by a trap either way,
+        // so this must happen from OUR side, not rely on the CLI script
+        // cleaning up after itself once already dead.
+        new_process_group(&mut cmd);
         spawn_with_etxtbsy_retry(&mut cmd).map_err(|e| {
             // MAC-04 (verificacion-mac-1.md): ENOENT here means the bundled
             // CLI does not exist at the resolved path — a packaging/path
@@ -299,6 +312,7 @@ impl EngineDriver for EmbeddedCliDriver {
         cmd.stdin(Stdio::null());
         cmd.stdout(Stdio::null());
         cmd.stderr(Stdio::piped());
+        new_process_group(&mut cmd);
         let mut child = spawn_with_etxtbsy_retry(&mut cmd)
             .map_err(|e| EngineError::Io(format!("no pude ejecutar 'stop': {e}")))?;
         let stderr = child.stderr.take();
@@ -336,7 +350,7 @@ fn wait_bounded(
                 });
             }
             None if Instant::now() >= deadline => {
-                let _ = child.kill();
+                kill_child_group(child);
                 let _ = child.wait();
                 return Err(EngineError::Timeout { after: timeout });
             }
@@ -510,7 +524,7 @@ impl EmbeddedCliDriver {
 
         while open_readers > 0 {
             if cancel.is_set() {
-                let _ = child.kill();
+                kill_child_group(&mut child);
                 let _ = child.wait();
                 return Err(EngineError::Cancelled);
             }
@@ -538,7 +552,7 @@ impl EmbeddedCliDriver {
                 }
                 Ok(ReaderMsg::ReaderClosed) => open_readers -= 1,
                 Ok(ReaderMsg::OutputCapExceeded) => {
-                    let _ = child.kill();
+                    kill_child_group(&mut child);
                     let _ = child.wait();
                     return Err(EngineError::Protocol(format!(
                         "salida superó el límite de {} bytes",
@@ -584,7 +598,7 @@ fn handle_stdout_line(
     let event = match serde_json::from_str::<WireEvent>(line) {
         Ok(event) => event,
         Err(_) => {
-            let _ = child.kill();
+            kill_child_group(child);
             let _ = child.wait();
             return Err(EngineError::UnexpectedOutput {
                 line: line.to_string(),
@@ -592,7 +606,7 @@ fn handle_stdout_line(
         }
     };
     if let Err(e) = on_event(event) {
-        let _ = child.kill();
+        kill_child_group(child);
         let _ = child.wait();
         return Err(e);
     }
@@ -600,9 +614,50 @@ fn handle_stdout_line(
 }
 
 fn kill_and_timeout(child: &mut Child, after: Duration) -> EngineError {
-    let _ = child.kill();
+    kill_child_group(child);
     let _ = child.wait();
     EngineError::Timeout { after }
+}
+
+/// MAC2-04 (verificacion-mac-2.md): puts `cmd`'s eventual child in its OWN
+/// new process group (leader = its own pid) — the ONE thing that makes
+/// `kill_child_group` below able to reach a grandchild the CLI spawned
+/// (`podman run`/`podman pull`) instead of only the direct `/bin/sh safent`
+/// process. Every spawn site in this file uses it; a shell-level `trap`
+/// alone cannot substitute for this because SIGKILL (what `Child::kill`
+/// sends) is never catchable — the killer has to target the right process
+/// itself, not hope the target cleans up after being told to die.
+#[cfg(unix)]
+fn new_process_group(cmd: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    cmd.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn new_process_group(_cmd: &mut Command) {}
+
+/// Kills the WHOLE process group `child` leads (see `new_process_group`),
+/// not just `child` itself — a plain `child.kill()` leaves any grandchild
+/// (a `podman run`/`podman pull` the CLI script spawned) reparented to
+/// init and running to completion, orphaned, unbounded (MAC2-04: two such
+/// orphans kept downloading 2.7 GB for minutes after the app had already
+/// declared the boot failed).
+#[cfg(unix)]
+fn kill_child_group(child: &mut Child) {
+    // SAFETY: `child.id()` is a valid pid for a process this same code
+    // spawned with `new_process_group` (pgid == pid) — signaling `-pid`
+    // targets that exact group and nothing else. `kill(2)` with signal 0
+    // would be a mere existence probe; SIGKILL here matches `Child::kill`'s
+    // own (uncatchable) semantics, just widened to the group.
+    unsafe {
+        libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+    }
+    let _ = child.kill(); // belt-and-suspenders if the group signal somehow missed it
+}
+
+#[cfg(not(unix))]
+fn kill_child_group(child: &mut Child) {
+    let _ = child.kill();
 }
 
 fn push_capped(buffer: &mut String, line: &str) {
@@ -757,18 +812,18 @@ struct WireMachineFact {
     rootful: bool,
     running: bool,
     ours: bool,
-    // NOT emitted by the real CLI's `_machines_json` (macOS-only; unverifiable
-    // on this Linux host) — contract data-model.md's `MachineFact` itself only
-    // lists `name, provider, rootful, running, ours`, so these two are this
-    // struct's own extras, same category as the local-image-digest ones
-    // above. Defaulted rather than required so a real, contract-shaped
-    // `machines` entry still deserializes.
+    // MAC2-01 (verificacion-mac-2.md): the real CLI's `_machines_json` now
+    // emits both, straight from `podman machine list --format json`'s own
+    // `VMType`/`CPUs`/`Memory` (contract app-engine.md §3). `#[serde(default)]`
+    // kept anyway — a Linux `facts` response never has a `machines[]` entry
+    // at all (`_machines_json` short-circuits to `[]`), so nothing here ever
+    // needs these on that platform, and a malformed/older entry should not
+    // fail the whole `facts` parse over two fields the planner already
+    // treats conservatively (0 satisfies nothing).
     #[serde(default)]
     cpus: u32,
     #[serde(default)]
     memory_bytes: u64,
-    #[serde(default)]
-    os_version: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -907,6 +962,98 @@ mod missing_cli_tests {
     }
 }
 
+/// MAC2-04 (verificacion-mac-2.md): a real Mac run left TWO orphaned
+/// `podman run` processes alive — still downloading 2.7 GB — minutes after
+/// the wrapper had already declared the boot failed. `Child::kill()` only
+/// ever reaches the DIRECT child (`/bin/sh safent`); a grandchild it
+/// spawns in its own right is reparented to init and keeps running.
+#[cfg(test)]
+mod process_group_kill_tests {
+    use std::process::{Child, Command, Stdio};
+    use std::time::Duration;
+
+    fn alive(pid: i32) -> bool {
+        // SAFETY: signal 0 sends nothing — a pure existence/permission
+        // probe, exactly libc::kill(2)'s documented purpose for this case.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    fn spawn_with_group(script: &str) -> Child {
+        use std::os::unix::process::CommandExt;
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(script);
+        cmd.stdin(Stdio::null());
+        cmd.stdout(Stdio::null());
+        cmd.stderr(Stdio::null());
+        cmd.process_group(0);
+        cmd.spawn().expect("spawn sh")
+    }
+
+    #[test]
+    fn killing_the_group_also_kills_a_backgrounded_grandchild() {
+        let pid_file = std::env::temp_dir().join(format!(
+            "safent-grandchild-pid-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // The parent shell backgrounds a long-running grandchild (standing
+        // in for `podman run`/`podman pull`), records its pid, then waits
+        // on it — exactly the shape `_ensure_seccomp`'s foreground `podman
+        // run` and the new heartbeat-driven backgrounded `podman pull`
+        // both have relative to the top-level `safent` process this
+        // adapter spawns.
+        let script = format!("sleep 30 & echo $! > {} ; wait", pid_file.display());
+        let mut child = spawn_with_group(&script);
+        let parent_pid = child.id() as i32;
+
+        // Give the grandchild time to actually start and write its pid.
+        let mut grandchild_pid: Option<i32> = None;
+        for _ in 0..50 {
+            if let Ok(text) = std::fs::read_to_string(&pid_file) {
+                if let Ok(pid) = text.trim().parse::<i32>() {
+                    grandchild_pid = Some(pid);
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let grandchild_pid = grandchild_pid.expect("grandchild must have written its own pid");
+        let _ = std::fs::remove_file(&pid_file);
+
+        assert!(alive(parent_pid), "parent should be alive before kill");
+        assert!(
+            alive(grandchild_pid),
+            "grandchild should be alive before kill"
+        );
+
+        super::kill_child_group(&mut child);
+        let _ = child.wait();
+
+        // Group-kill is not necessarily instantaneous from the kernel's
+        // perspective across two distinct pids — poll briefly instead of
+        // asserting the very next instant.
+        let mut grandchild_dead = false;
+        for _ in 0..50 {
+            if !alive(grandchild_pid) {
+                grandchild_dead = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            !alive(parent_pid),
+            "parent must be dead after kill_child_group"
+        );
+        assert!(
+            grandchild_dead,
+            "the backgrounded grandchild must be dead too — this is the whole point of MAC2-04's fix"
+        );
+    }
+}
+
 fn map_companion_health(raw: &str) -> CompanionHealth {
     match raw {
         "reachable" => CompanionHealth::Reachable,
@@ -942,7 +1089,6 @@ fn map_machine_fact(wire: WireMachineFact) -> MachineFact {
         ours: wire.ours,
         cpus: wire.cpus,
         memory_bytes: Bytes(wire.memory_bytes),
-        os_version: wire.os_version,
     }
 }
 

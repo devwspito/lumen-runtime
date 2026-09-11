@@ -99,6 +99,12 @@ case "$1" in
     exit 0
     ;;
   pull)
+    # MAC2-02/MAC2-03 (verificacion-mac-2.md): a real pull can sit silent
+    # for over a minute between podman's own output lines — simulate that
+    # shape (silent for FAKE_PULL_DELAY_SECONDS, no intermediate output at
+    # all) so the heartbeat mechanism is exercised for real, not just
+    # "podman printed something and we echoed it back."
+    [ -n "${FAKE_PULL_DELAY_SECONDS:-}" ] && sleep "$FAKE_PULL_DELAY_SECONDS"
     [ "${FAKE_PULL_FAILS:-false}" = "true" ] && exit 1
     exit 0
     ;;
@@ -110,6 +116,35 @@ case "$1" in
     sub="$1"; shift
     case "$sub" in
       list)
+        # MAC2-01 (verificacion-mac-2.md): _machines_json now also calls
+        # `machine list --format json` for provider/cpus/memory (real
+        # podman's `machine inspect` has none of the three) — FAKE_MACHINE_
+        # DETAILS is "name:provider:cpus:memory_bytes" per line, looked up
+        # per name in FAKE_MACHINES_STATE.
+        if [ "${1:-}" = "--format" ] && [ "${2:-}" = "json" ]; then
+          printf '['
+          first=true
+          if [ -n "${FAKE_MACHINES_STATE:-}" ] && [ -f "$FAKE_MACHINES_STATE" ]; then
+            while IFS= read -r mname; do
+              [ -n "$mname" ] || continue
+              provider="unknown"; cpus=0; mem=0
+              if [ -n "${FAKE_MACHINE_DETAILS:-}" ] && [ -f "$FAKE_MACHINE_DETAILS" ]; then
+                line="$(grep "^$mname:" "$FAKE_MACHINE_DETAILS" 2>/dev/null | head -1)"
+                if [ -n "$line" ]; then
+                  provider="$(echo "$line" | cut -d: -f2)"
+                  cpus="$(echo "$line" | cut -d: -f3)"
+                  mem="$(echo "$line" | cut -d: -f4)"
+                fi
+              fi
+              [ "$first" = "true" ] || printf ','
+              first=false
+              printf '\n    {\n        "Name": "%s",\n        "VMType": "%s",\n        "CPUs": %s,\n        "Memory": "%s"\n    }' \
+                "$mname" "$provider" "$cpus" "$mem"
+            done < "$FAKE_MACHINES_STATE"
+          fi
+          printf '\n]\n'
+          exit 0
+        fi
         # cmd_ensure_machine only ever calls `machine list -q`; state is a
         # plain newline-separated list of existing machine names, mutated
         # by `init` below (MAC-05, verificacion-mac-1.md tests).
@@ -553,6 +588,86 @@ class TestEnsureMachineNeverAdoptsAForeignMachine:
         assert any(c.startswith("machine start safent-test-engine") for c in calls)
 
 
+class TestMachinesJsonReportsRealProviderAndSize:
+    """MAC2-01 (verificacion-mac-2.md): `facts.machines[]` used to hardcode
+    `provider:"podman"` and omit cpus/memoryBytes entirely — `MachineSpec::
+    is_satisfied_by` (Rust) never matched a real machine because of it, so
+    the planner treated every correctly created machine as permanent drift
+    (RecreateEngine on every single boot)."""
+
+    def test_facts_reports_real_provider_cpus_and_memory_bytes(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        _fake_darwin(fake_bin_dir)
+        podman_log = tmp_path / "podman.log"
+        machines_state = tmp_path / "machines.state"
+        machines_state.write_text("safent-test-engine\n")
+        machine_details = tmp_path / "machine.details"
+        # 4 CPUs, 8192 MiB — cmd_ensure_machine's own real --cpus/--memory.
+        machine_details.write_text("safent-test-engine:applehv:4:8589934592\n")
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            extra_env={
+                "FAKE_MACHINES_STATE": str(machines_state),
+                "FAKE_MACHINE_DETAILS": str(machine_details),
+                "FAKE_MACHINE_ROOTFUL": "true",
+                "FAKE_MACHINE_STATE": "running",
+            },
+        )
+
+        result = _run_safent("facts", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        machines = json.loads(result.stdout.strip())["machines"]
+        assert len(machines) == 1, machines
+        m = machines[0]
+        assert m["name"] == "safent-test-engine"
+        assert m["provider"] == "applehv", f"must be the REAL provider, not a hardcoded 'podman': {m}"
+        assert m["cpus"] == 4
+        assert m["memoryBytes"] == 8589934592
+        assert m["rootful"] is True
+        assert m["running"] is True
+
+    def test_facts_reports_a_foreign_machine_alongside_ours_with_its_own_provider(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """The owner's own podman-machine-default (libkrun) must be
+        reported honestly if it happens to be listed — never coerced into
+        our own provider — even though this app never touches it
+        (MAC-05/MAC2-14: separate concerns, adoption vs. observation)."""
+        _fake_darwin(fake_bin_dir)
+        podman_log = tmp_path / "podman.log"
+        machines_state = tmp_path / "machines.state"
+        machines_state.write_text("podman-machine-default\nsafent-test-engine\n")
+        machine_details = tmp_path / "machine.details"
+        machine_details.write_text(
+            "podman-machine-default:libkrun:4:8589934592\n"
+            "safent-test-engine:applehv:4:8589934592\n"
+        )
+        home_dir = tmp_path / "home"
+        state_home = home_dir / ".safent"
+        state_home.mkdir(parents=True)
+        (state_home / "machine.json").write_text('{"name":"safent-test-engine","adopted":false}\n')
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=home_dir,
+            podman_log=podman_log,
+            extra_env={
+                "FAKE_MACHINES_STATE": str(machines_state),
+                "FAKE_MACHINE_DETAILS": str(machine_details),
+            },
+        )
+
+        result = _run_safent("facts", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        machines = {m["name"]: m for m in json.loads(result.stdout.strip())["machines"]}
+        assert machines["podman-machine-default"]["provider"] == "libkrun"
+        assert machines["podman-machine-default"]["ours"] is False
+        assert machines["safent-test-engine"]["provider"] == "applehv"
+        assert machines["safent-test-engine"]["ours"] is True
+
+
 class TestStageRuntime:
     def test_without_a_bundle_manifest_is_a_harmless_noop(self, tmp_path: Path, fake_bin_dir: Path) -> None:
         podman_log = tmp_path / "podman.log"
@@ -739,6 +854,36 @@ class TestEnsureImages:
         _assert_stage_closure_invariant(events)
         assert events[-1]["code"] == "registry_unreachable"
         assert events[-1]["retryable"] is True
+
+    def test_a_silent_multi_second_pull_still_emits_progress_heartbeats(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """MAC2-02/MAC2-03 (verificacion-mac-2.md): a real pull_engine
+        measured 84 s with a 60.9 s window with NOT ONE line on any
+        channel — app-engine.md §3.2 requires progress at least every 5 s
+        while a stage is alive, and the adapter's 15 s stall watchdog
+        killed the CLI well before that. `podman pull` here is silent for
+        6 s straight (no intermediate output at all, the worst case) —
+        the CLI itself must still emit progress on its own cadence."""
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            extra_env={"FAKE_PULL_DELAY_SECONDS": "6"},
+        )
+        result = _run_safent("ensure-images", "--porcelain", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        events = _parse_ndjson(result.stdout)
+        _assert_stage_closure_invariant(events)
+        progress_events = [e for e in events if e["t"] == "progress" and e["id"] == "pull_engine"]
+        assert len(progress_events) >= 1, (
+            f"a 6 s silent pull must still emit at least one heartbeat: {events}"
+        )
+        for e in progress_events:
+            assert e["unit"] == "steps"
+            assert "total" not in e, "the heartbeat's total is genuinely unknown, must be omitted, not guessed"
+        assert events[-1]["t"] == "done"
 
 
 def _run_up_with_secret_pipe(

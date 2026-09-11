@@ -1636,12 +1636,26 @@ _total_memory_bytes() {
 # the wrapper's OWN state.json record (data-model.md persisted state:
 # machine.name/adopted), written by the bootstrap service (RT-DESK, T011) —
 # this CLI never invents that answer, it only ever reads what was recorded.
+# MAC2-01 (verificacion-mac-2.md): `machine inspect` has NO per-machine
+# provider/cpus/memory field at all (confirmed against real podman 6.1.1:
+# `--format '{{.VMType}}'` on `inspect` errors "can't evaluate field VMType
+# in type machine.InspectInfo") — only `machine list` exposes them
+# (`VMType`, `CPUs`, `Memory` in bytes-as-a-string). Emitting a hardcoded
+# `"provider":"podman"` and omitting cpus/memoryBytes made
+# `MachineSpec::is_satisfied_by` (domain.rs) never match ANY real machine,
+# so the planner treated a correctly created, healthy machine as permanent
+# drift on every single observation (MAC2-01/MAC2-06: RecreateEngine every
+# boot, pull_engine unreachable, a healthy engine destroyed and recreated).
+# One `machine list --format json` call for provider/cpus/memory (all
+# machines at once); `machine inspect` stays for rootful/state (still the
+# only source for those two).
 _machines_json() {
   [ "$OS" = Darwin ] && [ -n "$RT" ] || { echo "[]"; return; }
   names="$("$RT" machine list -q 2>/dev/null || true)"
   [ -n "$names" ] || { echo "[]"; return; }
   recorded_name=""
   [ -f "$SAFENT_STATE_HOME/machine.json" ] && recorded_name="$(_manifest_field "$SAFENT_STATE_HOME/machine.json" name)"
+  list_json="$("$RT" machine list --format json 2>/dev/null || echo '[]')"
   out=""
   for m in $names; do
     rootful="$("$RT" machine inspect "$m" --format '{{.Rootful}}' 2>/dev/null | head -1)"
@@ -1649,7 +1663,17 @@ _machines_json() {
     [ "$state" = "running" ] && running=true || running=false
     [ "$rootful" = "true" ] && rootful=true || rootful=false
     [ -n "$recorded_name" ] && [ "$m" = "$recorded_name" ] && ours=true || ours=false
-    entry="{\"name\":\"$(_json_str "$m")\",\"provider\":\"podman\",\"rootful\":$rootful,\"running\":$running,\"ours\":$ours}"
+    # `machine list --format json`'s own pretty-printer puts one field per
+    # line (verified against real podman 6.1.1 output) — same fixed-shape
+    # block-extraction `runtime-bundle.json` parsing already relies on.
+    entry_block="$(printf '%s\n' "$list_json" | awk -v p="\"Name\": \"$m\"" 'index($0,p){f=1} f{print; if(/^ *}/){exit}}')"
+    provider="$(printf '%s\n' "$entry_block" | sed -n 's/.*"VMType": *"\([^"]*\)".*/\1/p' | head -1)"
+    cpus="$(printf '%s\n' "$entry_block" | sed -n 's/.*"CPUs": *\([0-9][0-9]*\).*/\1/p' | head -1)"
+    memory_bytes="$(printf '%s\n' "$entry_block" | sed -n 's/.*"Memory": *"\([0-9][0-9]*\)".*/\1/p' | head -1)"
+    provider="${provider:-unknown}"
+    cpus="${cpus:-0}"
+    memory_bytes="${memory_bytes:-0}"
+    entry="{\"name\":\"$(_json_str "$m")\",\"provider\":\"$(_json_str "$provider")\",\"cpus\":$cpus,\"memoryBytes\":$memory_bytes,\"rootful\":$rootful,\"running\":$running,\"ours\":$ours}"
     [ -z "$out" ] && out="$entry" || out="$out,$entry"
   done
   echo "[$out]"
@@ -1875,16 +1899,67 @@ cmd_ensure_machine() {
   _stage_done
 }
 
+# MAC2-02/MAC2-03 (verificacion-mac-2.md): `"$RT" pull` ran silently and
+# only emitted a SINGLE progress line AFTER it finished — a real measured
+# pull took 84 s with a 60.9 s window with NOT ONE line on any channel.
+# app-engine.md §3.2 requires progress at least every 5 s while a stage is
+# alive; the adapter's 15 s stall watchdog killed the CLI well before that
+# gap ever closed. podman's OWN "Copying blob/config" lines cannot be
+# trusted for this either — a single large/slow blob can itself sit silent
+# for the SAME 60+ s. Backgrounding the pull and heartbeating on a FIXED,
+# short interval (independent of whatever podman is or is not printing)
+# is the only way to guarantee the contract's cadence regardless of
+# network/blob-size variance; podman's own output still streams live to
+# stderr for a human running this in a bare terminal (unchanged from
+# before — inherited fds, not redirected away).
+#
+# MAC2-04: the backgrounded pull lives in THIS process's group (the
+# wrapper's `new_process_group`/`kill_child_group` — engine_adapter.rs —
+# reaches it on a real kill); `_PULL_TRAP_PID` + the EXIT trap below are
+# defense in depth for this script's OWN normal-exit paths.
+_PULL_TRAP_PID=""
+trap '[ -n "$_PULL_TRAP_PID" ] && kill "$_PULL_TRAP_PID" 2>/dev/null; true' EXIT INT TERM
+
+_pull_with_heartbeat() {
+  _img="$1"
+  _rc_file="$(mktemp)"
+  # `if/else`, not a bare `cmd; echo "$?"` — this whole script runs under
+  # `set -e`, inherited by this subshell too: a bare failing "$RT" pull
+  # would abort the subshell AT THAT LINE, skipping the exit-code capture
+  # entirely and leaving $_rc_file empty forever. `if`'s condition is the
+  # one context set -e exempts from its own abort-on-failure rule.
+  ( if "$RT" pull "$_img" >&2; then _pull_rc=0; else _pull_rc=$?; fi; echo "$_pull_rc" > "$_rc_file" ) &
+  _PULL_TRAP_PID=$!
+  # Poll every 1 s (bounds completion-detection latency to ~1 s once the
+  # pull actually finishes) but only heartbeat every 4th tick — comfortably
+  # under app-engine.md §3.2's 5 s ceiling and the adapter's 15 s stall
+  # timeout, without emitting a progress line once a second.
+  _n=0
+  _ticks=0
+  while kill -0 "$_PULL_TRAP_PID" 2>/dev/null; do
+    sleep 1
+    _ticks=$((_ticks + 1))
+    if [ "$_ticks" -ge 4 ] && kill -0 "$_PULL_TRAP_PID" 2>/dev/null; then
+      _ticks=0
+      _n=$((_n + 1))
+      _stage_progress "$_n" "" steps
+    fi
+  done
+  wait "$_PULL_TRAP_PID" 2>/dev/null || true
+  _PULL_TRAP_PID=""
+  _rc="$(cat "$_rc_file" 2>/dev/null || echo 1)"
+  rm -f "$_rc_file"
+  return "$_rc"
+}
+
 cmd_ensure_images() {
   _stage pull_engine "Descargando Safent"
-  "$RT" pull "$IMAGE" >&2 || _die_porcelain registry_unreachable "No se pudo descargar la imagen" true
-  _stage_progress 1 1 layers
+  _pull_with_heartbeat "$IMAGE" || _die_porcelain registry_unreachable "No se pudo descargar la imagen" true
   _stage_done
 
   if [ "$NO_COMPANION" -eq 0 ] && [ -n "${SAFENT_ADS_IMAGE:-}" ]; then
     _stage pull_companion "Descargando el companero"
-    "$RT" pull "$SAFENT_ADS_IMAGE" >&2 || _die_porcelain registry_unreachable "No se pudo descargar el companero" true
-    _stage_progress 1 1 layers
+    _pull_with_heartbeat "$SAFENT_ADS_IMAGE" || _die_porcelain registry_unreachable "No se pudo descargar el companero" true
     _stage_done
   fi
 }

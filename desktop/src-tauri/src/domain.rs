@@ -130,10 +130,18 @@ pub enum MachineProvider {
 }
 
 /// One machine (podman machine VM on macOS) observed on the host — ours,
-/// adoptable, or neither. `cpus`/`memory_bytes`/`os_version` extend
-/// data-model.md's `(name, provider, rootful, running, ours)` tuple: without
-/// them "de otro tamaño" / "de otra versión" (spec FR-032) cannot be told
-/// apart from a machine that genuinely serves.
+/// adoptable, or neither. `cpus`/`memory_bytes` extend data-model.md's
+/// `(name, provider, rootful, running, ours)` tuple: without them "de otro
+/// tamaño" (spec FR-032) cannot be told apart from a machine that genuinely
+/// serves. `provider`/`cpus`/`memory_bytes` come straight from `podman
+/// machine list --format json`'s own `VMType`/`CPUs`/`Memory` (contract
+/// app-engine.md §3, `machines[]` vocabulary) — no `os_version`: MAC2-01
+/// (verificacion-mac-2.md) found neither `machine list` nor `machine
+/// inspect` expose ANY per-machine "OS version" concept at all, on real
+/// podman 6.1.1 output; comparing one was comparing a value the CLI could
+/// never truthfully report either way, so `is_satisfied_by` NEVER matched
+/// and the planner treated every correctly-created machine as permanent
+/// drift (`RecreateEngine` on every single boot — MAC2-01/MAC2-06).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MachineFact {
     pub name: MachineName,
@@ -143,7 +151,6 @@ pub struct MachineFact {
     pub ours: bool,
     pub cpus: u32,
     pub memory_bytes: Bytes,
-    pub os_version: String,
 }
 
 /// What a machine must offer to be adopted instead of replaced. On macOS, the
@@ -155,7 +162,6 @@ pub struct MachineSpec {
     pub provider: MachineProvider,
     pub cpus: u32,
     pub memory_bytes: Bytes,
-    pub os_version: String,
 }
 
 impl MachineSpec {
@@ -164,7 +170,6 @@ impl MachineSpec {
             && machine.provider == self.provider
             && machine.cpus >= self.cpus
             && machine.memory_bytes >= self.memory_bytes
-            && machine.os_version == self.os_version
     }
 }
 
@@ -796,6 +801,84 @@ mod tests {
             message: "boom".into(),
             retryable: true,
         }
+    }
+
+    // ---- MachineSpec::is_satisfied_by compares only what podman itself
+    // reports (MAC2-01, verificacion-mac-2.md) --------------------------
+
+    #[test]
+    fn a_correctly_created_machine_satisfies_its_own_spec() {
+        let machine = MachineFact {
+            name: MachineName("safent-engine".into()),
+            provider: MachineProvider::AppleHv,
+            rootful: true,
+            running: true,
+            ours: true,
+            cpus: 4,
+            memory_bytes: Bytes(8 * 1024 * 1024 * 1024), // cmd_ensure_machine's real --memory 8192
+        };
+        let spec = MachineSpec {
+            provider: MachineProvider::AppleHv,
+            cpus: 4,
+            memory_bytes: Bytes(6 * 1024 * 1024 * 1024),
+        };
+        assert!(
+            spec.is_satisfied_by(&machine),
+            "a machine matching provider/cpus/memory (>=) must satisfy the spec \
+             regardless of anything podman itself never reports per-machine"
+        );
+    }
+
+    #[test]
+    fn a_rootless_machine_never_satisfies_the_spec_even_if_everything_else_matches() {
+        let machine = MachineFact {
+            name: MachineName("safent-engine".into()),
+            provider: MachineProvider::AppleHv,
+            rootful: false,
+            running: true,
+            ours: true,
+            cpus: 4,
+            memory_bytes: Bytes(8 * 1024 * 1024 * 1024),
+        };
+        let spec = MachineSpec {
+            provider: MachineProvider::AppleHv,
+            cpus: 4,
+            memory_bytes: Bytes(6 * 1024 * 1024 * 1024),
+        };
+        assert!(!spec.is_satisfied_by(&machine));
+    }
+
+    #[test]
+    fn a_different_provider_or_insufficient_resources_does_not_satisfy_the_spec() {
+        let spec = MachineSpec {
+            provider: MachineProvider::AppleHv,
+            cpus: 4,
+            memory_bytes: Bytes(6 * 1024 * 1024 * 1024),
+        };
+        let base = MachineFact {
+            name: MachineName("safent-engine".into()),
+            provider: MachineProvider::AppleHv,
+            rootful: true,
+            running: true,
+            ours: true,
+            cpus: 4,
+            memory_bytes: Bytes(8 * 1024 * 1024 * 1024),
+        };
+        let wrong_provider = MachineFact {
+            provider: MachineProvider::Qemu,
+            ..base.clone()
+        };
+        let too_few_cpus = MachineFact {
+            cpus: 2,
+            ..base.clone()
+        };
+        let too_little_memory = MachineFact {
+            memory_bytes: Bytes(1024 * 1024 * 1024),
+            ..base
+        };
+        assert!(!spec.is_satisfied_by(&wrong_provider));
+        assert!(!spec.is_satisfied_by(&too_few_cpus));
+        assert!(!spec.is_satisfied_by(&too_little_memory));
     }
 
     // ---- SemVer / ImageRef guard their own invariants -----------------

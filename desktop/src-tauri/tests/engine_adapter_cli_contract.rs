@@ -103,6 +103,53 @@ exit 1
     assert!(!facts.another_instance_running);
 }
 
+/// MAC2-01 (verificacion-mac-2.md): the real CLI's `_machines_json` now
+/// emits `provider`/`cpus`/`memoryBytes` from `podman machine list --format
+/// json` (never `machine inspect`, which has none of the three) — no
+/// `osVersion` at all, since podman has no per-machine concept of one on
+/// either command. This is the exact wire shape `_machines_json` produces
+/// post-fix (see tests/unit/cli/test_safent_porcelain.py's
+/// TestMachinesJsonReportsRealProviderAndSize for the real-CLI proof of
+/// THAT side) — this test is the Rust side's own proof that
+/// `map_host_facts`/`map_machine_fact` parse it into a `MachineFact` that
+/// `MachineSpec::is_satisfied_by` actually matches.
+#[test]
+fn observe_maps_a_real_shaped_machines_entry_that_a_matching_spec_is_satisfied_by() {
+    let script = fake_cli(
+        r#"
+if [ "$1" = "facts" ]; then
+  cat <<'JSON'
+{"t":"facts","facts":{"os":"darwin","arch":"arm64","freeDiskBytes":21474836480,"totalMemoryBytes":17179869184,"runtimeStaged":true,"runtimeHashOk":true,"machines":[{"name":"safent-engine","provider":"applehv","cpus":4,"memoryBytes":8589934592,"rootful":true,"running":true,"ours":true}],"engineContainer":{"exists":false,"running":false,"imageDigest":null},"localEngineImageDigest":null,"localCompanionImageDigest":null,"publishedPort":null,"dataVolume":false,"companionScaffold":false,"companionContainers":{"running":0,"total":0},"companionHealth":"unknown","daemonHealth":"unknown","appVersion":null,"userNsAllowed":true,"helperInstalled":false}}
+JSON
+  exit 0
+fi
+echo "unexpected invocation: $*" >&2
+exit 1
+"#,
+    );
+    let driver = EmbeddedCliDriver::new(config(script));
+    let facts = driver.observe().expect("observe should succeed");
+
+    assert_eq!(facts.machines.len(), 1);
+    let m = &facts.machines[0];
+    assert_eq!(m.provider, domain::MachineProvider::AppleHv);
+    assert_eq!(m.cpus, 4);
+    assert_eq!(m.memory_bytes, domain::Bytes(8589934592));
+    assert!(m.rootful);
+    assert!(m.running);
+    assert!(m.ours);
+
+    let spec = domain::MachineSpec {
+        provider: domain::MachineProvider::AppleHv,
+        cpus: 4,
+        memory_bytes: domain::Bytes(6 * 1024 * 1024 * 1024),
+    };
+    assert!(
+        spec.is_satisfied_by(m),
+        "a real-shaped, correctly created machine must satisfy its own spec"
+    );
+}
+
 #[test]
 fn apply_streams_stage_progress_done_to_notifier_in_order() {
     let script = fake_cli(
