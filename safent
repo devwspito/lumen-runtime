@@ -1987,6 +1987,34 @@ cmd_up() {
     i=$((i + 1))
   done
   [ -n "$secret" ] || _die_porcelain daemon_unhealthy "Safent no respondio a tiempo" true
+
+  # MAC2-05 (verificacion-mac-2.md): the systemd unit being "active" INSIDE
+  # the container is necessary but NOT sufficient — on macOS the engine
+  # runs inside the podman machine, and a real run found the published
+  # port answered from the VM's own loopback (307) but NOT from the host
+  # (000; gvproxy stuck in CLOSE_WAIT), for a reason downstream of this
+  # script (podman/netavark/gvproxy port-forwarding on the applehv
+  # provider — verified NOT to be an `_ensure_machine`/`_run` invocation
+  # bug: both already drive the container through the host's OWN podman
+  # client against the machine's connection, never `machine ssh`). `ready`
+  # emitted on internal-only evidence is a lie the owner would see as a
+  # blank window: probe the SAME host-reachable, unauthenticated endpoint
+  # (`/healthz`, no ticket needed) the port itself must serve before ever
+  # declaring ready.
+  _mac205_port="$(_port)"
+  _mac205_attempts="${SAFENT_HEALTHZ_PROBE_ATTEMPTS:-12}"
+  _mac205_interval="${SAFENT_HEALTHZ_PROBE_INTERVAL_SECONDS:-2}"
+  _mac205_probe_ok=false
+  _mac205_j=0
+  while [ "$_mac205_j" -lt "$_mac205_attempts" ]; do
+    _mac205_code="$(curl -s -o /dev/null -m 3 -w '%{http_code}' "http://127.0.0.1:${_mac205_port}/healthz" 2>/dev/null || echo 000)"
+    [ "$_mac205_code" = "200" ] && { _mac205_probe_ok=true; break; }
+    _stage_progress "$_mac205_j" "$_mac205_attempts" steps
+    sleep "$_mac205_interval"
+    _mac205_j=$((_mac205_j + 1))
+  done
+  [ "$_mac205_probe_ok" = "true" ] \
+    || _die_porcelain daemon_unhealthy "El puerto publicado no responde desde este equipo" true
   _stage_done
 
   url="http://127.0.0.1:$(_port)/?k=${secret}"

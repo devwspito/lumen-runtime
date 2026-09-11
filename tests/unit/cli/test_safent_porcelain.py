@@ -25,6 +25,8 @@ import hashlib
 import json
 import os
 import subprocess
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import pytest
@@ -198,6 +200,41 @@ def fake_bin_dir(tmp_path: Path) -> Path:
     podman.write_text(_FAKE_PODMAN)
     podman.chmod(0o755)
     return bin_dir
+
+
+class _HealthzHandler(BaseHTTPRequestHandler):
+    """MAC2-05 (verificacion-mac-2.md): `cmd_up` now curls this exact
+    unauthenticated endpoint from the HOST before ever declaring ready —
+    `podman`/`podman exec` are faked, but this probe is a REAL `curl`
+    against a REAL socket, so tests need a real (tiny) listener, not
+    another shell-script fake."""
+
+    def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's own name
+        if self.path == "/healthz":
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"status":"ok"}')
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002 - stdlib's own signature
+        pass  # silence per-request logging — tests already assert on safent's own output
+
+
+@pytest.fixture()
+def healthz_server():
+    """Starts a real HTTP server on an OS-assigned free port, serving 200 on
+    `/healthz`. Yields the port number as a str (matching `_base_env`'s own
+    `port` parameter type) — callers pass it straight through."""
+    server = HTTPServer(("127.0.0.1", 0), _HealthzHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield str(server.server_address[1])
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
 
 
 def _base_env(
@@ -922,15 +959,17 @@ def _run_up_with_secret_pipe(
 
 class TestUpDeliversTheTicketOnlyOnTheSecretFd:
     def test_porcelain_up_never_leaks_the_ticket_on_stdout_or_stderr(
-        self, tmp_path: Path, fake_bin_dir: Path, capsys: pytest.CaptureFixture[str]
+        self, tmp_path: Path, fake_bin_dir: Path, healthz_server: str, capsys: pytest.CaptureFixture[str]
     ) -> None:
         podman_log = tmp_path / "podman.log"
-        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log)
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log, port=healthz_server
+        )
 
         result, ticket = _run_up_with_secret_pipe("--porcelain", env=env, capsys=capsys)
 
         assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
-        assert ticket.strip() == f"http://127.0.0.1:17517/?k={_SECRET_TOKEN}"
+        assert ticket.strip() == f"http://127.0.0.1:{healthz_server}/?k={_SECRET_TOKEN}"
         assert _SECRET_TOKEN not in result.stdout
         assert _SECRET_TOKEN not in result.stderr
 
@@ -940,15 +979,17 @@ class TestUpDeliversTheTicketOnlyOnTheSecretFd:
         assert events[-1] == {"t": "ready", "endpoint_ref": "stdout-secret"}
 
     def test_non_porcelain_up_prints_the_url_to_stdout_like_the_existing_url_verb(
-        self, tmp_path: Path, fake_bin_dir: Path, capsys: pytest.CaptureFixture[str]
+        self, tmp_path: Path, fake_bin_dir: Path, healthz_server: str, capsys: pytest.CaptureFixture[str]
     ) -> None:
         podman_log = tmp_path / "podman.log"
-        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log)
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log, port=healthz_server
+        )
 
         result, ticket = _run_up_with_secret_pipe(env=env, capsys=capsys)
 
         assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
-        assert result.stdout.strip() == f"http://127.0.0.1:17517/?k={_SECRET_TOKEN}"
+        assert result.stdout.strip() == f"http://127.0.0.1:{healthz_server}/?k={_SECRET_TOKEN}"
         assert ticket == ""  # non-porcelain `up` never touches --secret-fd
 
     def test_daemon_never_becoming_active_fails_closed(
@@ -971,6 +1012,93 @@ class TestUpDeliversTheTicketOnlyOnTheSecretFd:
         assert events[-1]["code"] == "daemon_unhealthy"
         assert _SECRET_TOKEN not in result.stdout
         assert _SECRET_TOKEN not in result.stderr
+
+    def test_ready_never_fires_if_the_published_port_never_answers_from_the_host(
+        self, tmp_path: Path, fake_bin_dir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """MAC2-05 (verificacion-mac-2.md): a real Mac run had systemd
+        report the daemon active, the bootstrap secret readable — and
+        `ready` fired — while the published port answered `000` from the
+        HOST (only `307` from the VM's own loopback). No server at all is
+        listening here — the exact "engine healthy inside, unreachable
+        outside" shape, on a port fast/cheap enough for a unit test to
+        actually exhaust the retry budget (SAFENT_HEALTHZ_PROBE_ATTEMPTS)."""
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            port="1",  # nothing ever listens on port 1 without root — always refused
+            extra_env={
+                "SAFENT_HEALTHZ_PROBE_ATTEMPTS": "2",
+                "SAFENT_HEALTHZ_PROBE_INTERVAL_SECONDS": "1",
+            },
+        )
+        result, ticket = _run_up_with_secret_pipe("--porcelain", env=env, capsys=capsys)
+
+        assert result.returncode == 24, f"stdout={result.stdout}\nstderr={result.stderr}"
+        assert ticket == "", "no ticket must ever reach the secret fd for a port nobody answers on"
+        events = _parse_ndjson(result.stdout)
+        _assert_stage_closure_invariant(events)
+        assert events[-1]["t"] == "failed"
+        assert events[-1]["code"] == "daemon_unhealthy"
+        assert "ready" not in [e["t"] for e in events], (
+            "ready must NEVER fire on internal-only evidence — this is the whole point of MAC2-05"
+        )
+
+    def test_probe_retries_until_the_port_actually_starts_answering(
+        self, tmp_path: Path, fake_bin_dir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The systemd unit can report active a moment before the app
+        itself is actually accepting connections — the probe must retry,
+        not fail on the very first attempt. The socket is not even BOUND
+        until after the delay (an already-bound-but-not-yet-served
+        HTTPServer still completes the TCP handshake instantly, which
+        would make a single curl attempt succeed without ever retrying —
+        this must reproduce "connection refused", not "slow response")."""
+        import socket
+        import time
+
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        probe.bind(("127.0.0.1", 0))
+        port = str(probe.getsockname()[1])
+        probe.close()
+
+        holder: dict[str, HTTPServer] = {}
+
+        def _start_late() -> None:
+            time.sleep(1.5)
+            server = HTTPServer(("127.0.0.1", int(port)), _HealthzHandler)
+            holder["server"] = server
+            server.serve_forever()
+
+        thread = threading.Thread(target=_start_late, daemon=True)
+        thread.start()
+        try:
+            podman_log = tmp_path / "podman.log"
+            env = _base_env(
+                fake_bin_dir=fake_bin_dir,
+                home_dir=tmp_path / "home",
+                podman_log=podman_log,
+                port=port,
+                extra_env={
+                    "SAFENT_HEALTHZ_PROBE_ATTEMPTS": "10",
+                    "SAFENT_HEALTHZ_PROBE_INTERVAL_SECONDS": "1",
+                },
+            )
+            result, ticket = _run_up_with_secret_pipe("--porcelain", env=env, capsys=capsys)
+
+            assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+            assert ticket.strip() == f"http://127.0.0.1:{port}/?k={_SECRET_TOKEN}"
+            events = _parse_ndjson(result.stdout)
+            _assert_stage_closure_invariant(events)
+            assert events[-1] == {"t": "ready", "endpoint_ref": "stdout-secret"}
+            progress_events = [e for e in events if e["t"] == "progress"]
+            assert len(progress_events) >= 1, "at least one retry must have happened before success"
+        finally:
+            if "server" in holder:
+                holder["server"].shutdown()
+            thread.join(timeout=5)
 
 
 class TestStatusHonoursPorcelain:
