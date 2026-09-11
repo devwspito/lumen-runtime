@@ -220,4 +220,51 @@ resupplied="$(jq -r '.engine_image.digest' "$fake_dest2/runtime-bundle.json")"
   fail "a freshly re-supplied SAFENT_ENGINE_DIGEST on refresh must win over the prior recorded value, got: $resupplied"
 pass "--refresh-bundle-json honors a freshly re-supplied SAFENT_ENGINE_DIGEST over the prior recorded value"
 
+# Case 5: MAC2-08 (verificacion-mac-2.md) — a real signed DMG shipped with
+# all 15 cdhash null despite matching sha256: codesigning runs against the
+# BUILT .app's OWN copy of these files, never against
+# resources/runtime/<triple>/ (nothing re-touches that after normal
+# staging). The optional 3rd arg must let the pipeline point this at the
+# ACTUAL signed location instead of always defaulting to the staging dir.
+fake_repo3="$WORK/fake-repo-explicit-dir"
+mkdir -p "$fake_repo3/desktop/scripts"
+cp -R "$SCRIPTS_DIR/lib" "$fake_repo3/desktop/scripts/lib"
+cp "$SCRIPTS_DIR/stage-runtime.sh" "$fake_repo3/desktop/scripts/stage-runtime.sh"
+printf '%s' '{"targets": {"aarch64-apple-darwin": {"podman_version": "6.1.1"}}}' \
+  > "$fake_repo3/desktop/runtime-manifest.lock"
+
+# The default staging location — deliberately left with its pre-sign
+# (null-cdhash) manifest, to prove it is NEVER touched by this case.
+staging_dest="$fake_repo3/desktop/src-tauri/resources/runtime/aarch64-apple-darwin"
+mkdir -p "$staging_dest"
+printf '\xcf\xfa\xed\xfe' > "$staging_dest/podman"
+cat > "$staging_dest/runtime-bundle.json" <<JSON
+{"podman_version":"6.1.1","entries":[{"path":"podman","sha256":"staging-stale","cdhash":null,"mode":"0755"}]}
+JSON
+
+# The ACTUAL signed .app's own resource copy — a SEPARATE directory,
+# standing in for Contents/Resources/runtime/ after a real build+sign.
+app_dest="$WORK/Safent.app/Contents/Resources/runtime"
+mkdir -p "$app_dest"
+printf '\xcf\xfa\xed\xfe' > "$app_dest/podman"
+cat > "$app_dest/runtime-bundle.json" <<JSON
+{"podman_version":"6.1.1","entries":[{"path":"podman","sha256":"app-stale","cdhash":null,"mode":"0755"}]}
+JSON
+rm -rf "$FAKE_CDHASHES_DIR"
+mkdir -p "$FAKE_CDHASHES_DIR"
+echo "signedappcdhash0123456789abcdef0123456789abcdef" > "$FAKE_CDHASHES_DIR/podman"
+
+SAFENT_CODESIGN="$FAKE_CODESIGN" timeout 10 bash "$fake_repo3/desktop/scripts/stage-runtime.sh" \
+  --refresh-bundle-json aarch64-apple-darwin "$app_dest" >"$WORK/refresh-explicit-dir.out" 2>&1
+rc=$?
+[ "$rc" -eq 0 ] || fail "--refresh-bundle-json <target> <dir> exited $rc: $(cat "$WORK/refresh-explicit-dir.out")"
+
+app_cdhash="$(jq -r '.entries[] | select(.path=="podman") | .cdhash' "$app_dest/runtime-bundle.json")"
+[ "$app_cdhash" = "signedappcdhash0123456789abcdef0123456789abcdef" ] || \
+  fail "the EXPLICIT dir's manifest must be the one refreshed with the real cdhash, got: $app_cdhash"
+staging_cdhash="$(jq -r '.entries[] | select(.path=="podman") | .cdhash' "$staging_dest/runtime-bundle.json")"
+[ "$staging_cdhash" = "null" ] || \
+  fail "the DEFAULT staging dir must be left untouched when an explicit dir is given, got: $staging_cdhash"
+pass "--refresh-bundle-json <target> <dir> operates on the explicit dir, never the default staging tree"
+
 echo "[ok] test-runtime-bundle-machobinary-cdhash.sh: all cases passed"

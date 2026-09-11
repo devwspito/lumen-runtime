@@ -77,9 +77,21 @@ Dos escrituras distintas, con semántica distinta:
    exactamente como antes. `stage-runtime.sh <triple>` (staging normal, PRE
    firma) escribe `cdhash: null` para cada Mach-O — codesign aún no tiene
    nada que reportar en ese momento. `stage-runtime.sh --refresh-bundle-json
-   <triple>` — invocado por el pipeline justo DESPUÉS de firmar, nunca
-   antes — re-escanea el `$DEST` YA STAGEADO (sin descargar nada) y
-   reescribe `runtime-bundle.json` con el `cdhash` real de cada Mach-O.
+   <triple> [dir]` — invocado por el pipeline justo DESPUÉS de firmar, nunca
+   antes — re-escanea `dir` YA STAGEADO (sin descargar nada) y reescribe
+   `runtime-bundle.json` con el `cdhash` real de cada Mach-O.
+
+   **`dir` importa de verdad (MAC2-08, verificacion-mac-2.md)**: un DMG
+   notarizado real envió los 15 `cdhash` en `null` a pesar de que el sha256
+   SÍ casaba post-firma — la firma se aplicó al `.app` YA CONSTRUIDO
+   (`Contents/Resources/runtime/`, la COPIA que `bundle.resources` produce
+   al compilar), nunca a este árbol de staging
+   (`resources/runtime/<triple>/`), que nadie vuelve a tocar después del
+   staging normal. Omitir `dir` reescanea el árbol de STAGING — sha256
+   sigue coincidiendo (nada cambió ahí) pero el `cdhash` se queda `null`
+   para siempre, por diseño, no por fallo. El pipeline debe apuntar `dir`
+   al `Contents/Resources/runtime/` real del `.app` YA FIRMADO para que
+   la vía `cdhash` llegue a ejercitarse alguna vez.
 
 `normalize-staged-tree.sh`'s `_EXECUTABLE_BASENAMES` incluye `safent`,
 `run-safent.sh` y `provision.sh` (0755); `compose.yaml`/`caps.template.yaml`
