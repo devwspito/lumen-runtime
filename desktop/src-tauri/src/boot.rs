@@ -858,7 +858,6 @@ fn desired_machine_spec() -> Option<MachineSpec> {
             provider: MachineProvider::AppleHv,
             cpus: 4,
             memory_bytes: Bytes(6 * GIB),
-            os_version: "6.1".to_string(),
         })
     }
     #[cfg(not(target_os = "macos"))]

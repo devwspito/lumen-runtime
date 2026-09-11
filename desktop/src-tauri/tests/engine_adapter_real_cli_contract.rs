@@ -23,6 +23,8 @@ mod engine_adapter;
 #[path = "../src/ports.rs"]
 mod ports;
 
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -403,20 +405,69 @@ fn real_stage_runtime_ensure_machine_ensure_images_are_contract_shaped_ndjson() 
     );
 }
 
+/// MAC2-05 (verificacion-mac-2.md): `cmd_up` now curls `/healthz` on the
+/// published port from the HOST before ever declaring ready — a minimal
+/// raw TCP listener (no HTTP framework dependency needed for one fixed
+/// 200 response) standing in for the real product's own `/healthz`, on
+/// the exact port `FAKE_PORT`/`healthy_fixture` already pins (17517).
+/// Accepts connections on a background thread until `stop` is signaled,
+/// so the CLI's retries (if any) keep succeeding rather than hitting a
+/// closed port after the first request.
+fn spawn_healthz_listener(
+    port: u16,
+) -> (
+    std::thread::JoinHandle<()>,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    let listener = TcpListener::bind(("127.0.0.1", port)).expect("bind fake healthz port");
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking so the accept loop can observe the stop flag");
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_for_thread = stop.clone();
+    let handle = std::thread::spawn(move || {
+        while !stop_for_thread.load(Ordering::SeqCst) {
+            match listener.accept() {
+                Ok((stream, _)) => handle_healthz_connection(stream),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    (handle, stop)
+}
+
+fn handle_healthz_connection(mut stream: TcpStream) {
+    let mut buf = [0u8; 512];
+    let _ = stream.read(&mut buf); // drain the request line; contents unchecked, only one route exists here
+    let body = b"{\"status\":\"ok\"}";
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(response.as_bytes());
+    let _ = stream.write_all(body);
+    let _ = stream.flush();
+}
+
 #[test]
 fn real_up_delivers_a_working_ticket_over_the_secret_fd() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let fx = healthy_fixture("up", "engine-good");
     let driver = EmbeddedCliDriver::new(config(&fx, "engine-good"));
     let notifier = RecordingNotifier::new();
+    let (healthz_thread, healthz_stop) = spawn_healthz_listener(17517);
 
-    let outcome = driver
-        .apply(
-            &RepairAction::CreateContainer,
-            &notifier,
-            &CancelSignal::new(),
-        )
-        .expect("up --secret-fd 3 --porcelain must succeed against the real CLI");
+    let outcome = driver.apply(
+        &RepairAction::CreateContainer,
+        &notifier,
+        &CancelSignal::new(),
+    );
+    healthz_stop.store(true, Ordering::SeqCst);
+    let _ = healthz_thread.join();
+    let outcome = outcome.expect("up --secret-fd 3 --porcelain must succeed against the real CLI");
 
     match outcome {
         ApplyOutcome::Ready(ticket) => {

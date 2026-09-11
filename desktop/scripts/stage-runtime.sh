@@ -146,12 +146,28 @@ if [ "${1:-}" = "--refresh-bundle-json" ]; then
   case "$TARGET" in
     aarch64-apple-darwin|x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu) ;;
     *)
-      echo "[x] usage: $0 --refresh-bundle-json <aarch64-apple-darwin|x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu>" >&2
+      echo "[x] usage: $0 --refresh-bundle-json <target> [dir]" >&2
+      echo "    target = aarch64-apple-darwin | x86_64-unknown-linux-gnu | aarch64-unknown-linux-gnu" >&2
       exit "$EXIT_USAGE"
       ;;
   esac
   [ -f "$LOCKFILE" ] || { echo "[x] missing $LOCKFILE" >&2; exit "$EXIT_USAGE"; }
-  DEST="$RESOURCES_ROOT/$TARGET"
+  # MAC2-08 (verificacion-mac-2.md): a real signed DMG shipped with all 15
+  # cdhash entries null despite sha256 matching post-sign — codesigning
+  # runs against the BUILT .app's OWN copy of these files
+  # (Contents/Resources/runtime/, produced by Tauri's bundle.resources
+  # COPYING resources/runtime/<triple>/ at build time), never against
+  # THIS staging directory, which nothing touches again after
+  # stage-runtime.sh's own normal run. Refreshing $RESOURCES_ROOT/$TARGET
+  # unconditionally could only ever re-hash the UNSIGNED staging copy —
+  # right sha256 (nothing there changed), permanently null cdhash (nothing
+  # there was ever signed). An optional 3rd arg lets the pipeline point
+  # this at the ACTUAL signed location once it exists.
+  if [ -n "${3:-}" ]; then
+    DEST="$3"
+  else
+    DEST="$RESOURCES_ROOT/$TARGET"
+  fi
   [ -d "$DEST" ] || {
     echo "[x] $DEST does not exist — stage $TARGET normally first; this mode never downloads" >&2
     exit "$EXIT_USAGE"
@@ -201,7 +217,7 @@ done
     ;;
 esac
 
-DEST="$RESOURCES_ROOT/$TARGET"
+[ "$REFRESH_ONLY" -eq 1 ] || DEST="$RESOURCES_ROOT/$TARGET"
 # Persistent across runs (on purpose — a killed script resumes an in-flight
 # archive/image download from here instead of restarting it): gitignored,
 # but NOT under resources/runtime/ — see the comment on RESOURCES_ROOT above.

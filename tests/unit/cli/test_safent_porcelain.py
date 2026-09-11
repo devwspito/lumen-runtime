@@ -25,6 +25,8 @@ import hashlib
 import json
 import os
 import subprocess
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import pytest
@@ -99,6 +101,12 @@ case "$1" in
     exit 0
     ;;
   pull)
+    # MAC2-02/MAC2-03 (verificacion-mac-2.md): a real pull can sit silent
+    # for over a minute between podman's own output lines — simulate that
+    # shape (silent for FAKE_PULL_DELAY_SECONDS, no intermediate output at
+    # all) so the heartbeat mechanism is exercised for real, not just
+    # "podman printed something and we echoed it back."
+    [ -n "${FAKE_PULL_DELAY_SECONDS:-}" ] && sleep "$FAKE_PULL_DELAY_SECONDS"
     [ "${FAKE_PULL_FAILS:-false}" = "true" ] && exit 1
     exit 0
     ;;
@@ -110,6 +118,35 @@ case "$1" in
     sub="$1"; shift
     case "$sub" in
       list)
+        # MAC2-01 (verificacion-mac-2.md): _machines_json now also calls
+        # `machine list --format json` for provider/cpus/memory (real
+        # podman's `machine inspect` has none of the three) — FAKE_MACHINE_
+        # DETAILS is "name:provider:cpus:memory_bytes" per line, looked up
+        # per name in FAKE_MACHINES_STATE.
+        if [ "${1:-}" = "--format" ] && [ "${2:-}" = "json" ]; then
+          printf '['
+          first=true
+          if [ -n "${FAKE_MACHINES_STATE:-}" ] && [ -f "$FAKE_MACHINES_STATE" ]; then
+            while IFS= read -r mname; do
+              [ -n "$mname" ] || continue
+              provider="unknown"; cpus=0; mem=0
+              if [ -n "${FAKE_MACHINE_DETAILS:-}" ] && [ -f "$FAKE_MACHINE_DETAILS" ]; then
+                line="$(grep "^$mname:" "$FAKE_MACHINE_DETAILS" 2>/dev/null | head -1)"
+                if [ -n "$line" ]; then
+                  provider="$(echo "$line" | cut -d: -f2)"
+                  cpus="$(echo "$line" | cut -d: -f3)"
+                  mem="$(echo "$line" | cut -d: -f4)"
+                fi
+              fi
+              [ "$first" = "true" ] || printf ','
+              first=false
+              printf '\n    {\n        "Name": "%s",\n        "VMType": "%s",\n        "CPUs": %s,\n        "Memory": "%s"\n    }' \
+                "$mname" "$provider" "$cpus" "$mem"
+            done < "$FAKE_MACHINES_STATE"
+          fi
+          printf '\n]\n'
+          exit 0
+        fi
         # cmd_ensure_machine only ever calls `machine list -q`; state is a
         # plain newline-separated list of existing machine names, mutated
         # by `init` below (MAC-05, verificacion-mac-1.md tests).
@@ -163,6 +200,41 @@ def fake_bin_dir(tmp_path: Path) -> Path:
     podman.write_text(_FAKE_PODMAN)
     podman.chmod(0o755)
     return bin_dir
+
+
+class _HealthzHandler(BaseHTTPRequestHandler):
+    """MAC2-05 (verificacion-mac-2.md): `cmd_up` now curls this exact
+    unauthenticated endpoint from the HOST before ever declaring ready —
+    `podman`/`podman exec` are faked, but this probe is a REAL `curl`
+    against a REAL socket, so tests need a real (tiny) listener, not
+    another shell-script fake."""
+
+    def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's own name
+        if self.path == "/healthz":
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"status":"ok"}')
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002 - stdlib's own signature
+        pass  # silence per-request logging — tests already assert on safent's own output
+
+
+@pytest.fixture()
+def healthz_server():
+    """Starts a real HTTP server on an OS-assigned free port, serving 200 on
+    `/healthz`. Yields the port number as a str (matching `_base_env`'s own
+    `port` parameter type) — callers pass it straight through."""
+    server = HTTPServer(("127.0.0.1", 0), _HealthzHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield str(server.server_address[1])
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
 
 
 def _base_env(
@@ -553,6 +625,86 @@ class TestEnsureMachineNeverAdoptsAForeignMachine:
         assert any(c.startswith("machine start safent-test-engine") for c in calls)
 
 
+class TestMachinesJsonReportsRealProviderAndSize:
+    """MAC2-01 (verificacion-mac-2.md): `facts.machines[]` used to hardcode
+    `provider:"podman"` and omit cpus/memoryBytes entirely — `MachineSpec::
+    is_satisfied_by` (Rust) never matched a real machine because of it, so
+    the planner treated every correctly created machine as permanent drift
+    (RecreateEngine on every single boot)."""
+
+    def test_facts_reports_real_provider_cpus_and_memory_bytes(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        _fake_darwin(fake_bin_dir)
+        podman_log = tmp_path / "podman.log"
+        machines_state = tmp_path / "machines.state"
+        machines_state.write_text("safent-test-engine\n")
+        machine_details = tmp_path / "machine.details"
+        # 4 CPUs, 8192 MiB — cmd_ensure_machine's own real --cpus/--memory.
+        machine_details.write_text("safent-test-engine:applehv:4:8589934592\n")
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            extra_env={
+                "FAKE_MACHINES_STATE": str(machines_state),
+                "FAKE_MACHINE_DETAILS": str(machine_details),
+                "FAKE_MACHINE_ROOTFUL": "true",
+                "FAKE_MACHINE_STATE": "running",
+            },
+        )
+
+        result = _run_safent("facts", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        machines = json.loads(result.stdout.strip())["machines"]
+        assert len(machines) == 1, machines
+        m = machines[0]
+        assert m["name"] == "safent-test-engine"
+        assert m["provider"] == "applehv", f"must be the REAL provider, not a hardcoded 'podman': {m}"
+        assert m["cpus"] == 4
+        assert m["memoryBytes"] == 8589934592
+        assert m["rootful"] is True
+        assert m["running"] is True
+
+    def test_facts_reports_a_foreign_machine_alongside_ours_with_its_own_provider(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """The owner's own podman-machine-default (libkrun) must be
+        reported honestly if it happens to be listed — never coerced into
+        our own provider — even though this app never touches it
+        (MAC-05/MAC2-14: separate concerns, adoption vs. observation)."""
+        _fake_darwin(fake_bin_dir)
+        podman_log = tmp_path / "podman.log"
+        machines_state = tmp_path / "machines.state"
+        machines_state.write_text("podman-machine-default\nsafent-test-engine\n")
+        machine_details = tmp_path / "machine.details"
+        machine_details.write_text(
+            "podman-machine-default:libkrun:4:8589934592\n"
+            "safent-test-engine:applehv:4:8589934592\n"
+        )
+        home_dir = tmp_path / "home"
+        state_home = home_dir / ".safent"
+        state_home.mkdir(parents=True)
+        (state_home / "machine.json").write_text('{"name":"safent-test-engine","adopted":false}\n')
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=home_dir,
+            podman_log=podman_log,
+            extra_env={
+                "FAKE_MACHINES_STATE": str(machines_state),
+                "FAKE_MACHINE_DETAILS": str(machine_details),
+            },
+        )
+
+        result = _run_safent("facts", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        machines = {m["name"]: m for m in json.loads(result.stdout.strip())["machines"]}
+        assert machines["podman-machine-default"]["provider"] == "libkrun"
+        assert machines["podman-machine-default"]["ours"] is False
+        assert machines["safent-test-engine"]["provider"] == "applehv"
+        assert machines["safent-test-engine"]["ours"] is True
+
+
 class TestStageRuntime:
     def test_without_a_bundle_manifest_is_a_harmless_noop(self, tmp_path: Path, fake_bin_dir: Path) -> None:
         podman_log = tmp_path / "podman.log"
@@ -740,6 +892,36 @@ class TestEnsureImages:
         assert events[-1]["code"] == "registry_unreachable"
         assert events[-1]["retryable"] is True
 
+    def test_a_silent_multi_second_pull_still_emits_progress_heartbeats(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """MAC2-02/MAC2-03 (verificacion-mac-2.md): a real pull_engine
+        measured 84 s with a 60.9 s window with NOT ONE line on any
+        channel — app-engine.md §3.2 requires progress at least every 5 s
+        while a stage is alive, and the adapter's 15 s stall watchdog
+        killed the CLI well before that. `podman pull` here is silent for
+        6 s straight (no intermediate output at all, the worst case) —
+        the CLI itself must still emit progress on its own cadence."""
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            extra_env={"FAKE_PULL_DELAY_SECONDS": "6"},
+        )
+        result = _run_safent("ensure-images", "--porcelain", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        events = _parse_ndjson(result.stdout)
+        _assert_stage_closure_invariant(events)
+        progress_events = [e for e in events if e["t"] == "progress" and e["id"] == "pull_engine"]
+        assert len(progress_events) >= 1, (
+            f"a 6 s silent pull must still emit at least one heartbeat: {events}"
+        )
+        for e in progress_events:
+            assert e["unit"] == "steps"
+            assert "total" not in e, "the heartbeat's total is genuinely unknown, must be omitted, not guessed"
+        assert events[-1]["t"] == "done"
+
 
 def _run_up_with_secret_pipe(
     *args: str, env: dict[str, str], capsys: pytest.CaptureFixture[str]
@@ -777,15 +959,17 @@ def _run_up_with_secret_pipe(
 
 class TestUpDeliversTheTicketOnlyOnTheSecretFd:
     def test_porcelain_up_never_leaks_the_ticket_on_stdout_or_stderr(
-        self, tmp_path: Path, fake_bin_dir: Path, capsys: pytest.CaptureFixture[str]
+        self, tmp_path: Path, fake_bin_dir: Path, healthz_server: str, capsys: pytest.CaptureFixture[str]
     ) -> None:
         podman_log = tmp_path / "podman.log"
-        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log)
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log, port=healthz_server
+        )
 
         result, ticket = _run_up_with_secret_pipe("--porcelain", env=env, capsys=capsys)
 
         assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
-        assert ticket.strip() == f"http://127.0.0.1:17517/?k={_SECRET_TOKEN}"
+        assert ticket.strip() == f"http://127.0.0.1:{healthz_server}/?k={_SECRET_TOKEN}"
         assert _SECRET_TOKEN not in result.stdout
         assert _SECRET_TOKEN not in result.stderr
 
@@ -795,15 +979,17 @@ class TestUpDeliversTheTicketOnlyOnTheSecretFd:
         assert events[-1] == {"t": "ready", "endpoint_ref": "stdout-secret"}
 
     def test_non_porcelain_up_prints_the_url_to_stdout_like_the_existing_url_verb(
-        self, tmp_path: Path, fake_bin_dir: Path, capsys: pytest.CaptureFixture[str]
+        self, tmp_path: Path, fake_bin_dir: Path, healthz_server: str, capsys: pytest.CaptureFixture[str]
     ) -> None:
         podman_log = tmp_path / "podman.log"
-        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log)
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log, port=healthz_server
+        )
 
         result, ticket = _run_up_with_secret_pipe(env=env, capsys=capsys)
 
         assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
-        assert result.stdout.strip() == f"http://127.0.0.1:17517/?k={_SECRET_TOKEN}"
+        assert result.stdout.strip() == f"http://127.0.0.1:{healthz_server}/?k={_SECRET_TOKEN}"
         assert ticket == ""  # non-porcelain `up` never touches --secret-fd
 
     def test_daemon_never_becoming_active_fails_closed(
@@ -826,6 +1012,93 @@ class TestUpDeliversTheTicketOnlyOnTheSecretFd:
         assert events[-1]["code"] == "daemon_unhealthy"
         assert _SECRET_TOKEN not in result.stdout
         assert _SECRET_TOKEN not in result.stderr
+
+    def test_ready_never_fires_if_the_published_port_never_answers_from_the_host(
+        self, tmp_path: Path, fake_bin_dir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """MAC2-05 (verificacion-mac-2.md): a real Mac run had systemd
+        report the daemon active, the bootstrap secret readable — and
+        `ready` fired — while the published port answered `000` from the
+        HOST (only `307` from the VM's own loopback). No server at all is
+        listening here — the exact "engine healthy inside, unreachable
+        outside" shape, on a port fast/cheap enough for a unit test to
+        actually exhaust the retry budget (SAFENT_HEALTHZ_PROBE_ATTEMPTS)."""
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            port="1",  # nothing ever listens on port 1 without root — always refused
+            extra_env={
+                "SAFENT_HEALTHZ_PROBE_ATTEMPTS": "2",
+                "SAFENT_HEALTHZ_PROBE_INTERVAL_SECONDS": "1",
+            },
+        )
+        result, ticket = _run_up_with_secret_pipe("--porcelain", env=env, capsys=capsys)
+
+        assert result.returncode == 24, f"stdout={result.stdout}\nstderr={result.stderr}"
+        assert ticket == "", "no ticket must ever reach the secret fd for a port nobody answers on"
+        events = _parse_ndjson(result.stdout)
+        _assert_stage_closure_invariant(events)
+        assert events[-1]["t"] == "failed"
+        assert events[-1]["code"] == "daemon_unhealthy"
+        assert "ready" not in [e["t"] for e in events], (
+            "ready must NEVER fire on internal-only evidence — this is the whole point of MAC2-05"
+        )
+
+    def test_probe_retries_until_the_port_actually_starts_answering(
+        self, tmp_path: Path, fake_bin_dir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The systemd unit can report active a moment before the app
+        itself is actually accepting connections — the probe must retry,
+        not fail on the very first attempt. The socket is not even BOUND
+        until after the delay (an already-bound-but-not-yet-served
+        HTTPServer still completes the TCP handshake instantly, which
+        would make a single curl attempt succeed without ever retrying —
+        this must reproduce "connection refused", not "slow response")."""
+        import socket
+        import time
+
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        probe.bind(("127.0.0.1", 0))
+        port = str(probe.getsockname()[1])
+        probe.close()
+
+        holder: dict[str, HTTPServer] = {}
+
+        def _start_late() -> None:
+            time.sleep(1.5)
+            server = HTTPServer(("127.0.0.1", int(port)), _HealthzHandler)
+            holder["server"] = server
+            server.serve_forever()
+
+        thread = threading.Thread(target=_start_late, daemon=True)
+        thread.start()
+        try:
+            podman_log = tmp_path / "podman.log"
+            env = _base_env(
+                fake_bin_dir=fake_bin_dir,
+                home_dir=tmp_path / "home",
+                podman_log=podman_log,
+                port=port,
+                extra_env={
+                    "SAFENT_HEALTHZ_PROBE_ATTEMPTS": "10",
+                    "SAFENT_HEALTHZ_PROBE_INTERVAL_SECONDS": "1",
+                },
+            )
+            result, ticket = _run_up_with_secret_pipe("--porcelain", env=env, capsys=capsys)
+
+            assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+            assert ticket.strip() == f"http://127.0.0.1:{port}/?k={_SECRET_TOKEN}"
+            events = _parse_ndjson(result.stdout)
+            _assert_stage_closure_invariant(events)
+            assert events[-1] == {"t": "ready", "endpoint_ref": "stdout-secret"}
+            progress_events = [e for e in events if e["t"] == "progress"]
+            assert len(progress_events) >= 1, "at least one retry must have happened before success"
+        finally:
+            if "server" in holder:
+                holder["server"].shutdown()
+            thread.join(timeout=5)
 
 
 class TestStatusHonoursPorcelain:

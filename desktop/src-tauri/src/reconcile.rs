@@ -234,7 +234,6 @@ mod tests {
             ours: true,
             cpus: 4,
             memory_bytes: Bytes(8 * GIB),
-            os_version: "6.1".into(),
         }
     }
 
@@ -246,7 +245,6 @@ mod tests {
                 provider: MachineProvider::AppleHv,
                 cpus: 4,
                 memory_bytes: Bytes(8 * GIB),
-                os_version: "6.1".into(),
             }),
             min_free_disk_bytes: Bytes(4 * GIB),
             min_total_memory_bytes: Bytes(8 * GIB),
@@ -315,6 +313,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn mac2_06_reopening_the_app_with_a_healthy_engine_never_destroys_it() {
+        // MAC2-06/MAC-12 (verificacion-mac-2.md): opening the app while the
+        // engine was already up (a healthy, digest-matching container on a
+        // machine that satisfies its own spec) destroyed and recreated the
+        // whole engine — 13 s, a NEW port, in-flight work lost. Root cause
+        // was MAC2-01 (machine_gap's is_satisfied_by never matching a real
+        // machine because of an unsatisfiable os_version comparison),
+        // which made machine_gap return RecreateEngine on EVERY observation
+        // before images_gap/container_gap — the ones that already treat a
+        // healthy container as converged — were ever reached. This is the
+        // exact "reopen with the motor already alive" facts shape.
+        let facts = converged_macos_facts();
+        assert!(
+            facts.machines[0].running,
+            "fixture sanity: our machine is up"
+        );
+        assert!(
+            facts
+                .engine_container
+                .as_ref()
+                .is_some_and(|c| c.running && c.exists),
+            "fixture sanity: the engine container is up and healthy"
+        );
+        assert_eq!(
+            reconcile(&facts, &desired_macos()),
+            Vec::<RepairAction>::new(),
+            "a healthy, digest-matching engine on a satisfying machine must be \
+             left alone — no RecreateEngine, no action at all"
+        );
+    }
+
     // ---- 1. fresh machine ------------------------------------------------
 
     #[test]
@@ -378,12 +408,18 @@ mod tests {
     }
 
     #[test]
-    fn preexisting_machine_other_version_is_left_alone_and_ours_is_created() {
+    fn preexisting_machine_wrong_provider_is_left_alone_and_ours_is_created() {
+        // MAC2-01 (verificacion-mac-2.md): "another kind of machine" is now
+        // expressed as a real, observable mismatch (provider) — podman
+        // itself has no per-machine "os version" to compare a foreign
+        // machine against. A foreign qemu machine (e.g. the owner's own,
+        // unrelated to the applehv one this app creates) must still be
+        // left alone, never adopted, regardless of what it is.
         let facts = HostFacts {
             machines: vec![MachineFact {
                 name: MachineName("old-machine".into()),
                 ours: false,
-                os_version: "5.0".into(),
+                provider: MachineProvider::Qemu,
                 ..our_machine()
             }],
             engine_container: None,

@@ -77,9 +77,21 @@ Dos escrituras distintas, con semántica distinta:
    exactamente como antes. `stage-runtime.sh <triple>` (staging normal, PRE
    firma) escribe `cdhash: null` para cada Mach-O — codesign aún no tiene
    nada que reportar en ese momento. `stage-runtime.sh --refresh-bundle-json
-   <triple>` — invocado por el pipeline justo DESPUÉS de firmar, nunca
-   antes — re-escanea el `$DEST` YA STAGEADO (sin descargar nada) y
-   reescribe `runtime-bundle.json` con el `cdhash` real de cada Mach-O.
+   <triple> [dir]` — invocado por el pipeline justo DESPUÉS de firmar, nunca
+   antes — re-escanea `dir` YA STAGEADO (sin descargar nada) y reescribe
+   `runtime-bundle.json` con el `cdhash` real de cada Mach-O.
+
+   **`dir` importa de verdad (MAC2-08, verificacion-mac-2.md)**: un DMG
+   notarizado real envió los 15 `cdhash` en `null` a pesar de que el sha256
+   SÍ casaba post-firma — la firma se aplicó al `.app` YA CONSTRUIDO
+   (`Contents/Resources/runtime/`, la COPIA que `bundle.resources` produce
+   al compilar), nunca a este árbol de staging
+   (`resources/runtime/<triple>/`), que nadie vuelve a tocar después del
+   staging normal. Omitir `dir` reescanea el árbol de STAGING — sha256
+   sigue coincidiendo (nada cambió ahí) pero el `cdhash` se queda `null`
+   para siempre, por diseño, no por fallo. El pipeline debe apuntar `dir`
+   al `Contents/Resources/runtime/` real del `.app` YA FIRMADO para que
+   la vía `cdhash` llegue a ejercitarse alguna vez.
 
 `normalize-staged-tree.sh`'s `_EXECUTABLE_BASENAMES` incluye `safent`,
 `run-safent.sh` y `provision.sh` (0755); `compose.yaml`/`caps.template.yaml`
@@ -265,7 +277,33 @@ con una firma real generada con `minisign -G`/`-S` (no un fixture inventado).
 24 tests, `cargo test` limpio. Falta cablear `run_update`/`UpdatePorts` al CLI
 embebido real — eso es integración de T011, no de esta entrega.
 
-## AppImage excluido de esta entrega (revisión de empaquetado, item 5)
+## Grapar también el `.app`, no sólo el DMG (MAC2-12, verificacion-mac-2.md)
+
+**Decisión: SÍ, grapar el `.app` además del DMG.** `xcrun stapler validate
+Safent.app` fallaba (rc=65, «does not have a ticket stapled to it») en el
+`.app` extraído de un DMG **ya grapado y con `spctl` en verde** — grapar el
+contenedor (DMG) no grapa lo que hay dentro; son dos operaciones
+independientes, cada una soportada oficialmente por
+`xcrun stapler staple <ruta>` sea un `.dmg` o un `.app`.
+
+**Por qué importa pese a que el DMG en sí ya funciona sin red**: en la propia
+prueba, `spctl -a -vv -t exec Safent.app` aceptó el `.app` sin red porque el
+vale ya estaba en la **caché local de Gatekeeper** tras montar/validar el DMG
+grapado un momento antes, en la MISMA máquina — no porque el `.app` llevara
+vale propio. Ese atajo de caché no existe en la vía del actualizador: este
+mismo artefacto de CI publica `macos/Safent.app.tar.gz` (para
+`update/tauri_updater.rs`), que el actualizador descarga y extrae
+**directamente, sin DMG de por medio en ningún momento** — no hay paso previo
+que precaliente la caché de Gatekeeper. Un `.app` sin vale propio, extraído
+así en un Mac sin red en ese instante, no tiene ninguna vía offline para
+validarse.
+
+**Pendiente para T023** (`agents-autonomy/safent-desktop.yml`, otro repo,
+`devops-engineer`): tras `xcrun notarytool wait` (el mismo paso que ya graba
+el DMG), añadir `xcrun stapler staple Safent.app` **antes** de comprimirlo a
+`Safent.app.tar.gz` — la MISMA firma/notarización cubre ambos contenedores
+(DMG y `.app` suelto), así que es grapar dos veces el mismo vale, no pedir
+una notarización nueva.
 
 `runtime-manifest.lock` → `excluded_bundle_formats.appimage` tiene el
 razonamiento completo. En corto: linuxdeploy/patchelf reescriben el RUNPATH
