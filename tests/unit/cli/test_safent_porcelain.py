@@ -105,6 +105,49 @@ case "$1" in
   rm|start|stop)
     exit 0
     ;;
+  machine)
+    shift  # drop "machine"; $1 is now list/inspect/init/start/...
+    sub="$1"; shift
+    case "$sub" in
+      list)
+        # cmd_ensure_machine only ever calls `machine list -q`; state is a
+        # plain newline-separated list of existing machine names, mutated
+        # by `init` below (MAC-05, verificacion-mac-1.md tests).
+        [ -n "${FAKE_MACHINES_STATE:-}" ] && [ -f "$FAKE_MACHINES_STATE" ] && cat "$FAKE_MACHINES_STATE"
+        exit 0
+        ;;
+      inspect)
+        mname="$1"; shift
+        exists=false
+        if [ -n "${FAKE_MACHINES_STATE:-}" ] && [ -f "$FAKE_MACHINES_STATE" ] \
+           && grep -qx "$mname" "$FAKE_MACHINES_STATE"; then
+          exists=true
+        fi
+        if [ "${1:-}" = "--format" ]; then
+          [ "$exists" = "true" ] || exit 1
+          case "$2" in
+            '{{.Rootful}}') echo "${FAKE_MACHINE_ROOTFUL:-true}" ;;
+            '{{.State}}') echo "${FAKE_MACHINE_STATE:-running}" ;;
+          esac
+          exit 0
+        fi
+        [ "$exists" = "true" ] && exit 0 || exit 1
+        ;;
+      init)
+        [ "${FAKE_MACHINE_INIT_FAILS:-false}" = "true" ] && exit 1
+        mname="$1"
+        [ -n "${FAKE_MACHINES_STATE:-}" ] && echo "$mname" >> "$FAKE_MACHINES_STATE"
+        exit 0
+        ;;
+      start)
+        [ "${FAKE_MACHINE_START_FAILS:-false}" = "true" ] && exit 1
+        exit 0
+        ;;
+      *)
+        exit 0
+        ;;
+    esac
+    ;;
   *)
     exit 0
     ;;
@@ -204,9 +247,17 @@ def _assert_stage_closure_invariant(events: list[dict]) -> None:
     assert open_stage is None, f"stage {open_stage!r} never closed"
 
 
-def _make_bundle(tmp_path: Path, entries: list[tuple[str, bytes, str]], podman_version: str = "6.1.1") -> Path:
+def _make_bundle(
+    tmp_path: Path,
+    entries: list[tuple[str, bytes, str]],
+    podman_version: str = "6.1.1",
+    cdhashes: dict[str, str] | None = None,
+) -> Path:
     """A minimal <bundle>/engine/ layout: a real copy of `safent` alongside a
-    runtime-bundle.json manifest and the binaries it describes."""
+    runtime-bundle.json manifest and the binaries it describes. `cdhashes`
+    (MAC-02, verificacion-mac-1.md): an optional {path: cdhash} overlay —
+    entries with no cdhash keep the pre-fix shape exactly (no such key at
+    all), proving old-shaped manifests still work via the sha256 fallback."""
     engine_dir = tmp_path / "bundle" / "engine"
     engine_dir.mkdir(parents=True)
     (engine_dir / "safent").write_bytes(_SAFENT_CLI.read_bytes())
@@ -217,9 +268,10 @@ def _make_bundle(tmp_path: Path, entries: list[tuple[str, bytes, str]], podman_v
         target = engine_dir / rel_path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(content)
-        manifest_entries.append(
-            {"path": rel_path, "sha256": hashlib.sha256(content).hexdigest(), "mode": mode}
-        )
+        entry = {"path": rel_path, "sha256": hashlib.sha256(content).hexdigest(), "mode": mode}
+        if cdhashes and rel_path in cdhashes:
+            entry["cdhash"] = cdhashes[rel_path]
+        manifest_entries.append(entry)
     manifest = {"podman_version": podman_version, "entries": manifest_entries}
     (engine_dir / "runtime-bundle.json").write_text(json.dumps(manifest, indent=2))
     return engine_dir
@@ -387,6 +439,120 @@ class TestEnsureMachineOnLinuxIsANoOp:
         assert "[ok]" in result.stderr
 
 
+_FAKE_UNAME = """#!/bin/sh
+case "$1" in
+  -s) echo Darwin ;;
+  -m) echo arm64 ;;
+  *) echo Darwin ;;
+esac
+"""
+
+
+def _fake_darwin(fake_bin_dir: Path) -> None:
+    """`cmd_ensure_machine`'s macOS branch is gated on `uname -s` (safent's
+    own `OS="$(uname -s ...)"`) — faking it, not the CLI's own logic, is
+    what makes these MAC-05 tests prove the REAL script's behavior on a
+    simulated Mac rather than a restated assumption. Writes straight into
+    the test's OWN `fake_bin_dir` (function-scoped fixture — a fresh tmp
+    dir per test), so no other test's PATH is affected."""
+    uname = fake_bin_dir / "uname"
+    uname.write_text(_FAKE_UNAME)
+    uname.chmod(0o755)
+
+
+def _fake_codesign(fake_bin_dir: Path, *, verify_ok: bool, cdhash: str) -> None:
+    """MAC-02 (verificacion-mac-1.md): `cmd_stage_runtime` shells out to
+    `codesign --verify --strict <path>` and `codesign -dvvv <path>` for any
+    manifest entry that carries a `cdhash` — faking the REAL binary (not
+    the CLI's own logic) so these tests prove the actual verification
+    branch, not a restated assumption. `verify_ok=False` simulates a
+    tampered/invalid signature; `cdhash` is what `-dvvv` reports back."""
+    script = (
+        "#!/bin/sh\n"
+        "case \"$1\" in\n"
+        "  --verify)\n"
+        f"    {'exit 0' if verify_ok else 'exit 1'} ;;\n"
+        "  -dvvv)\n"
+        f"    echo 'CDHash={cdhash}' ;;\n"
+        "esac\n"
+    )
+    codesign = fake_bin_dir / "codesign"
+    codesign.write_text(script)
+    codesign.chmod(0o755)
+
+
+class TestEnsureMachineNeverAdoptsAForeignMachine:
+    """MAC-05 (verificacion-mac-1.md): `cmd_ensure_machine` used to adopt
+    whichever machine `podman machine list -q | head -1` returned first —
+    on the owner's real Mac that was their OWN live `podman-machine-default`,
+    started by their own separately-installed podman. This app must only
+    ever create/use a machine under its OWN name and never so much as
+    inspect-with-intent-to-adopt anything else."""
+
+    def test_a_foreign_default_machine_is_never_touched_our_own_gets_created(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        _fake_darwin(fake_bin_dir)
+        podman_log = tmp_path / "podman.log"
+        machines_state = tmp_path / "machines.state"
+        machines_state.write_text("podman-machine-default\n")
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            extra_env={"FAKE_MACHINES_STATE": str(machines_state)},
+        )
+
+        result = _run_safent("ensure-machine", "--porcelain", env=env)
+
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        events = _parse_ndjson(result.stdout)
+        _assert_stage_closure_invariant(events)
+        assert events[-1]["t"] == "done"
+
+        calls = _podman_calls(podman_log)
+        assert not any("podman-machine-default" in c for c in calls), (
+            f"the owner's own foreign machine must never be referenced at all: {calls}"
+        )
+        assert any(c == "machine init safent-test-engine --rootful --cpus 4 --memory 8192 --disk-size 60" for c in calls), (
+            f"expected our OWN name (safent-test-engine, from SAFENT_NAME=safent-test) to be created: {calls}"
+        )
+        assert any(c.startswith("machine start safent-test-engine") for c in calls)
+
+        machine_json = json.loads((tmp_path / "home" / ".safent" / "machine.json").read_text())
+        assert machine_json == {"name": "safent-test-engine", "adopted": False}
+
+    def test_our_own_already_existing_machine_is_reused_without_recreating(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        _fake_darwin(fake_bin_dir)
+        podman_log = tmp_path / "podman.log"
+        machines_state = tmp_path / "machines.state"
+        # Steady state: OUR machine already exists (from a prior bootstrap)
+        # alongside the owner's unrelated foreign one.
+        machines_state.write_text("podman-machine-default\nsafent-test-engine\n")
+        home_dir = tmp_path / "home"
+        state_home = home_dir / ".safent"
+        state_home.mkdir(parents=True)
+        (state_home / "machine.json").write_text('{"name":"safent-test-engine","adopted":false}\n')
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=home_dir,
+            podman_log=podman_log,
+            extra_env={"FAKE_MACHINES_STATE": str(machines_state)},
+        )
+
+        result = _run_safent("ensure-machine", "--porcelain", env=env)
+
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        calls = _podman_calls(podman_log)
+        assert not any(c.startswith("machine init") for c in calls), (
+            f"an already-existing, already-ours machine must never be re-created: {calls}"
+        )
+        assert not any("podman-machine-default" in c for c in calls)
+        assert any(c.startswith("machine start safent-test-engine") for c in calls)
+
+
 class TestStageRuntime:
     def test_without_a_bundle_manifest_is_a_harmless_noop(self, tmp_path: Path, fake_bin_dir: Path) -> None:
         podman_log = tmp_path / "podman.log"
@@ -444,6 +610,108 @@ class TestStageRuntime:
         assert failed["code"] == "runtime_hash_mismatch"
         assert failed["retryable"] is False
         assert not (home_dir / ".safent" / "runtime" / "6.1.1" / "podman").exists()
+
+    def test_a_cdhash_entry_verifies_by_codesign_even_with_a_stale_sha256(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """MAC-02 (verificacion-mac-1.md): codesigning rewrites a Mach-O's
+        bytes, so its PRE-sign sha256 recorded in the manifest never
+        matches again — a `cdhash` entry must verify by signature instead
+        and stage successfully despite the (deliberately, realistically)
+        stale sha256 still sitting in the same manifest entry."""
+        _fake_codesign(fake_bin_dir, verify_ok=True, cdhash="realcdhash0123456789abcdef")
+        podman_log = tmp_path / "podman.log"
+        home_dir = tmp_path / "home"
+        engine_dir = _make_bundle(
+            tmp_path,
+            entries=[("podman", b"post-signing bytes, sha256 below is now stale", "0755")],
+            cdhashes={"podman": "realcdhash0123456789abcdef"},
+        )
+        manifest_path = engine_dir / "runtime-bundle.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["entries"][0]["sha256"] = "0" * 64  # deliberately wrong/stale
+        manifest_path.write_text(json.dumps(manifest, indent=2))
+
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=home_dir, podman_log=podman_log)
+        result = subprocess.run(
+            ["sh", str(engine_dir / "safent"), "stage-runtime", "--porcelain"],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        events = _parse_ndjson(result.stdout)
+        _assert_stage_closure_invariant(events)
+        assert events[-1]["t"] == "done"
+        staged = home_dir / ".safent" / "runtime" / "6.1.1" / "podman"
+        assert staged.read_bytes() == b"post-signing bytes, sha256 below is now stale"
+
+    def test_a_cdhash_entry_fails_closed_when_codesign_verify_rejects_it(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        _fake_codesign(fake_bin_dir, verify_ok=False, cdhash="irrelevant")
+        podman_log = tmp_path / "podman.log"
+        home_dir = tmp_path / "home"
+        engine_dir = _make_bundle(
+            tmp_path,
+            entries=[("podman", b"tampered-after-signing", "0755")],
+            cdhashes={"podman": "whatever-was-recorded-at-sign-time"},
+        )
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=home_dir, podman_log=podman_log)
+        result = subprocess.run(
+            ["sh", str(engine_dir / "safent"), "stage-runtime", "--porcelain"],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 14, f"stdout={result.stdout}\nstderr={result.stderr}"
+        failed = _parse_ndjson(result.stdout)[-1]
+        assert failed["code"] == "runtime_hash_mismatch"
+        assert failed["retryable"] is False
+        assert not (home_dir / ".safent" / "runtime" / "6.1.1" / "podman").exists()
+
+    def test_a_cdhash_entry_fails_closed_when_the_real_cdhash_does_not_match(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """codesign --verify can pass (a validly signed file) while the
+        SIGNATURE itself is not the one the manifest expects (e.g. resigned
+        by someone else, or the wrong file entirely) — cdhash equality is
+        the actual identity check, not just "is it signed at all"."""
+        _fake_codesign(fake_bin_dir, verify_ok=True, cdhash="attacker-controlled-cdhash")
+        podman_log = tmp_path / "podman.log"
+        home_dir = tmp_path / "home"
+        engine_dir = _make_bundle(
+            tmp_path,
+            entries=[("podman", b"some binary", "0755")],
+            cdhashes={"podman": "the-real-expected-cdhash"},
+        )
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=home_dir, podman_log=podman_log)
+        result = subprocess.run(
+            ["sh", str(engine_dir / "safent"), "stage-runtime", "--porcelain"],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 14, f"stdout={result.stdout}\nstderr={result.stderr}"
+        failed = _parse_ndjson(result.stdout)[-1]
+        assert failed["code"] == "runtime_hash_mismatch"
+        assert failed["retryable"] is False
+        assert not (home_dir / ".safent" / "runtime" / "6.1.1" / "podman").exists()
+
+    def test_an_entry_with_no_cdhash_key_still_verifies_by_sha256_unchanged(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """Backward compatibility: a manifest entry shaped exactly like
+        before this pass (no `cdhash` key at all — e.g. a non-Mach-O file,
+        or an older bundle) must keep working through the ORIGINAL sha256
+        check, unaffected by codesign existing or not."""
+        podman_log = tmp_path / "podman.log"
+        home_dir = tmp_path / "home"
+        engine_dir = _make_bundle(
+            tmp_path, entries=[("provision.sh", b"#!/bin/sh\necho hi\n", "0755")]
+        )
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=home_dir, podman_log=podman_log)
+        result = subprocess.run(
+            ["sh", str(engine_dir / "safent"), "stage-runtime", "--porcelain"],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        staged = home_dir / ".safent" / "runtime" / "6.1.1" / "provision.sh"
+        assert staged.read_bytes() == b"#!/bin/sh\necho hi\n"
 
 
 class TestEnsureImages:
@@ -728,3 +996,76 @@ class TestBundledPodmanGetsItsOwnStorage:
         result = _run_safent("facts", env=env)
         assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
         assert not (state_home / "podman" / "storage.conf").exists()
+
+
+class TestMachineInitUsesTheBundledImage:
+    """MAC-06 (verificacion-mac-1.md): `machine init` shipped with no
+    `--image` at all, so the bundled 932 MB `podman-machine.aarch64.
+    applehv.raw.zst` (93% of the DMG) went unused and podman would download
+    its own copy from quay.io — contradicting contracts/app-engine.md §4's
+    "crea la nuestra desde la imagen empaquetada, sin red". Only applies to
+    the PINNED podman (SAFENT_PODMAN set, same distinction
+    TestBundledPodmanGetsItsOwnStorage draws) — a bare terminal install
+    ships no machine image to point at."""
+
+    def test_machine_init_receives_image_and_provider_when_the_bundled_image_is_present(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        _fake_darwin(fake_bin_dir)
+        pinned_dir = tmp_path / "bundle"
+        pinned_dir.mkdir()
+        pinned = pinned_dir / "podman"
+        pinned.write_text(_FAKE_PODMAN)
+        pinned.chmod(0o755)
+        image_file = pinned_dir / "podman-machine.aarch64.applehv.raw.zst"
+        image_file.write_bytes(b"not a real disk image, existence is what's tested")
+
+        podman_log = tmp_path / "podman.log"
+        machines_state = tmp_path / "machines.state"
+        machines_state.write_text("")
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            extra_env={"FAKE_MACHINES_STATE": str(machines_state)},
+        )
+        env["SAFENT_PODMAN"] = str(pinned)
+
+        result = _run_safent("ensure-machine", "--porcelain", env=env)
+
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        calls = _podman_calls(podman_log)
+        expected = (
+            f"machine init safent-test-engine --image {image_file} --provider applehv "
+            "--rootful --cpus 4 --memory 8192 --disk-size 60"
+        )
+        assert expected in calls, f"expected exactly: {expected!r}\ngot: {calls}"
+
+    def test_machine_init_omits_image_and_provider_when_the_bundled_image_file_is_absent(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        _fake_darwin(fake_bin_dir)
+        pinned_dir = tmp_path / "bundle"
+        pinned_dir.mkdir()
+        pinned = pinned_dir / "podman"
+        pinned.write_text(_FAKE_PODMAN)
+        pinned.chmod(0o755)
+        # Deliberately NOT creating podman-machine.aarch64.applehv.raw.zst.
+
+        podman_log = tmp_path / "podman.log"
+        machines_state = tmp_path / "machines.state"
+        machines_state.write_text("")
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            extra_env={"FAKE_MACHINES_STATE": str(machines_state)},
+        )
+        env["SAFENT_PODMAN"] = str(pinned)
+
+        result = _run_safent("ensure-machine", "--porcelain", env=env)
+
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        calls = _podman_calls(podman_log)
+        assert "machine init safent-test-engine --rootful --cpus 4 --memory 8192 --disk-size 60" in calls
+        assert not any("--image" in c for c in calls), calls

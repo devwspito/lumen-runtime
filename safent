@@ -40,6 +40,17 @@ CLOUD_ENDPOINT="${SAFENT_CLOUD_ENDPOINT:-}"
 # SAFENT_DATA_VOLUME directly for the rare case a name-derived default isn't
 # wanted.
 DATA_VOLUME="${SAFENT_DATA_VOLUME:-${NAME}-data}"
+# macOS-only: the podman machine THIS instance creates/uses, never the
+# owner's own (MAC-05, verificacion-mac-1.md — see cmd_ensure_machine).
+# Derived from NAME for the same reason DATA_VOLUME is: a second instance
+# gets its own machine automatically instead of colliding on one name.
+MACHINE_NAME="${SAFENT_MACHINE_NAME:-${NAME}-engine}"
+# macOS-only: the bundled machine disk's FLAT filename once staged+packaged
+# (stage-runtime.sh's _stage_macos stages it at machine/<blob_filename>;
+# Tauri's bundle.resources glob flattens that away, same as bin/podman ->
+# podman — see runtime-manifest.lock's machine_image.blob_filename, the one
+# committed source for this name). MAC-06, verificacion-mac-1.md.
+MACHINE_IMAGE_FILE="${SAFENT_MACHINE_IMAGE_FILE:-podman-machine.aarch64.applehv.raw.zst}"
 # Graceful stop (item #2, spec 025 matriz): PID1 is systemd, which needs
 # SIGRTMIN+3 (not SIGTERM) to begin an orderly shutdown of every unit —
 # STOPSIGNAL SIGRTMIN+3 is baked into the image, but pinning it here too
@@ -1754,15 +1765,33 @@ cmd_stage_runtime() {
 
   paths="$(grep -o '"path": *"[^"]*"' "$manifest" | sed -E 's/.*"([^"]*)"$/\1/')"
   total="$(printf '%s\n' "$paths" | grep -c .)"
+  codesign_bin="${SAFENT_CODESIGN:-codesign}"
   done_n=0
   for path in $paths; do
     entry_block="$(awk -v p="\"path\": \"$path\"" 'index($0,p){f=1} f{print; if(/}/){exit}}' "$manifest")"
     sha="$(printf '%s\n' "$entry_block" | sed -n 's/.*"sha256": *"\([^"]*\)".*/\1/p' | head -1)"
+    cdhash="$(printf '%s\n' "$entry_block" | sed -n 's/.*"cdhash": *"\([^"]*\)".*/\1/p' | head -1)"
     mode="$(printf '%s\n' "$entry_block" | sed -n 's/.*"mode": *"\([^"]*\)".*/\1/p' | head -1)"
     mode="${mode:-0755}"
     src="$bundle_dir/$path"
     [ -f "$src" ] || _die_porcelain runtime_hash_mismatch "Falta $path en el paquete" false
-    [ "$(_sha256 "$src")" = "$sha" ] || _die_porcelain runtime_hash_mismatch "$path no coincide con el manifiesto" false
+    if [ -n "$cdhash" ]; then
+      # MAC-02 (verificacion-mac-1.md): codesigning rewrites a Mach-O's own
+      # bytes, so sha256 (still recorded above, but no longer the check for
+      # THIS file) never matches a real signed package again — verify
+      # identity+integrity the way the platform itself does instead.
+      "$codesign_bin" --verify --strict "$src" >/dev/null 2>&1 \
+        || _die_porcelain runtime_hash_mismatch "$path no supera codesign --verify" false
+      # `|| true` on the WHOLE pipeline — under `set -e`, a corrupt/edge-
+      # case signature making `codesign -dvvv` exit non-zero here must
+      # still reach the explicit, porcelain-aware comparison below (an
+      # honest runtime_hash_mismatch), never a raw, uncaught shell abort
+      # with no `failed` event at all.
+      real_cdhash="$("$codesign_bin" -dvvv "$src" 2>/dev/null | sed -n 's/^CDHash=\(.*\)$/\1/p' | head -1 || true)"
+      [ "$real_cdhash" = "$cdhash" ] || _die_porcelain runtime_hash_mismatch "$path no coincide con el cdhash del manifiesto" false
+    else
+      [ "$(_sha256 "$src")" = "$sha" ] || _die_porcelain runtime_hash_mismatch "$path no coincide con el manifiesto" false
+    fi
     dst="$target/$path"
     mkdir -p "$(dirname "$dst")" 2>/dev/null || true
     cp "$src" "$dst" && chmod "$mode" "$dst"
@@ -1785,12 +1814,60 @@ cmd_ensure_machine() {
     _stage_done
     return 0
   fi
-  name="$("$RT" machine list -q 2>/dev/null | head -1)"
-  if [ -z "$name" ]; then
-    "$RT" machine init --rootful --cpus 4 --memory 8192 --disk-size 60 >&2 \
-      || _die_porcelain machine_create_failed "No se pudo crear la maquina" true
-    name="$("$RT" machine list -q 2>/dev/null | head -1)"
+
+  # MAC-05 (verificacion-mac-1.md): NEVER take "whichever machine podman
+  # happens to list first" — that adopted the OWNER's own live machine
+  # (their podman-machine-default, started by their OWN podman) on a real
+  # Mac. This instance only ever targets its OWN name (MACHINE_NAME) and
+  # ignores every other machine, full stop — no adoption of anything this
+  # app did not itself create.
+  _mj="$SAFENT_STATE_HOME/machine.json"
+  name=""
+  if [ -f "$_mj" ]; then
+    _recorded_name="$(_manifest_field "$_mj" name)"
+    if [ -n "$_recorded_name" ] && "$RT" machine inspect "$_recorded_name" >/dev/null 2>&1; then
+      name="$_recorded_name"
+    fi
   fi
+
+  if [ -z "$name" ]; then
+    name="$MACHINE_NAME"
+    if ! "$RT" machine inspect "$name" >/dev/null 2>&1; then
+      # MAC-06 (verificacion-mac-1.md): without --image, podman would
+      # download its OWN copy of the very same 932 MB machine image this
+      # app already ships (93% of the DMG) and needs network to do it —
+      # contracts/app-engine.md §4 promises "sin red". Only when running
+      # the BUNDLED podman (never a bare terminal install's own, which
+      # ships no machine image at all) AND the file is actually there.
+      # --provider applehv: the bundled disk boots under either backend on
+      # Apple Silicon (runtime-manifest.lock's own machine_image note), but
+      # vfkit (Apple's Virtualization.framework, zero extra runtime deps)
+      # is what this app bundles vfkit/gvproxy specifically to drive for a
+      # FRESH create — krunkit + its GPU libs (libkrun/libepoxy/MoltenVK/
+      # virglrenderer) travel only to start a machine already ADOPTED under
+      # libkrun from a previous run, never to create a new one.
+      _machine_image=""
+      if [ -n "${_podman_bundle_dir:-}" ] && [ -f "$_podman_bundle_dir/$MACHINE_IMAGE_FILE" ]; then
+        _machine_image="$_podman_bundle_dir/$MACHINE_IMAGE_FILE"
+      fi
+      if [ -n "$_machine_image" ]; then
+        "$RT" machine init "$name" --image "$_machine_image" --provider applehv \
+          --rootful --cpus 4 --memory 8192 --disk-size 60 >&2 \
+          || _die_porcelain machine_create_failed "No se pudo crear la maquina" true
+      else
+        "$RT" machine init "$name" --rootful --cpus 4 --memory 8192 --disk-size 60 >&2 \
+          || _die_porcelain machine_create_failed "No se pudo crear la maquina" true
+      fi
+    fi
+    # Written (or re-written) every time we settle on OUR OWN name — never
+    # "true" here: this CLI no longer has an adoption path for a machine it
+    # did not itself create/name, so there is nothing to mark adopted=true
+    # for. `_uninstall_machine_if_ours`/`_machines_json` read this exact
+    # shape (name, adopted).
+    mkdir -p "$SAFENT_STATE_HOME" 2>/dev/null || true
+    printf '{"name":"%s","adopted":false}\n' "$(_json_str "$name")" > "$_mj" 2>/dev/null || true
+  fi
+
   rootful="$("$RT" machine inspect "$name" --format '{{.Rootful}}' 2>/dev/null | head -1)"
   [ "$rootful" = "true" ] || _die_porcelain machine_create_failed "La maquina existente es rootless" false
   "$RT" machine start "$name" >&2 2>/dev/null || "$RT" info >/dev/null 2>&1 \

@@ -410,7 +410,7 @@ impl BootService {
 // caller of `start`; nothing above this line needs Tauri to compile or test.
 // ===========================================================================
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tauri::{AppHandle, Emitter, Listener, Manager};
 
@@ -625,29 +625,29 @@ pub fn start(app: AppHandle) {
 /// effort, since a stop that cannot be confirmed still must not block the
 /// window from closing or the restart from proceeding.
 fn stop_engine_best_effort(app: &AppHandle) {
-    if let Ok(desired) = desired_state_from_env() {
-        let config = resolve_config(app, desired.engine_image, desired.companion_image);
+    let runtime_dir = resolve_runtime_dir(app);
+    if let Ok(desired) = desired_state_from_runtime(&runtime_dir) {
+        let config = resolve_config_with_fallback(
+            runtime_dir,
+            desired.engine_image,
+            desired.companion_image,
+        );
         let _ = EmbeddedCliDriver::new(config).stop();
     }
 }
 
 fn run_once(app: AppHandle, cancel: CancelSignal) {
     let notifier = TauriNotifier { app: app.clone() };
-    let desired = match desired_state_from_env() {
+    let runtime_dir = resolve_runtime_dir(&app);
+    let desired = match desired_state_from_runtime(&runtime_dir) {
         Ok(desired) => desired,
-        Err(message) => {
-            notifier.notify(&DomainEvent::EngineDegraded {
-                cause: FailureCause {
-                    code: FailureCode::CliPorcelainUnsupported,
-                    message,
-                    retryable: false,
-                },
-            });
+        Err(cause) => {
+            notifier.notify(&DomainEvent::EngineDegraded { cause });
             return;
         }
     };
-    let config = resolve_config(
-        &app,
+    let config = resolve_config_with_fallback(
+        runtime_dir,
         desired.engine_image.clone(),
         desired.companion_image.clone(),
     );
@@ -697,30 +697,106 @@ fn app_version() -> SemVer {
     SemVer::parse(env!("CARGO_PKG_VERSION")).unwrap_or_else(|_| SemVer::parse("0.0.0").unwrap())
 }
 
-/// The runtime manifest (`desktop/runtime-manifest.lock`, T010) is not in
-/// this worktree yet — `SAFENT_ENGINE_DIGEST`/`SAFENT_COMPANION_DIGEST` are
-/// the seam until it lands. Missing/malformed fails closed into `Degraded`
-/// with a message that says exactly what is missing, never a panic.
-pub fn desired_state_from_env() -> Result<DesiredState, String> {
-    let engine_digest = std::env::var("SAFENT_ENGINE_DIGEST").map_err(|_| {
-        "SAFENT_ENGINE_DIGEST no está definido (falta el manifiesto del runtime)".to_string()
+/// One entry of `runtime-bundle.json`'s `engine_image`/`companion_image`
+/// fields (MAC-03, verificacion-mac-1.md) — `digest` is `Option` because an
+/// UNSET one is a real, expected state (a checkout the release pipeline has
+/// not pinned yet), not a parse error.
+#[derive(serde::Deserialize)]
+struct BundleImageRef {
+    repo: String,
+    digest: Option<String>,
+}
+
+/// The subset of `runtime-bundle.json` (`stage-runtime.sh`'s
+/// `_write_runtime_bundle_manifest`) this module reads — `#[serde(default)]`
+/// on both fields because older bundles staged before this pass have
+/// neither key at all, and that must fail closed with `EngineDigestMissing`
+/// exactly like a present-but-null `digest` does, never `serde_json::Error`.
+#[derive(serde::Deserialize, Default)]
+struct RuntimeBundleManifest {
+    #[serde(default)]
+    engine_image: Option<BundleImageRef>,
+    #[serde(default)]
+    companion_image: Option<BundleImageRef>,
+}
+
+fn engine_digest_missing(message: impl Into<String>) -> FailureCause {
+    FailureCause {
+        code: FailureCode::EngineDigestMissing,
+        message: message.into(),
+        retryable: false,
+    }
+}
+
+/// Reads the engine/companion image references straight from the shipped
+/// `runtime-bundle.json` (`runtime_dir.join("runtime-bundle.json")` — the
+/// SAME directory `resolve_runtime_dir`/`resolve_config_with_fallback`
+/// resolve the CLI/podman paths from). The release pipeline pins the real
+/// digests into `runtime-manifest.lock`'s `engine_image`/`companion_image`
+/// (mirroring the existing `machine_image` entry's pattern — a human/
+/// ops-release-publisher fact, never queried live here); `stage-runtime.sh`
+/// copies them into `runtime-bundle.json` at staging time.
+fn images_from_runtime_bundle(
+    runtime_dir: &Path,
+) -> Result<(ImageRef, Option<ImageRef>), FailureCause> {
+    let manifest_path = runtime_dir.join("runtime-bundle.json");
+    let raw = std::fs::read_to_string(&manifest_path).map_err(|_| {
+        engine_digest_missing(format!(
+            "no se encontró {} — el paquete no incluye el manifiesto del runtime",
+            manifest_path.display()
+        ))
     })?;
-    // Same seam as the digest itself (doc comment below): the published repo
-    // is the production default, overridable for local dev/testing against
-    // an already-built image (e.g. `localhost/safent-runtime`) without
-    // touching a real registry — `cmd_ensure_images`/`podman pull` always
-    // contact the registry named in the reference, even for content already
-    // present locally under a DIFFERENT repo name, so pointing this at a
-    // `localhost/...` image is what lets reconcile converge without network.
-    let engine_repo = std::env::var("SAFENT_ENGINE_IMAGE_REPO")
-        .unwrap_or_else(|_| "ghcr.io/devwspito/safent".to_string());
-    let engine_image = ImageRef::new(engine_repo, engine_digest)
-        .map_err(|_| "SAFENT_ENGINE_DIGEST no tiene forma de digest sha256:...".to_string())?;
-    let companion_repo = std::env::var("SAFENT_COMPANION_IMAGE_REPO")
-        .unwrap_or_else(|_| "ghcr.io/devwspito/safent-ads".to_string());
-    let companion_image = std::env::var("SAFENT_COMPANION_DIGEST")
-        .ok()
-        .and_then(|digest| ImageRef::new(companion_repo, digest).ok());
+    let manifest: RuntimeBundleManifest = serde_json::from_str(&raw)
+        .map_err(|e| engine_digest_missing(format!("runtime-bundle.json no es válido: {e}")))?;
+    let engine = manifest
+        .engine_image
+        .ok_or_else(|| engine_digest_missing("runtime-bundle.json no trae engine_image"))?;
+    let engine_digest = engine.digest.ok_or_else(|| {
+        engine_digest_missing(
+            "runtime-bundle.json.engine_image.digest es null — el pipeline de release \
+             aún no fijó el digest publicado",
+        )
+    })?;
+    let engine_image = ImageRef::new(engine.repo, engine_digest).map_err(|_| {
+        engine_digest_missing("runtime-bundle.json.engine_image.digest no tiene forma sha256:...")
+    })?;
+    let companion_image = manifest
+        .companion_image
+        .and_then(|c| c.digest.map(|d| (c.repo, d)))
+        .and_then(|(repo, digest)| ImageRef::new(repo, digest).ok());
+    Ok((engine_image, companion_image))
+}
+
+/// Where the engine/companion image digests a boot needs come from — MAC-03
+/// (verificacion-mac-1.md): before this fix they came ONLY from
+/// `SAFENT_ENGINE_DIGEST`/`SAFENT_COMPANION_DIGEST` env vars that nothing in
+/// the real packaging pipeline ever sets (no CI workflow, launcher, or
+/// `.desktop`/`.plist` file exports either — grepped the whole repo), so a
+/// double-click of the notarized DMG hit this unconditionally. The digest a
+/// packaged app pulls is a build-time fact, not a runtime guess: it now
+/// comes from `runtime-bundle.json`, shipped next to the CLI inside
+/// `runtime_dir` (see `images_from_runtime_bundle`). The env vars still
+/// work, but ONLY as an explicit override for tests/local dev that do not
+/// have a real staged bundle to point at — never production's only source.
+/// Missing/malformed fails closed into `Degraded` with the honest
+/// `engine_digest_missing`, never a panic.
+pub fn desired_state_from_runtime(runtime_dir: &Path) -> Result<DesiredState, FailureCause> {
+    let (engine_image, companion_image) = match std::env::var("SAFENT_ENGINE_DIGEST") {
+        Ok(engine_digest) => {
+            let engine_repo = std::env::var("SAFENT_ENGINE_IMAGE_REPO")
+                .unwrap_or_else(|_| "ghcr.io/devwspito/safent".to_string());
+            let engine_image = ImageRef::new(engine_repo, engine_digest).map_err(|_| {
+                engine_digest_missing("SAFENT_ENGINE_DIGEST no tiene forma de digest sha256:...")
+            })?;
+            let companion_repo = std::env::var("SAFENT_COMPANION_IMAGE_REPO")
+                .unwrap_or_else(|_| "ghcr.io/devwspito/safent-ads".to_string());
+            let companion_image = std::env::var("SAFENT_COMPANION_DIGEST")
+                .ok()
+                .and_then(|digest| ImageRef::new(companion_repo, digest).ok());
+            (engine_image, companion_image)
+        }
+        Err(_) => images_from_runtime_bundle(runtime_dir)?,
+    };
 
     const GIB: u64 = 1024 * 1024 * 1024;
     Ok(DesiredState {
@@ -750,31 +826,74 @@ fn desired_machine_spec() -> Option<MachineSpec> {
     }
 }
 
-/// Resolves the bundled runtime's paths for a windowed run, read off the
-/// Tauri resource dir. `desktop/RUNTIME-BUNDLE.md`'s own documented formula
-/// — verified there against the real `glob` crate, not assumed — is
-/// `resource_dir().join("runtime").join("podman")`, NO target-triple
+/// Resolves the bundled runtime's directory for a windowed run, read off
+/// the Tauri resource dir. `desktop/RUNTIME-BUNDLE.md`'s own documented
+/// formula — verified there against the real `glob` crate, not assumed —
+/// is `resource_dir().join("runtime").join("podman")`, NO target-triple
 /// component: `bundle.resources`'s single glob pattern flattens the
 /// per-triple staged tree (`resources/runtime/<triple>/{bin,libexec,etc}/...`,
 /// what `stage-runtime.sh` produces) into `$RESOURCES/runtime/<basename>` —
 /// only one triple's files ever ship in a given build, so there is nothing
-/// left to select between at runtime. `selftest.rs`'s own fallback already
-/// gets this right (`exe.parent().join("runtime")`, no triple either); this
-/// function's extra `.join(target_triple())` was the odd one out and would
-/// have looked for the runtime one directory too deep in a real packaged
-/// app. Thin wrapper over `resolve_config_with_fallback` (this module's only
-/// Tauri-dependent path-resolution code).
-pub fn resolve_config(
-    app: &AppHandle,
-    engine_image: ImageRef,
-    companion_image: Option<ImageRef>,
-) -> EmbeddedCliConfig {
+/// left to select between at runtime. Exposed on its own (MAC-03,
+/// verificacion-mac-1.md) so a caller that needs to read
+/// `runtime-bundle.json` — which sits INSIDE this same directory — gets the
+/// exact same path `resolve_config_with_fallback` will independently derive
+/// the CLI/podman paths from, rather than resolving it a second, possibly
+/// divergent way. The `unwrap_or_else` branch (Tauri itself failing to
+/// report a resource dir, an edge case it guards against once packaged
+/// correctly) falls back to the SAME structural resolver `selftest.rs` uses
+/// (`runtime_dir_next_to_exe`) rather than a bare relative literal.
+pub fn resolve_runtime_dir(app: &AppHandle) -> PathBuf {
     let fallback = app
         .path()
         .resource_dir()
         .map(|dir| dir.join("runtime"))
-        .unwrap_or_else(|_| PathBuf::from("runtime"));
-    resolve_config_with_fallback(fallback, engine_image, companion_image)
+        .unwrap_or_else(|_| {
+            std::env::current_exe()
+                .map(|exe| runtime_dir_next_to_exe(&exe))
+                .unwrap_or_else(|_| PathBuf::from("runtime"))
+        });
+    final_runtime_dir(fallback)
+}
+
+/// `SAFENT_RUNTIME_DIR` overrides `fallback` — the same override
+/// `resolve_config_with_fallback` needs for the CLI/podman paths AND
+/// `images_from_runtime_bundle` needs for `runtime-bundle.json` (MAC-03):
+/// both must agree on the SAME directory, or a test/dev override honored by
+/// only one of them silently looks for the manifest somewhere the CLI paths
+/// do not (and vice versa).
+pub fn final_runtime_dir(fallback: PathBuf) -> PathBuf {
+    std::env::var_os("SAFENT_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or(fallback)
+}
+
+/// Shared, structural resolver for "where does the runtime this executable
+/// ships with live" — the ONE place both `resolve_config`'s own fallback-of-
+/// a-fallback and `selftest.rs::run_to_ready` (headless: no `AppHandle`, no
+/// window, no resource bundle to ask Tauri for) derive it from
+/// `std::env::current_exe()`.
+///
+/// MAC-04 (verificacion-mac-1.md): before this fix `selftest.rs` computed
+/// `exe.parent().join("runtime")` unconditionally — correct for the Linux/
+/// `.deb` layout (`safent-desktop` really does sit directly next to
+/// `runtime/`) but WRONG for a macOS `.app`: the executable lives at
+/// `Contents/MacOS/<bin>`, and every shipped resource — `runtime/` included
+/// — is a SIBLING of `MacOS/` at `Contents/Resources/`, a directory
+/// `Contents/MacOS/runtime` is never created inside. Detects the bundle
+/// shape STRUCTURALLY (the executable's parent directory is literally named
+/// `MacOS`, exactly how every Apple bundle names it, Tauri's bundler
+/// included) rather than `cfg!(target_os)`, so both layouts are exercised by
+/// the SAME test binary regardless of which OS runs it.
+pub fn runtime_dir_next_to_exe(exe: &Path) -> PathBuf {
+    let bin_dir = exe.parent().unwrap_or(exe);
+    let is_macos_bundle = bin_dir.file_name().and_then(|n| n.to_str()) == Some("MacOS");
+    if is_macos_bundle {
+        if let Some(contents_dir) = bin_dir.parent() {
+            return contents_dir.join("Resources").join("runtime");
+        }
+    }
+    bin_dir.join("runtime")
 }
 
 /// `SAFENT_RUNTIME_DIR`/`SAFENT_CLI_PATH`/`SAFENT_PODMAN_PATH`/
@@ -787,9 +906,7 @@ pub fn resolve_config_with_fallback(
     engine_image: ImageRef,
     companion_image: Option<ImageRef>,
 ) -> EmbeddedCliConfig {
-    let runtime_dir = std::env::var_os("SAFENT_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or(fallback_runtime_dir);
+    let runtime_dir = final_runtime_dir(fallback_runtime_dir);
     let cli_path = std::env::var_os("SAFENT_CLI_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|| runtime_dir.join("safent"));
@@ -839,6 +956,31 @@ mod tests {
             min_free_disk_bytes: Bytes(4 * GIB),
             min_total_memory_bytes: Bytes(8 * GIB),
         }
+    }
+
+    /// MAC-04: the Linux/.deb layout — `safent-desktop` sits directly next
+    /// to `runtime/`, no bundle indirection at all.
+    #[test]
+    fn runtime_dir_next_to_exe_uses_the_bin_dir_directly_on_a_linux_layout() {
+        let exe = Path::new("/opt/Safent/safent-desktop");
+        assert_eq!(
+            runtime_dir_next_to_exe(exe),
+            PathBuf::from("/opt/Safent/runtime")
+        );
+    }
+
+    /// MAC-04 (verificacion-mac-1.md): the macOS `.app` layout — the
+    /// executable lives at `Contents/MacOS/<bin>`; `runtime/` is a SIBLING
+    /// of `MacOS/` at `Contents/Resources/runtime`, never inside `MacOS/`
+    /// itself. Before this fix, `selftest.rs` resolved
+    /// `Contents/MacOS/runtime` here — a path that is never created.
+    #[test]
+    fn runtime_dir_next_to_exe_finds_resources_sibling_on_a_macos_bundle_layout() {
+        let exe = Path::new("/Applications/Safent.app/Contents/MacOS/safent-desktop");
+        assert_eq!(
+            runtime_dir_next_to_exe(exe),
+            PathBuf::from("/Applications/Safent.app/Contents/Resources/runtime")
+        );
     }
 
     fn converged_facts() -> HostFacts {
@@ -1105,5 +1247,160 @@ mod tests {
                 "expected Ready (cancel rejected past the point of no return), got {other:?}"
             ),
         }
+    }
+}
+
+/// MAC-03 (verificacion-mac-1.md): `desired_state_from_runtime` reads
+/// `runtime-bundle.json`'s `engine_image`/`companion_image`, falling back
+/// to `SAFENT_ENGINE_DIGEST`/`SAFENT_COMPANION_DIGEST` ONLY as an explicit
+/// override — a separate module (not `mod tests` above) because these
+/// mutate real process env vars (`std::env::set_var` is not thread-safe
+/// across `cargo test`'s parallel threads in general) and need their own
+/// serializing mutex, the same technique
+/// `engine_adapter_real_cli_contract.rs` uses.
+#[cfg(test)]
+mod desired_state_from_runtime_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    const ENGINE_DIGEST_VARS: &[&str] = &[
+        "SAFENT_ENGINE_DIGEST",
+        "SAFENT_ENGINE_IMAGE_REPO",
+        "SAFENT_COMPANION_DIGEST",
+        "SAFENT_COMPANION_IMAGE_REPO",
+    ];
+
+    /// # Safety
+    /// Caller must hold `ENV_LOCK` for the duration of every effect this
+    /// clears — mirrors `engine_adapter_real_cli_contract.rs`'s own
+    /// `set_env` doc comment.
+    unsafe fn clear_digest_env() {
+        for var in ENGINE_DIGEST_VARS {
+            unsafe { std::env::remove_var(var) };
+        }
+    }
+
+    fn unique_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "safent-bundle-manifest-{}-{}-{label}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create unique test dir");
+        dir
+    }
+
+    fn write_bundle_json(dir: &Path, body: &str) {
+        std::fs::write(dir.join("runtime-bundle.json"), body).expect("write runtime-bundle.json");
+    }
+
+    #[test]
+    fn reads_the_engine_digest_from_a_shipped_runtime_bundle_manifest() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: ENV_LOCK held for the whole test body.
+        unsafe { clear_digest_env() };
+        let dir = unique_dir("valid");
+        write_bundle_json(
+            &dir,
+            r#"{"podman_version":"6.1.1","entries":[],
+                "engine_image":{"repo":"ghcr.io/devwspito/safent","digest":"sha256:engine-good"}}"#,
+        );
+
+        let desired = desired_state_from_runtime(&dir)
+            .expect("a valid manifest with a pinned digest must resolve");
+
+        assert_eq!(
+            desired.engine_image.reference(),
+            "ghcr.io/devwspito/safent@sha256:engine-good"
+        );
+        assert!(desired.companion_image.is_none());
+    }
+
+    #[test]
+    fn reads_both_engine_and_companion_digests_when_both_are_pinned() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: ENV_LOCK held for the whole test body.
+        unsafe { clear_digest_env() };
+        let dir = unique_dir("with-companion");
+        write_bundle_json(
+            &dir,
+            r#"{"podman_version":"6.1.1","entries":[],
+                "engine_image":{"repo":"ghcr.io/devwspito/safent","digest":"sha256:engine-good"},
+                "companion_image":{"repo":"ghcr.io/devwspito/safent-ads","digest":"sha256:ads-good"}}"#,
+        );
+
+        let desired = desired_state_from_runtime(&dir).expect("both digests pinned must resolve");
+
+        assert_eq!(
+            desired
+                .companion_image
+                .expect("companion_image must be Some")
+                .reference(),
+            "ghcr.io/devwspito/safent-ads@sha256:ads-good"
+        );
+    }
+
+    #[test]
+    fn a_missing_bundle_manifest_fails_closed_with_engine_digest_missing() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: ENV_LOCK held for the whole test body.
+        unsafe { clear_digest_env() };
+        let dir = unique_dir("no-manifest-at-all");
+
+        let cause = desired_state_from_runtime(&dir)
+            .expect_err("no runtime-bundle.json at all must not silently succeed");
+
+        assert_eq!(cause.code, FailureCode::EngineDigestMissing);
+        assert!(!cause.retryable);
+    }
+
+    #[test]
+    fn a_null_engine_digest_in_the_manifest_fails_closed_with_engine_digest_missing() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: ENV_LOCK held for the whole test body.
+        unsafe { clear_digest_env() };
+        let dir = unique_dir("null-digest");
+        // Exactly what stage-runtime.sh writes for a checkout the release
+        // pipeline has not pinned a real digest into yet (MAC-03's own
+        // documented seam) — a legitimate state, not a parse error.
+        write_bundle_json(
+            &dir,
+            r#"{"podman_version":"6.1.1","entries":[],
+                "engine_image":{"repo":"ghcr.io/devwspito/safent","digest":null}}"#,
+        );
+
+        let cause = desired_state_from_runtime(&dir)
+            .expect_err("a null digest is not yet pinned — must fail closed, not guess");
+
+        assert_eq!(cause.code, FailureCode::EngineDigestMissing);
+        assert!(!cause.retryable);
+    }
+
+    #[test]
+    fn an_env_override_is_used_even_when_the_shipped_manifest_is_missing_or_broken() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: ENV_LOCK held for the whole test body.
+        unsafe {
+            clear_digest_env();
+            std::env::set_var("SAFENT_ENGINE_DIGEST", "sha256:from-env-override");
+        }
+        let dir = unique_dir("no-manifest-env-override");
+
+        let result = desired_state_from_runtime(&dir);
+
+        // SAFETY: ENV_LOCK still held — clear before any assertion can panic
+        // and skip it, so a failure here cannot leak the override to a
+        // later test.
+        unsafe { clear_digest_env() };
+
+        let desired = result.expect("an explicit env override must work without a real bundle");
+        assert_eq!(
+            desired.engine_image.reference(),
+            "ghcr.io/devwspito/safent@sha256:from-env-override"
+        );
     }
 }

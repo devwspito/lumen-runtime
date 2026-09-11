@@ -154,6 +154,23 @@ fn write_fake_podman(dir: &Path) -> PathBuf {
     path
 }
 
+/// MAC-01: the real CLI's `cmd_facts` derives `os_id` from its OWN `uname -s`
+/// call (`safent:126,1648`), not from anything the adapter controls — the
+/// only way to prove the adapter parses a REAL macOS observation (not a
+/// hand-rolled assumption) on this Linux CI host is to intercept `uname`
+/// itself ahead of the real ones on `PATH`. Answers both call shapes the
+/// script makes (`-s` for the OS, `-m` for the arch, `safent:1649`).
+fn write_fake_uname(dir: &Path) -> PathBuf {
+    let path = dir.join("uname");
+    std::fs::write(
+        &path,
+        "#!/bin/sh\ncase \"$1\" in\n  -s) echo Darwin ;;\n  -m) echo arm64 ;;\n  *) echo Darwin ;;\nesac\n",
+    )
+    .expect("write fake uname");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
 /// # Safety
 /// Caller must hold `ENV_LOCK` for the duration of every effect this env
 /// setup drives (spawning `safent`, reading its result) — see `ENV_LOCK`'s
@@ -268,6 +285,40 @@ fn real_facts_of_a_converged_engine_deserializes_field_for_field() {
     assert!(facts.data_volume);
     assert_eq!(facts.app_version.as_str(), "0.8.42");
     assert!(!facts.another_instance_running);
+}
+
+/// MAC-01 (verificacion-mac-1.md): the real `safent facts --json --porcelain`
+/// on an actual Mac reports `"os":"darwin"` (`cmd_facts`'s own `Darwin) os_id=
+/// darwin` branch) — before this pass the adapter's `map_os` only accepted
+/// `"macos"`, a string the CLI never emits, so `HostOs::Unsupported` reached
+/// `reconcile::preflight_violation` and the engine never started on the
+/// owner's MacBook Air. Faking `uname` (not the adapter, not the CLI's
+/// output) is what makes this a REAL-CLI proof rather than a restatement of
+/// the fix: the script itself decides `os_id` from `uname -s`, exactly as it
+/// would on the real hardware.
+#[test]
+fn real_facts_report_macos_when_uname_reports_darwin() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let fx = healthy_fixture("darwin-facts", "engine-good");
+    let uname_dir = unique_dir("darwin-facts-uname");
+    write_fake_uname(&uname_dir);
+    let original_path = std::env::var("PATH").unwrap_or_default();
+    // SAFETY: ENV_LOCK held (see healthy_fixture's own comment) — restored
+    // below before releasing the lock so no other test observes a Darwin
+    // `uname` on this Linux host.
+    unsafe {
+        set_env("PATH", &format!("{}:{original_path}", uname_dir.display()));
+    }
+
+    let result = EmbeddedCliDriver::new(config(&fx, "engine-good")).observe();
+
+    // SAFETY: ENV_LOCK still held.
+    unsafe {
+        set_env("PATH", &original_path);
+    }
+
+    let facts = result.expect("a fake-macOS facts observation must still parse");
+    assert_eq!(facts.os, HostOs::MacOs);
 }
 
 #[test]
